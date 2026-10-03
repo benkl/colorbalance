@@ -6,14 +6,17 @@
 //! any UI crate. RAW-specific decoding is injected through traits defined
 //! here and implemented in `colorbalance-raw`.
 //!
-//! See `docs/IMPLEMENTATION_PLAN.md` for the product contract and
-//! `docs/ARCHITECTURE.md` for the platform decisions.
+//! See `docs/IMPLEMENTATION_PLAN.md` for the product contract,
+//! `docs/ARCHITECTURE.md` for the platform decisions, and
+//! `docs/CONTRACTS.md` for the binding module interfaces.
 
 pub mod chart;
 pub mod contract;
+pub mod decode;
 
 pub use chart::{ChartModel, ChartPatch, ChartRevision};
 pub use contract::{
-    DecodeContract, DemosaicAlgorithm, HighlightPolicy, OrientationPolicy, OutputColor,
-    OutputDepth, WhiteBalancePolicy,
+    DecodeContract, DemosaicAlgorithm, HighlightPolicy, OutputColor, OutputDepth,
+    OrientationPolicy, WhiteBalancePolicy,
 };
+pub use decode::{CameraIdentity, DecodeError, DecodedImage, RawDecoder};

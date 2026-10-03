@@ -22,7 +22,7 @@ Tauri ships first because it reuses the web UI while keeping RAW decoding native
 | Concern | Technology | Reason |
 | --- | --- | --- |
 | Color engine, fitting, batch logic | Rust | One core compiles to native, WebAssembly, and server workers; predictable memory behavior for large images |
-| RAW decode | LibRaw through a Rust FFI layer | Broad camera coverage, documented black and saturation levels, controllable demosaic and white balance |
+| RAW decode | Built-in pure-Rust DNG decoder (shipped), LibRaw FFI planned for other camera formats | Deterministic normalize-and-flag decode now; broad camera coverage later, cross-checked against the built-in decoder |
 | Chart detection | Rust engine using OpenCV bindings | Deterministic templated detection in the shipped product |
 | Matrix math | `nalgebra` | Least squares and 3x3 fitting without a hand-rolled solver |
 | Parallelism | `rayon` | Native per-image and per-tile CPU parallelism |
@@ -43,15 +43,12 @@ Python is the reference and verification stack, not the production pixel path. I
 ```text
 crates/
   colorbalance-core/    # color math, chart sampling, fitting, profiles, quality gates
-  colorbalance-raw/     # LibRaw FFI, decode contract, saturation masks (native only)
+  colorbalance-raw/     # built-in DNG decoder now; LibRaw FFI planned (native only)
   colorbalance-cli/     # clap CLI (native only)
 apps/
   desktop/              # Tauri 2 shell (native only)
   web/                  # browser experiment (milestone 5)
 research/               # Python verification notebooks and fixture generators
-docs/                   # this file, the implementation plan, format specs
-tests/                  # cross-crate integration tests and fixtures
-```
 
 `colorbalance-core` must compile for native and `wasm32` targets and must not depend on LibRaw, Tauri, or the CLI. Everything RAW-specific lives in `colorbalance-raw` and is injected as a trait implementation.
 
@@ -150,5 +147,6 @@ Rules:
 | D7 | CPU paths first; WebGPU is optional acceleration, never required | Accepted | 2026-10-03 |
 | D8 | Profile format is `*.cbprofile.json` regardless of deployment mode | Accepted | 2026-10-03 |
 | D9 | CLF and `.cube` exports require the normalized camera-RGB decode contract and do not replace it | Accepted | 2026-10-03 |
+| D10 | Engine ships a built-in pure-Rust DNG decoder (uncompressed 16-bit CFA); LibRaw FFI remains planned for other camera formats and must agree with the built-in decoder on overlapping DNGs | Accepted | 2026-10-03 |
 
 Earlier planning proposed Python with PySide6. Decisions D2 through D4 supersede that stack because browser delivery became a product requirement. The milestone structure, color pipeline, quality gates, and interchange rules in `IMPLEMENTATION_PLAN.md` are unchanged.
