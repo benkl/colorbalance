@@ -29,36 +29,39 @@ The first release rejects capture-exposure mismatch unless the user supplies an 
 
 ## Platform and technology decision
 
-Build a local, cross-platform desktop application with a reusable Python core. Deliver the core and command-line interface first, then put a PySide6 interface over the same use cases.
+Build a Rust color engine and deliver it through a command-line interface, a Tauri 2 desktop application with a React UI, and later a browser or hosted mode. The full platform and performance record, including deployment modes and the decision log, lives in `docs/ARCHITECTURE.md`.
 
-Python is the practical choice here. The maintained libraries for ColorChecker detection, color-science calculations, RAW decoding, and OpenColorIO already expose NumPy arrays. A Rust or C++ implementation would spend the first releases rebuilding or binding those parts without improving the fitting model. Keep pixel operations vectorized or in native libraries so Python does not run per-pixel loops.
+Rust is the choice because one core compiles to native desktop, WebAssembly for the browser, and server workers. The product needs local high-performance RAW processing and a credible web path, and shipping two color implementations would let results drift between platforms. Python remains the research and verification stack for independent numerical fixtures. It is never a runtime dependency.
 
-Target Python 3.12 on Windows, macOS, and Linux. Windows is the first packaged target. Build macOS and Linux packages after the reference workflow passes on those systems.
+Target 64-bit Windows, macOS, and Linux. Windows is the first packaged target. Build macOS and Linux packages after the reference workflow passes on those systems.
 
 ### Proposed stack
 
 | Concern | Library or tool | Reason |
 | --- | --- | --- |
-| Numeric arrays and fitting | NumPy and SciPy | Stable least-squares, robust optimization, native vectorized operations |
-| Color models, chart datasets, Delta E | `colour-science` | Published chart datasets and tested color conversions and correction algorithms |
-| Chart detection | `colour-checker-detection` with OpenCV | Supports ColorChecker Classic segmentation, templated detection, and inference APIs |
-| RAW decode | `rawpy` and LibRaw | Broad camera support and explicit controls for white balance, gamma, bit depth, and automatic brightening |
-| TIFF/JPEG I/O and metadata | OpenImageIO | 16-bit and floating-point image I/O, metadata access, and native image operations |
-| Interchange transform | OpenColorIO Python bindings | Read, write, apply, and validate CLF transforms; bake `.cube` files when needed |
-| CLI | Typer | Typed subcommands and usable help without a custom parser layer |
-| Desktop UI | PySide6 | One Python process, native desktop widgets, worker threads, and supported packaging tools |
-| Models and serialization | Standard-library dataclasses plus JSON Schema | Versioned files without a runtime model framework |
-| Tests and quality | pytest, Ruff, mypy | Small, conventional Python toolchain |
-| Packaging | `uv` for development, `pyside6-deploy` or Nuitka for desktop builds | Locked Python dependencies and standalone desktop binaries |
-| CI and releases | GitHub Actions | Test matrix, fixtures, packaged artifacts, and checksums |
+| Color engine and fitting | Rust with `nalgebra` | One core for native, WebAssembly, and server; least-squares fitting without a hand-rolled solver |
+| RAW decode | LibRaw through a Rust FFI layer | Broad camera support, documented black and saturation levels, controllable white balance and demosaic |
+| Chart detection | Rust engine with OpenCV bindings | Deterministic templated detection in the shipped product |
+| Parallelism | `rayon` | Native per-image and per-tile CPU parallelism |
+| TIFF output and metadata | `tiff` crate or libtiff binding, Exiv2 or `kamadak-exif` | 16-bit output, embedded ICC, reviewed EXIF copying |
+| Serialization and profiles | `serde`, `serde_json`, `jsonschema` crate | Versioned `*.cbprofile.json` with schema validation |
+| Interchange transform | CLF written by the engine, validated with OpenColorIO | Open, checkable interchange for the transform stages |
+| CLI | `clap` | Typed subcommands matching the documented contract |
+| Desktop shell | Tauri 2 | Web UI in the system webview, native engine, small install size |
+| Web UI | React, TypeScript, Vite | One UI for desktop and browser without a server-rendered framework |
+| Browser compute | Rust compiled to WebAssembly in Web Workers | Keeps pixel buffers out of JavaScript |
+| Hosted mode, if built | Axum, PostgreSQL, S3-compatible storage | Native workers behind an API; image bytes never pass through the API server |
+| Research verification | Python with `colour-science` and `colour-checker-detection` | Independent fixtures and formula cross-checks; non-runtime |
+| Tests and quality | `cargo test`, `cargo clippy`, `cargo fmt`, GitHub Actions | Conventional Rust toolchain with a three-operating-system matrix |
+| Packaging | Cargo releases and Tauri bundlers | Standalone desktop binaries with native dependencies |
 
-Do not start with a web application. Browser RAW support and multi-gigabyte batch upload make the workflow worse, while a server adds storage, privacy, and operating cost. Do not split the first release into a TypeScript UI and Python service. Qt keeps the UI and image engine in one process and removes a packaging and IPC boundary.
+Do not ship the first release as a browser-only application. Browser RAW decoding, memory limits, and output writing are measured in milestone 5 before the browser mode is selected. Do not add a hosted server before local modes work end to end, because uploads of RAW batches and image privacy change the product. The React UI is shared by Tauri and the browser so the web path does not require a rewrite.
 
 ## Color pipeline
 
 ### 1. Decode deterministically
 
-Decode the chart and every batch image with the same settings. Require rawpy `output_color=raw`, `gamma=(1, 1)`, unity `user_wb`, `no_auto_bright=True`, a fixed demosaic method, a fixed highlight policy, fixed scaling behavior, and 16-bit output. Subtract recorded per-channel black levels, normalize against recorded per-channel saturation levels, and preserve the as-shot orientation. Record the LibRaw version, camera make and model, every decoder setting, white and black levels, and channel layout in the profile.
+Decode the chart and every batch image with the same settings. Require LibRaw raw colorimetry with `output_color` set to raw, `gamm` linear, unity `user_mul`, `use_camera_wb` and `use_auto_wb` disabled, `no_auto_bright` set, a fixed demosaic method, a fixed highlight policy, fixed scaling behavior, and `output_bps` of 16. Subtract recorded per-channel black levels, normalize against recorded per-channel saturation levels, and preserve the as-shot orientation. Record the LibRaw version, camera make and model, every decoder setting, white and black levels, and channel layout in the profile.
 
 The decoder must also return per-channel photosite saturation masks before demosaicing. The implementation must prove how each supported camera maps RAW channels and masks into the three-channel working array. Unsupported four-color or unusual sensor layouts must fail explicitly in the first release.
 
@@ -128,25 +131,19 @@ CLF does not reproduce RAW decoding. This export accepts only normalized linear 
 ## Proposed package structure
 
 ```text
-src/colorbalance/
-  application/       # derive and apply use cases
-  calibration/       # patch sampling, fitting, validation
-  color/             # transfer functions, spaces, Delta E adapters
-  imageio/           # RAW and rendered-image adapters
-  profiles/          # schema, migration, CLF and cube export
-  cli.py
-  gui/               # PySide6, added after CLI behavior is stable
-tests/
-  fixtures/          # licensed or generated small images and profile fixtures
-  integration/
-  unit/
-docs/
-  IMPLEMENTATION_PLAN.md
-  capture-guide.md
-  profile-format.md
+crates/
+  colorbalance-core/    # color math, chart sampling, fitting, profiles, quality gates
+  colorbalance-raw/     # LibRaw FFI, decode contract, saturation masks (native only)
+  colorbalance-cli/     # clap CLI (native only)
+apps/
+  desktop/              # Tauri 2 shell with the React UI (milestone 4)
+  web/                  # browser experiment (milestone 5)
+research/               # Python verification notebooks and fixture generators (non-runtime)
+tests/                  # cross-crate integration tests and fixtures
+docs/                   # implementation plan, architecture, decision log
 ```
 
-Domain code should accept arrays and immutable metadata records. It should not import Typer or PySide6. CLI and GUI call the same `derive_profile` and `apply_profile` use cases. Decoder, detector, profile writer, and output writer are explicit adapters so tests can exercise behavior without mocking the color math.
+`colorbalance-core` exposes operations such as `inspect_reference`, `derive_profile`, `apply_profile`, `export_clf`, and `export_cube`, and accepts a decoder implementation as a trait. It must compile for native and `wasm32` targets and must not depend on LibRaw, Tauri, or the CLI. The native CLI and desktop app inject the LibRaw decoder. Tests inject synthetic and fixture decoders. No color calculation lives in TypeScript.
 
 ## Command-line contract
 
@@ -166,10 +163,10 @@ colorbalance export studio.cbprofile.json --format cube --size 33 --output studi
 
 Exit criterion: a repeatable command derives a validated profile from a supported ColorChecker Classic RAW fixture.
 
-1. **Bootstrap the Python package and CI**
-   - Add `pyproject.toml`, `src` layout, CLI entry point, Ruff, mypy, pytest, dependency lock, and Windows/macOS/Linux CI.
-   - Document supported Python versions and native dependency installation.
-   - Acceptance: clean checkout installs; CLI help runs; CI executes one behavioral smoke command on all three operating systems.
+1. **Bootstrap the Rust workspace and CI**
+   - Add the Cargo workspace with `colorbalance-core`, `colorbalance-raw`, and `colorbalance-cli`, a `clap` CLI entry point, rustfmt, clippy, and Windows/macOS/Linux CI.
+   - Document the LibRaw build and supported Rust toolchain versions.
+   - Acceptance: clean checkout builds; CLI help runs; `colorbalance-core` compiles for native and `wasm32`; CI executes one behavioral smoke command on all three operating systems.
 
 2. **Define licensed reference fixtures and numerical baselines**
    - Select redistributable ColorChecker RAW fixtures for at least two camera models, plus rejected examples with sparse single-channel RAW clipping and detectable high-variance or clipped reflections.
@@ -177,7 +174,7 @@ Exit criterion: a repeatable command derives a validated profile from a supporte
    - Acceptance: tests obtain fixtures reproducibly; an unspecified or unsupported chart revision fails; fixed target RGB and Lab values match an independent calculation rather than values generated by the implementation under test.
 
 3. **Implement deterministic RAW decoding**
-   - Wrap rawpy with `output_color=raw`, `gamma=(1, 1)`, unity `user_wb`, disabled auto brightening, fixed demosaic, highlight, scaling, and 16-bit settings.
+   - Wrap LibRaw with raw colorimetry, linear gamma, unity white balance multipliers, disabled auto brightening, fixed demosaic, highlight, scaling, and 16-bit settings behind a decoder trait.
    - Return normalized linear camera RGB, camera identity, orientation, black and saturation levels, channel layout, complete decode parameters, and pre-demosaic per-channel saturation masks.
    - Acceptance: fixed RAW samples yield expected numeric channel values and masks; repeated decode is identical; sparse source clipping remains flagged after mask mapping; unsupported sensor layouts return a specific error.
 
@@ -248,9 +245,9 @@ Exit criterion: third-party OpenColorIO tools apply the exported transform with 
 
 Exit criterion: a non-developer can finish the measured workflow using a signed Windows package, with macOS and Linux packages following after platform smoke tests.
 
-17. **Build the PySide6 reference and batch workflow**
-    - Add reference selection, chart overlay, editable corners, quality results, profile save, batch selection, output settings, and completion summary.
-    - Acceptance: the UI calls the same application use cases as the CLI; no color calculation lives in widget code; the complete fixture workflow runs without a terminal.
+17. **Build the React reference and batch workflow in Tauri**
+    - Add reference selection, chart overlay, editable corners, quality results, profile save, batch selection, output settings, and completion summary in the shared React UI inside the Tauri shell.
+    - Acceptance: the UI calls the same engine operations as the CLI; no color calculation lives in TypeScript; no full-resolution pixel buffer crosses the UI boundary; the complete fixture workflow runs without a terminal.
 
 18. **Add responsive progress, cancellation, and recoverable errors**
     - Run decode and writes off the UI thread, expose per-file progress, confirm destructive overwrite choices, and preserve completed outputs on cancellation.
@@ -258,11 +255,39 @@ Exit criterion: a non-developer can finish the measured workflow using a signed 
 
 19. **Package and release the desktop application**
     - Build reproducible Windows artifacts first, include native dependencies and licenses, generate checksums, and run the packaged smoke workflow. Add macOS and Linux artifacts after equivalent checks pass.
-    - Acceptance: the package runs on a clean machine without Python; the installed application derives and applies the fixture profile; release notes state supported cameras, formats, and known limits.
+    - Acceptance: the package runs on a clean machine without a development environment; the installed application derives and applies the fixture profile; release notes state supported cameras, formats, and known limits.
 
 20. **Run a usability and color-quality release gate**
     - Test fresh captures from at least three camera models and two illuminant types with users who did not write the application.
     - Acceptance: publish anonymized task failures and measured Delta E; fix every data-loss, silent-misprofile, and release-threshold failure before 1.0.
+
+### Milestone 5: Web-capable platform
+
+Exit criterion: the browser and hosted execution modes are measured against the native engine, and the delivery decision is recorded in the architecture decision log with evidence.
+
+21. **Compile the color core to WebAssembly and verify numerical parity**
+    - Build `colorbalance-core` for `wasm32` with wasm-bindgen, run it in a Web Worker, and compare fitting, Delta E, profile application, and export results against native output on the fixture corpus.
+    - Acceptance: native and WebAssembly results agree within the stated tolerance for every fixture; SIMD and scalar variants both pass; the core path requires no WebAssembly threads.
+
+22. **Run a LibRaw WebAssembly feasibility spike**
+    - Compile LibRaw to WebAssembly, decode the RAW fixtures in a worker, and compare pixels and saturation masks against native decoding while measuring bundle size, memory use, and decode time.
+    - Acceptance: a written go or no-go record for browser RAW processing with numbers for every fixture camera; the decision is added to the architecture decision log.
+
+23. **Implement browser file handling and job state**
+    - Add feature-detected File System Access input and streamed output, file input plus download fallback, transferable buffer transport, and IndexedDB job state for recovery.
+    - Acceptance: the fixture derive-and-apply workflow runs in Chrome and Edge without a server; Firefox and Safari behavior is documented; peak memory stays under the published ceiling.
+
+24. **Prototype the hosted processing option**
+    - Stand up an Axum API, PostgreSQL job state, presigned multipart uploads to S3-compatible storage, native Rust workers, and SSE progress.
+    - Acceptance: a browser session derives and applies the fixture batch end to end; no image bytes pass through the API server; retention and deletion behavior is documented.
+
+25. **Build the performance benchmark harness**
+    - Measure native, WebAssembly, and hosted decode, transform, and encode times, memory ceilings, and tile throughput, with reproducible commands and a CI regression gate for the apply path.
+    - Acceptance: benchmark commands run from a clean checkout; results are committed; a regression in the apply path fails CI.
+
+26. **Decide and document the web delivery mode**
+    - Choose browser-local processing, hosted workers, or desktop-only based on the recorded measurements, and publish the browser and operating system support matrix.
+    - Acceptance: the decision record cites the spike and benchmark numbers; `docs/ARCHITECTURE.md` and the support matrix are updated; unsupported paths fail with clear messages.
 
 ## Deferred work
 
@@ -272,7 +297,7 @@ Exit criterion: a non-developer can finish the measured workflow using a signed 
 - rendered JPEG and TIFF reference fitting;
 - lens shading and spatial illumination correction;
 - GPU processing;
-- network or cloud operation;
+- hosted web operation beyond the milestone 5 prototype;
 - plug-ins for editing applications.
 
 Each deferred item needs measurements or a user workflow that justifies its cost. None belongs in the first end-to-end release.
@@ -283,6 +308,8 @@ Each deferred item needs measurements or a user workflow that justifies its cost
 - OpenColorIO tools and CLF guidance: https://opencolorio.readthedocs.io/en/latest/guides/using_ocio/using_ocio.html
 - Colour Checker Detection APIs: https://colour-checker-detection.readthedocs.io/en/develop/colour_checker_detection.detection.html
 - Colour correction API and supported fitting methods: https://colour.readthedocs.io/en/develop/generated/colour.colour_correction.html
-- rawpy post-processing controls: https://letmaik.github.io/rawpy/api/rawpy.Params.html
+- rawpy post-processing controls, used while the Python research stack verified decode settings: https://letmaik.github.io/rawpy/api/rawpy.Params.html
 - Adobe DNG 1.7.1 specification: https://helpx.adobe.com/content/dam/help/en/camera-raw/digital-negative/jcr_content/root/content/flex/items/position/position-par/download_section_733958301/download-1/DNG_Spec_1_7_1_0.pdf
-- Qt for Python deployment: https://doc.qt.io/qtforpython-6/deployment/deployment-pyside6-deploy.html
+- LibRaw documentation and supported cameras: https://www.libraw.org/docs
+- Tauri 2 architecture: https://v2.tauri.app/
+- WebAssembly and browser capability references: https://developer.mozilla.org/en-US/docs/WebAssembly and https://developer.mozilla.org/en-US/docs/Web/API/FileSystemFileHandle
