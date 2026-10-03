@@ -53,16 +53,15 @@ These exist because violating them silently produces wrong color or destroys use
 
 ## Commands
 
-There is no build yet. Once milestone 1 issue 1 lands, the expected commands are:
-
 ```text
 cargo fmt --all
-cargo clippy --workspace --all-targets
+cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo build --release -p colorbalance-cli
+cargo build -p colorbalance-core --target wasm32-unknown-unknown
 ```
 
-Update this section when real commands exist.
+The behavioral smoke command is `target/release/colorbalance decode-contract`, which prints the canonical decode contract as JSON. Details, toolchain versions, and LibRaw notes live in `docs/development.md`. CI runs the same gates on Ubuntu, macOS, and Windows.
 
 ## Glossary
 

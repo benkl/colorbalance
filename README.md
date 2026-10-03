@@ -2,7 +2,7 @@
 
 ColorBalance builds a reusable color transform from one X-Rite or Calibrite ColorChecker Classic RAW reference photo and applies it to every image in a batch captured with the same camera, lighting, exposure, and RAW settings. It measures what it does, refuses references it cannot trust, and never modifies input files.
 
-Status: planning. The repository contains the roadmap, architecture decisions, and issue plan. Implementation starts with milestone 1.
+Status: implementation started. Milestone 1 is in progress; the Rust workspace, CLI, and CI are in place and the calibration core is being built.
 
 ## Documentation
 
@@ -31,11 +31,11 @@ Rust engine with LibRaw, a Tauri 2 desktop application with a React UI, and an o
 ## Repository layout
 
 ```text
-docs/       implementation plan, architecture, decision log
-crates/     Rust workspace (created in milestone 1)
+docs/       implementation plan, architecture, decision log, development guide
+crates/     Rust workspace: colorbalance-core, colorbalance-raw, colorbalance-cli
+.github/    CI workflow for Windows, macOS, Linux, and wasm32
 apps/       Tauri desktop and browser applications (later milestones)
 research/   Python verification notebooks (non-runtime)
-tests/      integration tests and fixtures
 ```
 
 ## License

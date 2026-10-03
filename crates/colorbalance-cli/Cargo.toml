@@ -1,0 +1,20 @@
+[package]
+name = "colorbalance-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "ColorBalance command-line interface"
+
+[[bin]]
+name = "colorbalance"
+path = "src/main.rs"
+
+[dependencies]
+colorbalance-core = { workspace = true }
+colorbalance-raw = { path = "../colorbalance-raw" }
+clap = { workspace = true }
+serde_json = { workspace = true }
+
+[lints.rust]
+unsafe_code = "forbid"
