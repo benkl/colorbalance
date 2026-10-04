@@ -8,7 +8,7 @@
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "preview": "vite preview",
-    "test": "tsc -p tsconfig.test.json && node --test test/interaction.test.mjs",
+    "test": "node --test test/interaction.test.mjs test/ui_e2e.test.mjs",
     "desktop": "cargo run --manifest-path ../src-tauri/Cargo.toml"
   },
   "dependencies": {
