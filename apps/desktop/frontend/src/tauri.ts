@@ -1,9 +1,40 @@
-import { invoke } from '@tauri-apps/api/core';
-import { listen } from '@tauri-apps/api/event';
-import { getCurrentWebview } from '@tauri-apps/api/webview';
-import { open, save } from '@tauri-apps/plugin-dialog';
-import type { UnlistenFn } from '@tauri-apps/api/event';
 import type { BatchSummary, ChartQuad, ChartRevision, DeriveResult, InspectResult } from './types';
+
+export type UnlistenFn = () => void;
+
+interface TauriEvent<T> {
+  payload: T;
+}
+
+interface DragDropPayload {
+  type: 'over' | 'drop' | 'leave' | 'enter';
+  paths?: string[];
+  position?: { x: number; y: number };
+}
+
+interface TauriRuntime {
+  core: {
+    invoke<T>(command: string, args?: Record<string, unknown>): Promise<T>;
+  };
+  event: {
+    listen<T>(event: string, handler: (event: TauriEvent<T>) => void): Promise<UnlistenFn>;
+  };
+  webview: {
+    getCurrentWebview(): {
+      onDragDropEvent(handler: (event: TauriEvent<DragDropPayload>) => void): Promise<UnlistenFn>;
+    };
+  };
+  dialog: {
+    open(options?: Record<string, unknown>): Promise<string | string[] | null>;
+    save(options?: Record<string, unknown>): Promise<string | null>;
+  };
+}
+
+declare global {
+  interface Window {
+    __TAURI__?: TauriRuntime;
+  }
+}
 
 export interface BatchProgress {
   completed: number;
@@ -19,14 +50,21 @@ export interface BackendBridge {
   exportProfile(profilePath: string, format: 'clf' | 'cube', outputPath: string, size?: number): Promise<string>;
 }
 
+function runtime(): TauriRuntime {
+  if (!window.__TAURI__) {
+    throw new Error('Native desktop runtime unavailable. Start with cargo run --manifest-path apps/desktop/src-tauri/Cargo.toml.');
+  }
+  return window.__TAURI__;
+}
+
 export const backend: BackendBridge = {
-  inspectReference: (path, revision, quad, quickAndDirty) => invoke('inspect_reference', {
+  inspectReference: (path, revision, quad, quickAndDirty) => runtime().core.invoke('inspect_reference', {
     path,
     chartRevision: revision,
     quad: quad ? { corners: quad.map(({ x, y }) => [x, y]) } : undefined,
     quickAndDirty,
   }),
-  deriveProfile: (path, revision, profilePath, reportPath, quad, quickAndDirty, force) => invoke('derive_profile', {
+  deriveProfile: (path, revision, profilePath, reportPath, quad, quickAndDirty, force) => runtime().core.invoke('derive_profile', {
     path,
     chartRevision: revision,
     profilePath,
@@ -35,15 +73,15 @@ export const backend: BackendBridge = {
     quickAndDirty,
     force,
   }),
-  applyBatch: (profilePath, inputPath, outputPath, overwrite, force) => invoke('apply_batch', {
+  applyBatch: (profilePath, inputPath, outputPath, overwrite, force) => runtime().core.invoke('apply_batch', {
     profilePath,
     inputPath,
     outputPath,
     overwrite,
     force,
   }),
-  cancelBatch: () => invoke('cancel_batch'),
-  exportProfile: (profilePath, format, outputPath, size) => invoke('export_profile', {
+  cancelBatch: () => runtime().core.invoke('cancel_batch'),
+  exportProfile: (profilePath, format, outputPath, size) => runtime().core.invoke('export_profile', {
     profilePath,
     format,
     outputPath,
@@ -52,7 +90,7 @@ export const backend: BackendBridge = {
 };
 
 export async function chooseImage(): Promise<string | null> {
-  const selected = await open({
+  const selected = await runtime().dialog.open({
     multiple: false,
     directory: false,
     filters: [{ name: 'Supported images', extensions: ['dng', 'jpg', 'jpeg', 'png'] }],
@@ -61,12 +99,12 @@ export async function chooseImage(): Promise<string | null> {
 }
 
 export async function chooseDirectory(): Promise<string | null> {
-  const selected = await open({ multiple: false, directory: true });
+  const selected = await runtime().dialog.open({ multiple: false, directory: true });
   return typeof selected === 'string' ? selected : null;
 }
 
 export async function chooseSavePath(defaultPath: string, extension: string): Promise<string | null> {
-  const selected = await save({
+  const selected = await runtime().dialog.save({
     defaultPath,
     filters: [{ name: `${extension.toUpperCase()} file`, extensions: [extension] }],
   });
@@ -74,25 +112,22 @@ export async function chooseSavePath(defaultPath: string, extension: string): Pr
 }
 
 export function listenForBatchProgress(callback: (progress: BatchProgress) => void): Promise<UnlistenFn> {
-  return listen<BatchProgress>('batch-progress', (event) => callback(event.payload));
+  return runtime().event.listen<BatchProgress>('batch-progress', (event) => callback(event.payload));
 }
 
-export async function listenForFileDrop(
+export function listenForFileDrop(
   onDrop: (paths: string[], position: { x: number; y: number }) => void,
   onHover: (hovered: boolean) => void,
 ): Promise<UnlistenFn> {
-  return getCurrentWebview().onDragDropEvent((event) => {
-    if (event.payload.type === 'over') {
+  return runtime().webview.getCurrentWebview().onDragDropEvent((event) => {
+    const payload = event.payload;
+    if (payload.type === 'over' || payload.type === 'enter') {
       onHover(true);
-      return;
-    }
-    if (event.payload.type === 'leave') {
+    } else if (payload.type === 'leave') {
       onHover(false);
-      return;
-    }
-    if (event.payload.type === 'drop') {
+    } else if (payload.type === 'drop') {
       onHover(false);
-      onDrop(event.payload.paths, event.payload.position);
+      onDrop(payload.paths ?? [], payload.position ?? { x: 0, y: 0 });
     }
   });
 }
