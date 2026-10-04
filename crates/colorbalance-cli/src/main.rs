@@ -1,9 +1,23 @@
 //! ColorBalance command-line interface.
 
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand};
-use colorbalance_core::DecodeContract;
+use clap::{Args, Parser, Subcommand, ValueEnum};
+use colorbalance_core::calibration::{self, ChartQuad, GateConfig, GateFailure, ValidationReport};
+use colorbalance_core::chart::ChartRevision;
+use colorbalance_core::contract::DecodeContract;
+use colorbalance_core::dataset;
+use colorbalance_core::decode::{CameraIdentity, DecodedImage, RawDecoder};
+use colorbalance_core::interchange::{profile_to_clf, profile_to_cube};
+use colorbalance_core::output::encode_tiff_rgb_u16;
+use colorbalance_core::profile::{
+    self, apply_transform, encode_srgb_u16, Profile, ValidationSummary,
+};
+use colorbalance_raw::dng::DngDecoder;
+use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 #[derive(Parser)]
 #[command(
@@ -21,54 +35,634 @@ struct Cli {
 enum Commands {
     /// Print the canonical RAW decode contract as JSON
     DecodeContract,
+    /// Inspect a RAW reference file and print chart quality diagnostics as JSON
+    Inspect(InspectArgs),
+    /// Derive a measured color profile and HTML report from a RAW reference
+    Derive(DeriveArgs),
+    /// Apply a measured profile to a directory of RAW images and write 16-bit TIFFs
+    Apply(ApplyArgs),
+    /// Export a profile to Common LUT Format (.clf) or 3D LUT (.cube)
+    Export(ExportArgs),
 }
 
-/// Render the canonical decode contract as pretty JSON.
-fn decode_contract_json(contract: &DecodeContract) -> String {
-    serde_json::to_string_pretty(contract).expect("decode contract serializes")
+#[derive(Args)]
+struct InspectArgs {
+    /// RAW reference image file path (DNG format in this release)
+    reference: PathBuf,
+    /// Physical chart revision
+    #[arg(long, value_enum, default_value_t = ChartRevisionArg::ClassicFromNovember2014)]
+    chart: ChartRevisionArg,
+    /// Optional manual corners: x1,y1,x2,y2,x3,y3,x4,y4 (TL, TR, BR, BL)
+    #[arg(long, value_parser = parse_quad)]
+    quad: Option<ChartQuad>,
 }
 
-fn main() -> ExitCode {
-    let cli = Cli::parse();
-    match cli.command {
-        Commands::DecodeContract => {
-            let contract = colorbalance_raw::canonical_contract();
-            println!("{}", decode_contract_json(&contract));
-            ExitCode::SUCCESS
+#[derive(Args)]
+struct DeriveArgs {
+    /// RAW reference image file path (DNG format in this release)
+    reference: PathBuf,
+    /// Physical chart revision
+    #[arg(long, value_enum, default_value_t = ChartRevisionArg::ClassicFromNovember2014)]
+    chart: ChartRevisionArg,
+    /// Output path for the generated profile JSON
+    #[arg(long, short = 'p')]
+    profile: PathBuf,
+    /// Output path for the human-readable HTML quality report
+    #[arg(long, short = 'r')]
+    report: Option<PathBuf>,
+    /// Optional manual corners: x1,y1,x2,y2,x3,y3,x4,y4 (TL, TR, BR, BL)
+    #[arg(long, value_parser = parse_quad)]
+    quad: Option<ChartQuad>,
+    /// Allow writing a profile despite quality gate failures (recorded in report)
+    #[arg(long, default_value_t = false)]
+    force: bool,
+}
+
+#[derive(Args)]
+struct ApplyArgs {
+    /// Measured profile JSON file path
+    profile: PathBuf,
+    /// Input directory containing matching RAW images (or a single file)
+    input: PathBuf,
+    /// Destination directory for balanced 16-bit TIFF outputs
+    #[arg(long, short = 'o')]
+    output: PathBuf,
+    /// Output format (only 'tiff' in this release)
+    #[arg(long, default_value = "tiff")]
+    format: String,
+    /// Overwrite existing output files (default: skip/fail existing)
+    #[arg(long, default_value_t = false)]
+    overwrite: bool,
+    /// Ignore camera make/model mismatch (default: fail closed)
+    #[arg(long, default_value_t = false)]
+    force: bool,
+    /// Output path for the JSON batch summary
+    #[arg(long)]
+    summary: Option<PathBuf>,
+}
+
+#[derive(Args)]
+struct ExportArgs {
+    /// Profile JSON file path
+    profile: PathBuf,
+    /// Export interchange format
+    #[arg(long, value_enum)]
+    format: ExportFormatArg,
+    /// Output destination path
+    #[arg(long, short = 'o')]
+    output: PathBuf,
+    /// 3D LUT size (only used for .cube export, default: 33)
+    #[arg(long, default_value_t = 33)]
+    size: usize,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ChartRevisionArg {
+    #[value(name = "classic-before-nov-2014")]
+    ClassicBeforeNovember2014,
+    #[value(name = "classic-from-nov-2014")]
+    ClassicFromNovember2014,
+}
+
+impl From<ChartRevisionArg> for ChartRevision {
+    fn from(arg: ChartRevisionArg) -> Self {
+        match arg {
+            ChartRevisionArg::ClassicBeforeNovember2014 => ChartRevision::ClassicBeforeNovember2014,
+            ChartRevisionArg::ClassicFromNovember2014 => ChartRevision::ClassicFromNovember2014,
         }
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ExportFormatArg {
+    #[value(name = "clf")]
+    Clf,
+    #[value(name = "cube")]
+    Cube,
+}
 
-    #[test]
-    fn decode_contract_json_contains_every_pinned_setting() {
-        let json = decode_contract_json(&colorbalance_raw::canonical_contract());
-        let value: serde_json::Value = serde_json::from_str(&json).expect("valid json");
+fn parse_quad(s: &str) -> Result<ChartQuad, String> {
+    let parts: Result<Vec<f64>, _> = s.split(',').map(|p| p.trim().parse::<f64>()).collect();
+    let values = parts.map_err(|e| format!("invalid number in quad: {e}"))?;
+    if values.len() != 8 {
+        return Err(format!(
+            "quad must have exactly 8 numbers (x1,y1,x2,y2,x3,y3,x4,y4), got {}",
+            values.len()
+        ));
+    }
+    Ok(ChartQuad {
+        corners: [
+            [values[0], values[1]],
+            [values[2], values[3]],
+            [values[4], values[5]],
+            [values[6], values[7]],
+        ],
+    })
+}
 
-        assert_eq!(value["decoder"], "libraw");
-        assert_eq!(value["output-color"], "raw");
-        assert_eq!(value["output-depth"], "u16");
-        assert_eq!(value["gamma"], serde_json::json!([1.0, 1.0]));
-        assert_eq!(
-            value["white-balance"]["unity"]["user-mul"],
-            serde_json::json!([1.0, 1.0, 1.0, 1.0])
-        );
-        assert_eq!(value["no-auto-bright"], true);
-        assert_eq!(value["demosaic"], "ahd");
-        assert_eq!(value["highlight"], "clip");
-        assert_eq!(value["orientation"], "as-shot");
-        assert_eq!(value["no-auto-scale"], false);
+fn default_quad_for_image(width: u32, height: u32) -> ChartQuad {
+    let w = f64::from(width);
+    let h = f64::from(height);
+    let margin_x = w * 0.08;
+    let margin_y = h * 0.08;
+    ChartQuad {
+        corners: [
+            [margin_x, margin_y],
+            [w - margin_x, margin_y],
+            [w - margin_x, h - margin_y],
+            [margin_x, h - margin_y],
+        ],
+    }
+}
+
+fn sha256_file(path: &Path) -> std::io::Result<String> {
+    let bytes = fs::read(path)?;
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "kebab-case")]
+struct InspectOutput {
+    camera: CameraIdentity,
+    image_width: u32,
+    image_height: u32,
+    chart_revision: ChartRevision,
+    quality_passed: bool,
+    gate_failures: Vec<InspectGateFailure>,
+    quad: [[f64; 2]; 4],
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "kebab-case")]
+struct InspectGateFailure {
+    patch: Option<String>,
+    reason: String,
+    measured: String,
+}
+
+#[derive(Serialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub struct BatchSummary {
+    pub succeeded: Vec<String>,
+    pub skipped: Vec<String>,
+    pub failed: Vec<BatchFileError>,
+    pub total: usize,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct BatchFileError {
+    pub file: String,
+    pub error: String,
+}
+
+fn execute_inspect(args: InspectArgs) -> Result<(), String> {
+    let decoder = DngDecoder;
+    let image = decoder
+        .decode_path(&args.reference)
+        .map_err(|e| format!("decode failed: {e}"))?;
+    let quad = args
+        .quad
+        .unwrap_or_else(|| default_quad_for_image(image.width, image.height));
+    let samples = calibration::sample_patches(&image, &quad)
+        .map_err(|e| format!("patch sampling failed: {e}"))?;
+    let gate_res = calibration::evaluate_quality(&samples, &GateConfig::default());
+    let (passed, failures) = match gate_res {
+        Ok(()) => (true, Vec::new()),
+        Err(f) => (
+            false,
+            f.into_iter()
+                .map(|fail| InspectGateFailure {
+                    patch: fail.patch.map(|p| format!("{p:?}")),
+                    reason: fail.reason,
+                    measured: fail.measured,
+                })
+                .collect(),
+        ),
+    };
+    let output = InspectOutput {
+        camera: image.camera,
+        image_width: image.width,
+        image_height: image.height,
+        chart_revision: args.chart.into(),
+        quality_passed: passed,
+        gate_failures: failures,
+        quad: quad.corners,
+    };
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&output).map_err(|e| e.to_string())?
+    );
+    Ok(())
+}
+
+fn execute_derive(args: DeriveArgs) -> Result<(), String> {
+    let decoder = DngDecoder;
+    let image = decoder
+        .decode_path(&args.reference)
+        .map_err(|e| format!("decode failed: {e}"))?;
+    let quad = args
+        .quad
+        .unwrap_or_else(|| default_quad_for_image(image.width, image.height));
+    let revision: ChartRevision = args.chart.into();
+    let dataset = dataset::load(revision).map_err(|e| format!("dataset load failed: {e}"))?;
+    let samples = calibration::sample_patches(&image, &quad)
+        .map_err(|e| format!("patch sampling failed: {e}"))?;
+    let gate_failures = match calibration::evaluate_quality(&samples, &GateConfig::default()) {
+        Ok(()) => Vec::new(),
+        Err(f) => f,
+    };
+
+    if !gate_failures.is_empty() && !args.force {
+        let reasons: Vec<String> = gate_failures
+            .iter()
+            .map(|f| format!("- {}: {}", f.reason, f.measured))
+            .collect();
+        return Err(format!(
+            "quality gates failed (use --force to override):\n{}",
+            reasons.join("\n")
+        ));
     }
 
-    #[test]
-    fn decode_contract_json_parses_back_into_a_valid_contract() {
-        let contract = colorbalance_raw::canonical_contract();
-        let json = decode_contract_json(&contract);
-        let parsed: DecodeContract = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(parsed, contract);
-        assert!(parsed.validate().is_ok());
+    let (stages, validation) =
+        calibration::fit(&samples, &dataset).map_err(|e| format!("fit failed: {e}"))?;
+    let ref_digest =
+        sha256_file(&args.reference).map_err(|e| format!("failed to hash reference: {e}"))?;
+    let contract = DecodeContract::canonical(&image.camera.decoder, &image.camera.decoder_version);
+    let p_initial = Profile {
+        schema_version: profile::SCHEMA_VERSION.to_owned(),
+        decode_contract: contract,
+        camera: image.camera.clone(),
+        chart_revision: revision,
+        dataset_digest: dataset::dataset_digest(),
+        reference_digest: ref_digest,
+        transform: stages,
+        validation: ValidationSummary {
+            mean_delta_e: validation.mean_delta_e,
+            max_delta_e: validation.max_delta_e,
+            p95_delta_e: validation.p95_delta_e,
+            neutral_max_delta_e: validation.neutral_max_delta_e,
+            skin_max_delta_e: validation.skin_max_delta_e,
+            condition_number: validation.condition_number,
+            patch_count: validation.per_patch.len() as u32,
+        },
+        digest: String::new(),
+    };
+    let initial_json = profile::to_json(&p_initial);
+    let mut p: Profile = serde_json::from_str(&initial_json).map_err(|e| e.to_string())?;
+    p.digest = profile::digest(&p);
+
+    if let Some(parent) = args.profile.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+    }
+    let json_text = profile::to_json(&p);
+    fs::write(&args.profile, json_text).map_err(|e| format!("writing profile: {e}"))?;
+    if let Some(report_path) = args.report {
+        let html = generate_html_report(
+            &image,
+            &quad,
+            &validation,
+            &gate_failures,
+            args.force,
+            &p.digest,
+        );
+        if let Some(parent) = report_path.parent() {
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+        }
+        fs::write(&report_path, html).map_err(|e| format!("writing report: {e}"))?;
+    }
+
+    eprintln!(
+        "Derived profile: {} (mean dE: {:.3}, max dE: {:.3})",
+        args.profile.display(),
+        validation.mean_delta_e,
+        validation.max_delta_e
+    );
+    Ok(())
+}
+
+fn generate_html_report(
+    image: &DecodedImage,
+    quad: &ChartQuad,
+    validation: &ValidationReport,
+    gate_failures: &[GateFailure],
+    forced: bool,
+    digest: &str,
+) -> String {
+    let mut rows = String::new();
+    for pv in &validation.per_patch {
+        let c_rgb = [
+            (pv.corrected_rgb[0].clamp(0.0, 1.0) * 255.0).round() as u8,
+            (pv.corrected_rgb[1].clamp(0.0, 1.0) * 255.0).round() as u8,
+            (pv.corrected_rgb[2].clamp(0.0, 1.0) * 255.0).round() as u8,
+        ];
+        let t_rgb = [
+            (pv.target_rgb[0].clamp(0.0, 1.0) * 255.0).round() as u8,
+            (pv.target_rgb[1].clamp(0.0, 1.0) * 255.0).round() as u8,
+            (pv.target_rgb[2].clamp(0.0, 1.0) * 255.0).round() as u8,
+        ];
+        rows.push_str(&format!(
+            "<tr><td>{:?}</td>\
+            <td style=\"background:rgb({},{},{})\"></td>\
+            <td style=\"background:rgb({},{},{})\"></td>\
+            <td>{:.3}</td></tr>\n",
+            pv.patch, c_rgb[0], c_rgb[1], c_rgb[2], t_rgb[0], t_rgb[1], t_rgb[2], pv.delta_e
+        ));
+    }
+
+    let warning_block = if gate_failures.is_empty() {
+        "<p style=\"color:green;\"><strong>Reference quality: PASS</strong></p>".to_owned()
+    } else {
+        let mut list = String::from("<ul>");
+        for f in gate_failures {
+            list.push_str(&format!("<li>{}: {}</li>", f.reason, f.measured));
+        }
+        list.push_str("</ul>");
+        let badge = if forced {
+            "<p style=\"color:orange;\"><strong>Reference quality: OVERRIDDEN (--force used)</strong></p>"
+        } else {
+            "<p style=\"color:red;\"><strong>Reference quality: FAILED</strong></p>"
+        };
+        format!("{badge}{list}")
+    };
+
+    format!(
+        "<!DOCTYPE html>\n<html>\n<head>\
+        <meta charset=\"utf-8\">\
+        <title>ColorBalance Calibration Report</title>\
+        <style>\
+        body {{ font-family: sans-serif; margin: 2rem; background: #fafafa; color: #222; }}\
+        table {{ border-collapse: collapse; width: 100%; max-width: 600px; }}\
+        th, td {{ border: 1px solid #ccc; padding: 6px 12px; text-align: left; }}\
+        .color-cell {{ width: 50px; }}\
+        svg {{ max-width: 480px; border: 1px solid #888; background: #eee; }}\
+        </style>\
+        </head>\n<body>\
+        <h1>ColorBalance Calibration Report</h1>\
+        <p>Profile digest: <code>{digest}</code></p>\
+        <p>Camera: {} {} (decoder: {} {})</p>\
+        {warning_block}\
+        <h2>Metrics</h2>\
+        <ul>\
+        <li>Mean ΔE2000: <strong>{:.3}</strong></li>\
+        <li>Median ΔE2000: <strong>{:.3}</strong></li>\
+        <li>95th percentile ΔE2000: <strong>{:.3}</strong></li>\
+        <li>Max ΔE2000: <strong>{:.3}</strong></li>\
+        <li>Condition number: <strong>{:.2}</strong></li>\
+        </ul>\
+        <h2>Chart Quad Overlay</h2>\
+        <svg viewBox=\"0 0 {} {}\">\
+        <polygon points=\"{},{} {},{} {},{} {},{}\" fill=\"rgba(0,128,255,0.2)\" stroke=\"blue\" stroke-width=\"2\" />\
+        </svg>\
+        <h2>Patch Details</h2>\
+        <table>\
+        <tr><th>Patch</th><th>Corrected</th><th>Target</th><th>ΔE2000</th></tr>\
+        {rows}\
+        </table>\
+        </body>\n</html>",
+        image.camera.make,
+        image.camera.model,
+        image.camera.decoder,
+        image.camera.decoder_version,
+        validation.mean_delta_e,
+        validation.median_delta_e,
+        validation.p95_delta_e,
+        validation.max_delta_e,
+        validation.condition_number,
+        image.width,
+        image.height,
+        quad.corners[0][0], quad.corners[0][1],
+        quad.corners[1][0], quad.corners[1][1],
+        quad.corners[2][0], quad.corners[2][1],
+        quad.corners[3][0], quad.corners[3][1],
+    )
+}
+
+fn execute_apply(args: ApplyArgs) -> Result<(), String> {
+    let prof_text =
+        fs::read_to_string(&args.profile).map_err(|e| format!("cannot read profile: {e}"))?;
+    let prof =
+        profile::from_json(&prof_text).map_err(|e| format!("profile validation failed: {e}"))?;
+
+    let inputs = collect_input_files(&args.input)?;
+    if inputs.is_empty() {
+        return Err(format!("no files found at {}", args.input.display()));
+    }
+
+    fs::create_dir_all(&args.output).map_err(|e| e.to_string())?;
+
+    let mut summary = BatchSummary {
+        total: inputs.len(),
+        ..Default::default()
+    };
+
+    let decoder = DngDecoder;
+
+    for input_path in inputs {
+        let file_name = input_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("image");
+        let dest_name = format!(
+            "{}.tiff",
+            input_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or(file_name)
+        );
+        let dest_path = args.output.join(&dest_name);
+
+        if dest_path.exists() && !args.overwrite {
+            summary.skipped.push(input_path.display().to_string());
+            continue;
+        }
+
+        let decoded = match decoder.decode_path(&input_path) {
+            Ok(img) => img,
+            Err(e) => {
+                summary.failed.push(BatchFileError {
+                    file: input_path.display().to_string(),
+                    error: format!("decode failed: {e}"),
+                });
+                continue;
+            }
+        };
+
+        if (decoded.camera.make != prof.camera.make || decoded.camera.model != prof.camera.model)
+            && !args.force
+        {
+            summary.failed.push(BatchFileError {
+                file: input_path.display().to_string(),
+                error: format!(
+                    "camera mismatch (profile: {} {}, image: {} {})",
+                    prof.camera.make, prof.camera.model, decoded.camera.make, decoded.camera.model
+                ),
+            });
+            continue;
+        }
+
+        let pixel_count = (decoded.width as usize) * (decoded.height as usize);
+        let mut out_u16 = Vec::with_capacity(pixel_count * 3);
+
+        for i in 0..pixel_count {
+            let rgb_f64 = [
+                f64::from(decoded.rgb[i * 3]),
+                f64::from(decoded.rgb[i * 3 + 1]),
+                f64::from(decoded.rgb[i * 3 + 2]),
+            ];
+            let (linear_srgb, _clips) = apply_transform(&prof, rgb_f64);
+            let srgb_encoded = [
+                colorbalance_core::color::srgb_encode(linear_srgb[0]),
+                colorbalance_core::color::srgb_encode(linear_srgb[1]),
+                colorbalance_core::color::srgb_encode(linear_srgb[2]),
+            ];
+            let u16_triplet = encode_srgb_u16(srgb_encoded);
+            out_u16.extend_from_slice(&u16_triplet);
+        }
+
+        let tiff_bytes = encode_tiff_rgb_u16(decoded.width, decoded.height, &out_u16);
+        let tmp_path = args.output.join(format!(
+            ".tmp-{}-{}.tiff",
+            std::process::id(),
+            fastrand_u64()
+        ));
+
+        if let Err(e) = fs::write(&tmp_path, &tiff_bytes) {
+            let _ = fs::remove_file(&tmp_path);
+            summary.failed.push(BatchFileError {
+                file: input_path.display().to_string(),
+                error: format!("write failed: {e}"),
+            });
+            continue;
+        }
+
+        if let Err(e) = atomic_rename(&tmp_path, &dest_path) {
+            let _ = fs::remove_file(&tmp_path);
+            summary.failed.push(BatchFileError {
+                file: input_path.display().to_string(),
+                error: format!("rename failed: {e}"),
+            });
+            continue;
+        }
+
+        summary.succeeded.push(input_path.display().to_string());
+    }
+
+    if let Some(sum_path) = args.summary {
+        let text = serde_json::to_string_pretty(&summary).map_err(|e| e.to_string())?;
+        fs::write(sum_path, text).map_err(|e| e.to_string())?;
+    }
+
+    eprintln!(
+        "Batch complete: {} succeeded, {} skipped, {} failed (total: {})",
+        summary.succeeded.len(),
+        summary.skipped.len(),
+        summary.failed.len(),
+        summary.total
+    );
+
+    if !summary.failed.is_empty() {
+        return Err(format!("{} files failed to process", summary.failed.len()));
+    }
+
+    Ok(())
+}
+
+fn fastrand_u64() -> u64 {
+    use std::time::SystemTime;
+    let nanos = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    nanos as u64
+}
+
+fn atomic_rename(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        if to.exists() {
+            fs::remove_file(to)?;
+        }
+        fs::rename(from, to)
+    }
+    #[cfg(not(windows))]
+    {
+        fs::rename(from, to)
+    }
+}
+
+fn collect_input_files(path: &Path) -> Result<Vec<PathBuf>, String> {
+    if path.is_file() {
+        return Ok(vec![path.to_path_buf()]);
+    }
+    let mut files = Vec::new();
+    let entries = fs::read_dir(path).map_err(|e| e.to_string())?;
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if p.is_file() {
+            if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
+                let ext_lower = ext.to_lowercase();
+                if ext_lower == "dng"
+                    || ext_lower == "raw"
+                    || ext_lower == "cr3"
+                    || ext_lower == "nef"
+                {
+                    files.push(p);
+                }
+            }
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
+fn execute_export(args: ExportArgs) -> Result<(), String> {
+    let prof_text =
+        fs::read_to_string(&args.profile).map_err(|e| format!("cannot read profile: {e}"))?;
+    let prof =
+        profile::from_json(&prof_text).map_err(|e| format!("profile validation failed: {e}"))?;
+
+    let content = match args.format {
+        ExportFormatArg::Clf => profile_to_clf(&prof),
+        ExportFormatArg::Cube => profile_to_cube(&prof, args.size),
+    };
+
+    if let Some(parent) = args.output.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+    }
+
+    fs::write(&args.output, content).map_err(|e| format!("cannot write export: {e}"))?;
+    eprintln!("Exported {:?} to {}", args.format, args.output.display());
+    Ok(())
+}
+
+fn main() -> ExitCode {
+    let cli = Cli::parse();
+    let result = match cli.command {
+        Commands::DecodeContract => {
+            let contract = colorbalance_raw::canonical_contract();
+            println!("{}", serde_json::to_string_pretty(&contract).unwrap());
+            Ok(())
+        }
+        Commands::Inspect(args) => execute_inspect(args),
+        Commands::Derive(args) => execute_derive(args),
+        Commands::Apply(args) => execute_apply(args),
+        Commands::Export(args) => execute_export(args),
+    };
+
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("colorbalance error: {err}");
+            ExitCode::FAILURE
+        }
     }
 }

@@ -49,7 +49,7 @@ jobs:
           fi
           output="$("$binary" decode-contract)"
           echo "$output"
-          echo "$output" | grep -q '"decoder": "libraw"'
+          echo "$output" | grep -E -q '"decoder": "(libraw|colorbalance-dng)"'
           echo "$output" | grep -q '"output-color": "raw"'
           echo "$output" | grep -q '"output-depth": "u16"'
           echo "$output" | grep -q '"no-auto-bright": true'

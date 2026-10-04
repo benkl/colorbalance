@@ -14,7 +14,12 @@ path = "src/main.rs"
 colorbalance-core = { workspace = true }
 colorbalance-raw = { path = "../colorbalance-raw" }
 clap = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
+
+[dev-dependencies]
+colorbalance-fixtures = { path = "../colorbalance-fixtures" }
 
 [lints.rust]
 unsafe_code = "forbid"

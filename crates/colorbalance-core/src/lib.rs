@@ -10,13 +10,19 @@
 //! `docs/ARCHITECTURE.md` for the platform decisions, and
 //! `docs/CONTRACTS.md` for the binding module interfaces.
 
+pub mod calibration;
 pub mod chart;
+pub mod color;
 pub mod contract;
+pub mod dataset;
 pub mod decode;
+pub mod interchange;
+pub mod output;
+pub mod profile;
 
 pub use chart::{ChartModel, ChartPatch, ChartRevision};
 pub use contract::{
-    DecodeContract, DemosaicAlgorithm, HighlightPolicy, OutputColor, OutputDepth,
-    OrientationPolicy, WhiteBalancePolicy,
+    DecodeContract, DemosaicAlgorithm, HighlightPolicy, OrientationPolicy, OutputColor,
+    OutputDepth, WhiteBalancePolicy,
 };
 pub use decode::{CameraIdentity, DecodeError, DecodedImage, RawDecoder};

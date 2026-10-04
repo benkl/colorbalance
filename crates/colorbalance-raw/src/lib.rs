@@ -7,10 +7,16 @@
 //! apply. The mapping is testable without linking LibRaw so the contract
 //! cannot drift between issue 1 and issue 3.
 
+pub mod dng;
+pub mod dng_writer;
+
+pub use dng::{decode_dng, DngDecoder, DngError, DECODER_NAME, DECODER_VERSION};
+pub use dng_writer::{write_dng, DngWriteSpec};
+
 use colorbalance_core::contract::{ContractError, DecodeContract};
 
-/// Decoder identity recorded in every profile.
-pub const DECODER_NAME: &str = "libraw";
+/// Legacy LibRaw decoder identity recorded in profiles using the LibRaw path.
+pub const LIBRAW_DECODER_NAME: &str = "libraw";
 
 /// LibRaw version the decode contract is pinned against.
 ///
@@ -20,7 +26,7 @@ pub const PINNED_LIBRAW_VERSION: &str = "0.21.0";
 
 /// The canonical decode contract for the pinned LibRaw version.
 pub fn canonical_contract() -> DecodeContract {
-    DecodeContract::canonical(DECODER_NAME, PINNED_LIBRAW_VERSION)
+    DecodeContract::canonical(LIBRAW_DECODER_NAME, PINNED_LIBRAW_VERSION)
 }
 
 /// LibRaw parameter values that realize a validated [`DecodeContract`].
