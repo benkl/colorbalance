@@ -288,7 +288,10 @@ fn validate_dataset(
 /// The digest identifies the reference data a profile was derived against;
 /// it is stable as long as `data/chart-datasets.json` is unchanged.
 pub fn dataset_digest() -> String {
-    let digest = Sha256::digest(DATASET_JSON.as_bytes());
+    // Normalize CRLF to LF so the dataset digest is identical on Windows checkouts
+    // and Linux/macOS runners regardless of Git core.autocrlf settings.
+    let normalized = DATASET_JSON.replace("\r\n", "\n");
+    let digest = Sha256::digest(normalized.as_bytes());
     let mut hex = String::with_capacity(digest.len() * 2);
     for byte in digest {
         use std::fmt::Write as _;
@@ -303,7 +306,7 @@ mod tests {
 
     /// SHA-256 over the committed `data/chart-datasets.json` bytes.
     const COMMITTED_DIGEST: &str =
-        "ec2f973e9e70e8acb2054264359053ee2d2ebcac1d5086848cf284dbd7539edb";
+        "0396277212d10d4818b4f46510d9b587636ecedd6646af1de5770fe702cc019e";
     const KEY_BEFORE: &str = "classic-before-november-2014";
 
     const REVISIONS: [ChartRevision; 2] = [
