@@ -7,21 +7,20 @@ interface Props {
   imageHeight?: number;
   quad: ChartQuad;
   onQuadChange: (quad: ChartQuad) => void;
+  onBrowse?: () => void;
   disabled?: boolean;
 }
-
 export const LightTableOverlay: React.FC<Props> = ({
   imageSrc,
   imageWidth = 480,
   imageHeight = 320,
   quad,
   onQuadChange,
+  onBrowse,
   disabled = false,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const [activeCorner, setActiveCorner] = useState<number | null>(null);
-
-
   const cornerLabels = ['TL [0,0]', 'TR [5,0]', 'BR [5,3]', 'BL [0,3]'];
 
   // Handle SVG coordinate transformation on drag
@@ -146,12 +145,20 @@ export const LightTableOverlay: React.FC<Props> = ({
             draggable={false}
           />
         ) : (
-          <div className="w-full h-full light-table-grid flex items-center justify-center">
-            <div className="text-center space-y-2 p-6 bg-[var(--bb-space)]/90 border border-[var(--bb-border-bright)]">
-              <p className="text-[var(--bb-amber)] font-semibold tracking-wider text-sm">NO REFERENCE IMAGE LOADED</p>
-              <p className="text-[var(--bb-smoke)] text-xs">SELECT OR DROP A RAW (DNG) OR STINKY JPEG FRAME ONTO THE LIGHT-TABLE</p>
+          <button
+            type="button"
+            onClick={onBrowse}
+            className="w-full h-full light-table-grid flex items-center justify-center cursor-pointer border-none bg-transparent hover:bg-[var(--bb-surface)]/20 transition-colors group"
+          >
+            <div className="text-center space-y-2 p-6 bg-[var(--bb-space)]/90 border border-[var(--bb-border-bright)] group-hover:border-[var(--bb-gold)] transition-colors">
+              <p className="text-[var(--bb-amber)] group-hover:text-[var(--bb-gold)] font-semibold tracking-wider text-sm">
+                CLICK TO OPEN FILE OR DROP IMAGE HERE
+              </p>
+              <p className="text-[var(--bb-smoke)] text-xs">
+                SUPPORTS RAW (DNG) AND COMPRESSED (JPEG/PNG) LIGHT-TABLE FRAMES
+              </p>
             </div>
-          </div>
+          </button>
         )}
 
         {/* Precision Coordinate & Grid Overlay */}

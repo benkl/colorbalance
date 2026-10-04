@@ -316,6 +316,7 @@ export const App: React.FC = () => {
             imageSrc={referencePreview}
             quad={quad}
             onQuadChange={setQuad}
+            onBrowse={browseReference}
             disabled={isProcessing}
           />
         </div>
