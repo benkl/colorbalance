@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
-use tauri::{App, Emitter, Manager, RunEvent, WindowEvent};
+use tauri::{App, Emitter, Manager, WindowEvent};
 use tauri_plugin_dialog::{DialogExt, FilePath};
 
 pub struct AppState {
@@ -65,13 +65,8 @@ pub fn run_app() {
             choose_directory,
             choose_save_path,
         ])
-        .build(tauri::generate_context!())
-        .expect("error while building ColorBalance desktop application")
-        .run(|_app, event| {
-            if let RunEvent::ExitRequested { api, .. } = event {
-                api.prevent_exit();
-            }
-        });
+        .run(tauri::generate_context!())
+        .expect("error while running ColorBalance desktop application");
 }
 
 fn register_native_drag_drop(app: &mut App) {
