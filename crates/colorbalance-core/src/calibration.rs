@@ -53,6 +53,17 @@ impl Default for GateConfig {
     }
 }
 
+impl GateConfig {
+    /// Relaxed quality thresholds for approximate calibration on compressed, non-RAW JPEG sources.
+    pub fn quick_and_dirty() -> Self {
+        Self {
+            min_patch_pixels: 16,
+            max_cv: 0.25,
+            require_neutral_row: false,
+        }
+    }
+}
+
 /// One failed chart quality check.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GateFailure {

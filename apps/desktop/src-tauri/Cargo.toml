@@ -1,0 +1,22 @@
+[package]
+name = "colorbalance-desktop"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.90"
+description = "ColorBalance Light-Table desktop application"
+
+[build-dependencies]
+tauri-build = { version = "=2.7.1", features = [] }
+
+[dependencies]
+colorbalance-core = { path = "../../../crates/colorbalance-core" }
+colorbalance-raw = { path = "../../../crates/colorbalance-raw" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tauri = { version = "=2.12.1", features = [] }
+tauri-plugin-dialog = "2"
+thiserror = "2"
+
+[lints.rust]
+unsafe_code = "forbid"

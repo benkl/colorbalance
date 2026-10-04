@@ -1,0 +1,457 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+use std::fs;
+use std::path::Path;
+use std::sync::Mutex;
+
+use colorbalance_core::calibration::{self, ChartQuad, GateConfig};
+use colorbalance_core::chart::ChartRevision;
+use colorbalance_core::decode::{DecodedImage, RawDecoder};
+use colorbalance_core::interchange::{profile_to_clf, profile_to_cube};
+use colorbalance_core::output::encode_tiff_rgb_u16;
+use colorbalance_core::profile::{
+    self, apply_transform, encode_srgb_u16, Profile, ValidationSummary,
+};
+use colorbalance_raw::dng::DngDecoder;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use tauri::{Emitter, State, Window};
+
+#[derive(Default)]
+struct AppState {
+    cancellation: Mutex<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct QuadPayload {
+    corners: [[f64; 2]; 4],
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InspectResponse {
+    camera: colorbalance_core::CameraIdentity,
+    image_width: u32,
+    image_height: u32,
+    chart_revision: ChartRevision,
+    quality_passed: bool,
+    gate_failures: Vec<GateFailureResponse>,
+    quad: [[f64; 2]; 4],
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GateFailureResponse {
+    patch: Option<String>,
+    reason: String,
+    measured: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DeriveResponse {
+    profile_path: String,
+    report_path: Option<String>,
+    digest: String,
+    quality_passed: bool,
+    validation: ValidationSummary,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BatchResponse {
+    succeeded: Vec<String>,
+    skipped: Vec<String>,
+    failed: Vec<BatchFailure>,
+    total: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BatchFailure {
+    file: String,
+    error: String,
+}
+
+#[derive(Debug, thiserror::Error)]
+enum BackendError {
+    #[error("{0}")]
+    Message(String),
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+impl serde::Serialize for BackendError {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+fn parse_revision(value: &str) -> Result<ChartRevision, BackendError> {
+    match value {
+        "classic-before-nov-2014" => Ok(ChartRevision::ClassicBeforeNovember2014),
+        "classic-from-nov-2014" => Ok(ChartRevision::ClassicFromNovember2014),
+        other => Err(BackendError::Message(format!(
+            "unsupported chart revision: {other}"
+        ))),
+    }
+}
+
+fn decode_auto(path: &Path) -> Result<DecodedImage, BackendError> {
+    let extension = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if matches!(extension.as_str(), "jpg" | "jpeg" | "png") {
+        colorbalance_raw::decode_rendered_image(path)
+            .map_err(|error| BackendError::Message(error.to_string()))
+    } else {
+        DngDecoder
+            .decode_path(path)
+            .map_err(|error| BackendError::Message(error.to_string()))
+    }
+}
+
+fn quad_from_payload(payload: Option<QuadPayload>, width: u32, height: u32) -> ChartQuad {
+    payload
+        .map(|value| ChartQuad {
+            corners: value.corners,
+        })
+        .unwrap_or_else(|| {
+            let w = f64::from(width);
+            let h = f64::from(height);
+            let mx = w * 0.08;
+            let my = h * 0.08;
+            ChartQuad {
+                corners: [[mx, my], [w - mx, my], [w - mx, h - my], [mx, h - my]],
+            }
+        })
+}
+
+#[tauri::command]
+fn inspect_reference(
+    path: String,
+    chart_revision: String,
+    quad: Option<QuadPayload>,
+    quick_and_dirty: bool,
+) -> Result<InspectResponse, BackendError> {
+    let image = decode_auto(Path::new(&path))?;
+    let revision = parse_revision(&chart_revision)?;
+    let chart_quad = quad_from_payload(quad, image.width, image.height);
+    let samples = calibration::sample_patches(&image, &chart_quad)
+        .map_err(|error| BackendError::Message(error.to_string()))?;
+    let gate_config = if quick_and_dirty {
+        GateConfig::quick_and_dirty()
+    } else {
+        GateConfig::default()
+    };
+    let failures = calibration::evaluate_quality(&samples, &gate_config)
+        .err()
+        .unwrap_or_default();
+    Ok(InspectResponse {
+        camera: image.camera,
+        image_width: image.width,
+        image_height: image.height,
+        chart_revision: revision,
+        quality_passed: failures.is_empty(),
+        gate_failures: failures
+            .into_iter()
+            .map(|failure| GateFailureResponse {
+                patch: failure.patch.map(|patch| format!("{patch:?}")),
+                reason: failure.reason,
+                measured: failure.measured,
+            })
+            .collect(),
+        quad: chart_quad.corners,
+    })
+}
+
+#[tauri::command]
+fn derive_profile(
+    path: String,
+    chart_revision: String,
+    profile_path: String,
+    report_path: Option<String>,
+    quad: Option<QuadPayload>,
+    quick_and_dirty: bool,
+    force: bool,
+) -> Result<DeriveResponse, BackendError> {
+    let image = decode_auto(Path::new(&path))?;
+    let revision = parse_revision(&chart_revision)?;
+    let chart_quad = quad_from_payload(quad, image.width, image.height);
+    let dataset = colorbalance_core::dataset::load(revision)
+        .map_err(|error| BackendError::Message(error.to_string()))?;
+    let samples = calibration::sample_patches(&image, &chart_quad)
+        .map_err(|error| BackendError::Message(error.to_string()))?;
+    let gate_config = if quick_and_dirty {
+        GateConfig::quick_and_dirty()
+    } else {
+        GateConfig::default()
+    };
+    let failures = calibration::evaluate_quality(&samples, &gate_config)
+        .err()
+        .unwrap_or_default();
+    if !failures.is_empty() && !force && !quick_and_dirty {
+        return Err(BackendError::Message(format!(
+            "quality gates failed: {}",
+            failures
+                .iter()
+                .map(|failure| failure.reason.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
+    }
+
+    let (stages, validation) = calibration::fit(&samples, &dataset)
+        .map_err(|error| BackendError::Message(error.to_string()))?;
+    let reference_bytes = fs::read(&path)?;
+    let mut reference_hasher = Sha256::new();
+    reference_hasher.update(reference_bytes);
+    let reference_digest = format!("{:x}", reference_hasher.finalize());
+    let contract = colorbalance_core::contract::DecodeContract::canonical(
+        &image.camera.decoder,
+        &image.camera.decoder_version,
+    );
+    let initial = Profile {
+        schema_version: profile::SCHEMA_VERSION.to_owned(),
+        decode_contract: contract,
+        camera: image.camera,
+        chart_revision: revision,
+        dataset_digest: colorbalance_core::dataset::dataset_digest(),
+        reference_digest,
+        transform: stages,
+        validation: ValidationSummary {
+            mean_delta_e: validation.mean_delta_e,
+            max_delta_e: validation.max_delta_e,
+            p95_delta_e: validation.p95_delta_e,
+            neutral_max_delta_e: validation.neutral_max_delta_e,
+            skin_max_delta_e: validation.skin_max_delta_e,
+            condition_number: validation.condition_number,
+            patch_count: validation.per_patch.len() as u32,
+        },
+        digest: String::new(),
+    };
+    let mut profile_value: Profile = serde_json::from_str(&profile::to_json(&initial))
+        .map_err(|error| BackendError::Message(error.to_string()))?;
+    profile_value.digest = profile::digest(&profile_value);
+    fs::write(&profile_path, profile::to_json(&profile_value))?;
+
+    if let Some(report) = &report_path {
+        fs::write(
+            report,
+            build_report_html(&profile_value, &chart_quad, &failures, quick_and_dirty),
+        )?;
+    }
+
+    let mut warnings = failures
+        .iter()
+        .map(|failure| format!("{}: {}", failure.reason, failure.measured))
+        .collect::<Vec<_>>();
+    if quick_and_dirty {
+        warnings.insert(
+            0,
+            "Quick-and-dirty approximation: source was rendered JPEG/PNG, not RAW.".to_owned(),
+        );
+    }
+    Ok(DeriveResponse {
+        profile_path,
+        report_path,
+        digest: profile_value.digest,
+        quality_passed: warnings.is_empty(),
+        validation: profile_value.validation,
+        warnings,
+    })
+}
+
+#[tauri::command]
+fn apply_batch(
+    profile_path: String,
+    input_path: String,
+    output_path: String,
+    overwrite: bool,
+    force: bool,
+    state: State<'_, AppState>,
+    window: Window,
+) -> Result<BatchResponse, BackendError> {
+    *state
+        .cancellation
+        .lock()
+        .map_err(|_| BackendError::Message("cancellation lock poisoned".to_owned()))? = false;
+    let profile_text = fs::read_to_string(&profile_path)?;
+    let profile = profile::from_json(&profile_text)
+        .map_err(|error| BackendError::Message(error.to_string()))?;
+    fs::create_dir_all(&output_path)?;
+    let input = Path::new(&input_path);
+    let paths = if input.is_file() {
+        vec![input.to_path_buf()]
+    } else {
+        fs::read_dir(input)?
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.is_file())
+            .filter(|path| {
+                matches!(
+                    path.extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or_default()
+                        .to_ascii_lowercase()
+                        .as_str(),
+                    "dng" | "jpg" | "jpeg" | "png"
+                )
+            })
+            .collect()
+    };
+    let mut result = BatchResponse {
+        succeeded: Vec::new(),
+        skipped: Vec::new(),
+        failed: Vec::new(),
+        total: paths.len(),
+    };
+    for (index, input_file) in paths.into_iter().enumerate() {
+        let _ = window.emit(
+            "batch-progress",
+            serde_json::json!({
+                "completed": index,
+                "total": result.total,
+                "file": input_file.display().to_string()
+            }),
+        );
+        if *state
+            .cancellation
+            .lock()
+            .map_err(|_| BackendError::Message("cancellation lock poisoned".to_owned()))?
+        {
+            break;
+        }
+        let stem = input_file
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("image");
+        let output_file = Path::new(&output_path).join(format!("{stem}.tiff"));
+        if output_file.exists() && !overwrite {
+            result.skipped.push(input_file.display().to_string());
+            continue;
+        }
+        let image = match decode_auto(&input_file) {
+            Ok(image) => image,
+            Err(error) => {
+                result.failed.push(BatchFailure {
+                    file: input_file.display().to_string(),
+                    error: error.to_string(),
+                });
+                continue;
+            }
+        };
+        if (image.camera.make != profile.camera.make || image.camera.model != profile.camera.model)
+            && !force
+        {
+            result.failed.push(BatchFailure {
+                file: input_file.display().to_string(),
+                error: format!(
+                    "camera mismatch: {} {}",
+                    image.camera.make, image.camera.model
+                ),
+            });
+            continue;
+        }
+        let mut pixels = Vec::with_capacity(image.rgb.len());
+        for rgb in image.rgb.as_chunks::<3>().0 {
+            let (corrected, _) = apply_transform(
+                &profile,
+                [f64::from(rgb[0]), f64::from(rgb[1]), f64::from(rgb[2])],
+            );
+            let encoded = [
+                colorbalance_core::color::srgb_encode(corrected[0]),
+                colorbalance_core::color::srgb_encode(corrected[1]),
+                colorbalance_core::color::srgb_encode(corrected[2]),
+            ];
+            pixels.extend_from_slice(&encode_srgb_u16(encoded));
+        }
+        let data = encode_tiff_rgb_u16(image.width, image.height, &pixels);
+        let temporary = output_file.with_extension("tiff.tmp");
+        fs::write(&temporary, data)?;
+        fs::rename(&temporary, &output_file)?;
+        result.succeeded.push(input_file.display().to_string());
+    }
+    let _ = window.emit(
+        "batch-progress",
+        serde_json::json!({
+            "completed": result.succeeded.len() + result.skipped.len() + result.failed.len(),
+            "total": result.total,
+            "file": null
+        }),
+    );
+    Ok(result)
+}
+
+#[tauri::command]
+fn cancel_batch(state: State<'_, AppState>) -> Result<(), BackendError> {
+    *state
+        .cancellation
+        .lock()
+        .map_err(|_| BackendError::Message("cancellation lock poisoned".to_owned()))? = true;
+    Ok(())
+}
+
+#[tauri::command]
+fn export_profile(
+    profile_path: String,
+    format: String,
+    output_path: String,
+    size: Option<usize>,
+) -> Result<String, BackendError> {
+    let text = fs::read_to_string(&profile_path)?;
+    let profile =
+        profile::from_json(&text).map_err(|error| BackendError::Message(error.to_string()))?;
+    let content = match format.as_str() {
+        "clf" => profile_to_clf(&profile),
+        "cube" => profile_to_cube(&profile, size.unwrap_or(33)),
+        other => {
+            return Err(BackendError::Message(format!(
+                "unsupported export format: {other}"
+            )))
+        }
+    };
+    fs::write(&output_path, content)?;
+    Ok(output_path)
+}
+
+fn build_report_html(
+    profile: &Profile,
+    quad: &ChartQuad,
+    failures: &[colorbalance_core::calibration::GateFailure],
+    quick_and_dirty: bool,
+) -> String {
+    let warning = if quick_and_dirty {
+        "QUICK & DIRTY APPROXIMATION: rendered source; sRGB inversion is approximate."
+    } else if failures.is_empty() {
+        "QUALITY GATES PASS"
+    } else {
+        "QUALITY GATES OVERRIDDEN"
+    };
+    format!(
+        "<!doctype html><meta charset=\"utf-8\"><title>ColorBalance Report</title><h1>{warning}</h1><p>Profile digest: {}</p><p>Mean ΔE2000: {:.3} | Max: {:.3}</p><p>Quad: {:?}</p>",
+        profile.digest, profile.validation.mean_delta_e, profile.validation.max_delta_e, quad.corners
+    )
+}
+
+fn main() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .manage(AppState::default())
+        .invoke_handler(tauri::generate_handler![
+            inspect_reference,
+            derive_profile,
+            apply_batch,
+            cancel_batch,
+            export_profile,
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running ColorBalance desktop application");
+}

@@ -4,13 +4,12 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 repository.workspace = true
-description = "ColorBalance LibRaw decode layer"
+description = "ColorBalance image and RAW decode layer"
 
 [dependencies]
 colorbalance-core = { workspace = true }
+image = { workspace = true }
 thiserror = { workspace = true }
 
 [lints.rust]
-# The LibRaw FFI layer lands in milestone 1 issue 3 and is the only place
-# `unsafe` will be allowed in this workspace.
 unsafe_code = "deny"

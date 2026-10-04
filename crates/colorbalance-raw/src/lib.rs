@@ -9,9 +9,13 @@
 
 pub mod dng;
 pub mod dng_writer;
+pub mod rendered;
 
 pub use dng::{decode_dng, DngDecoder, DngError, DECODER_NAME, DECODER_VERSION};
 pub use dng_writer::{write_dng, DngWriteSpec};
+pub use rendered::{
+    decode_rendered_image, RenderedImageDecoder, JPEG_DECODER_NAME, JPEG_DECODER_VERSION,
+};
 
 use colorbalance_core::contract::{ContractError, DecodeContract};
 

@@ -14,7 +14,7 @@ The first release should solve one narrow workflow well:
 6. Apply the fixed transform to RAW files from the same capture setup. Do not infer exposure or white balance from arbitrary scene content.
 7. Write 16-bit TIFF output and a documented transform for hosts that can reproduce the same decoded camera-RGB input.
 
-Rendered TIFF and JPEG input can follow once the RAW path is measured and stable. Fitting a profile against camera-processed JPEG is useful, but it is less predictable because tone curves, white balance, local processing, and gamut clipping have already changed the patch values.
+Rendered TIFF, JPEG, and PNG input can be processed using the `--quick-and-dirty` approximation mode. When calibrating against camera-processed JPEG sources, sRGB gamma non-linearities are inverted back to approximate linear color values, and quality gates are relaxed (min 16 pixels per patch, max CV 0.25, unconstrained neutral row) while recording prominent warning badges in the HTML report and profile metadata.
 
 ## Product constraints
 

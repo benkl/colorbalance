@@ -1,9 +1,8 @@
 # ColorBalance
 
-ColorBalance builds a reusable color transform from one X-Rite or Calibrite ColorChecker Classic RAW reference photo and applies it to every image in a batch captured with the same camera, lighting, exposure, and RAW settings. It measures what it does, refuses references it cannot trust, and never modifies input files.
+ColorBalance builds a reusable color transform from an X-Rite or Calibrite ColorChecker Classic reference photo (RAW DNG or rendered JPEG/PNG in quick-and-dirty mode) and applies it to every image in a batch captured with the same camera, lighting, and exposure. It measures what it does, refuses references it cannot trust without explicit override, and never modifies input files.
 
-Status: core and batch pipeline implemented. Milestone 1 calibration core, Milestone 2 batch apply and 16-bit TIFF output, Milestone 3 CLF and .cube exports, and Milestone 5 WebAssembly target are implemented and verified with synthetic DNG fixtures and independent colour-science reference datasets. LibRaw FFI and PySide6/Tauri UI are next.
-
+Status: core, batch pipeline, and quick-and-dirty JPEG approximation implemented. Milestone 1 calibration core, Milestone 2 batch apply and 16-bit TIFF output, Milestone 3 CLF and .cube exports, and Milestone 5 WebAssembly target are implemented and verified. LibRaw FFI and Tauri UI are next.
 ## Documentation
 
 Read in this order:

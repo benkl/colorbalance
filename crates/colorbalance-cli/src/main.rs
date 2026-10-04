@@ -23,7 +23,7 @@ use sha2::{Digest, Sha256};
 #[command(
     name = "colorbalance",
     version,
-    about = "Derive a ColorChecker color transform and apply it to RAW batches",
+    about = "Derive a ColorChecker color transform and apply it to RAW and JPEG batches",
     long_about = None
 )]
 struct Cli {
@@ -35,11 +35,11 @@ struct Cli {
 enum Commands {
     /// Print the canonical RAW decode contract as JSON
     DecodeContract,
-    /// Inspect a RAW reference file and print chart quality diagnostics as JSON
+    /// Inspect a reference file and print chart quality diagnostics as JSON
     Inspect(InspectArgs),
-    /// Derive a measured color profile and HTML report from a RAW reference
+    /// Derive a measured color profile and HTML report from a reference
     Derive(DeriveArgs),
-    /// Apply a measured profile to a directory of RAW images and write 16-bit TIFFs
+    /// Apply a measured profile to a directory of images and write 16-bit TIFFs
     Apply(ApplyArgs),
     /// Export a profile to Common LUT Format (.clf) or 3D LUT (.cube)
     Export(ExportArgs),
@@ -47,7 +47,7 @@ enum Commands {
 
 #[derive(Args)]
 struct InspectArgs {
-    /// RAW reference image file path (DNG format in this release)
+    /// Reference image file path (RAW DNG, or JPEG/PNG in quick-and-dirty mode)
     reference: PathBuf,
     /// Physical chart revision
     #[arg(long, value_enum, default_value_t = ChartRevisionArg::ClassicFromNovember2014)]
@@ -55,11 +55,14 @@ struct InspectArgs {
     /// Optional manual corners: x1,y1,x2,y2,x3,y3,x4,y4 (TL, TR, BR, BL)
     #[arg(long, value_parser = parse_quad)]
     quad: Option<ChartQuad>,
+    /// Quick-and-dirty mode: approximate calibration on non-RAW JPEG/PNG sources
+    #[arg(long, default_value_t = false)]
+    quick_and_dirty: bool,
 }
 
 #[derive(Args)]
 struct DeriveArgs {
-    /// RAW reference image file path (DNG format in this release)
+    /// Reference image file path (RAW DNG, or JPEG/PNG in quick-and-dirty mode)
     reference: PathBuf,
     /// Physical chart revision
     #[arg(long, value_enum, default_value_t = ChartRevisionArg::ClassicFromNovember2014)]
@@ -76,13 +79,16 @@ struct DeriveArgs {
     /// Allow writing a profile despite quality gate failures (recorded in report)
     #[arg(long, default_value_t = false)]
     force: bool,
+    /// Quick-and-dirty mode: approximate calibration on non-RAW JPEG/PNG sources
+    #[arg(long, default_value_t = false)]
+    quick_and_dirty: bool,
 }
 
 #[derive(Args)]
 struct ApplyArgs {
     /// Measured profile JSON file path
     profile: PathBuf,
-    /// Input directory containing matching RAW images (or a single file)
+    /// Input directory containing matching images (or a single file)
     input: PathBuf,
     /// Destination directory for balanced 16-bit TIFF outputs
     #[arg(long, short = 'o')]
@@ -218,17 +224,33 @@ pub struct BatchFileError {
     pub error: String,
 }
 
+fn decode_auto(path: &Path) -> Result<DecodedImage, String> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    if ext == "jpg" || ext == "jpeg" || ext == "png" {
+        colorbalance_raw::decode_rendered_image(path).map_err(|e| format!("{e}"))
+    } else {
+        let decoder = DngDecoder;
+        decoder.decode_path(path).map_err(|e| format!("{e}"))
+    }
+}
+
 fn execute_inspect(args: InspectArgs) -> Result<(), String> {
-    let decoder = DngDecoder;
-    let image = decoder
-        .decode_path(&args.reference)
-        .map_err(|e| format!("decode failed: {e}"))?;
+    let image = decode_auto(&args.reference).map_err(|e| format!("decode failed: {e}"))?;
     let quad = args
         .quad
         .unwrap_or_else(|| default_quad_for_image(image.width, image.height));
     let samples = calibration::sample_patches(&image, &quad)
         .map_err(|e| format!("patch sampling failed: {e}"))?;
-    let gate_res = calibration::evaluate_quality(&samples, &GateConfig::default());
+    let gate_cfg = if args.quick_and_dirty {
+        GateConfig::quick_and_dirty()
+    } else {
+        GateConfig::default()
+    };
+    let gate_res = calibration::evaluate_quality(&samples, &gate_cfg);
     let (passed, failures) = match gate_res {
         Ok(()) => (true, Vec::new()),
         Err(f) => (
@@ -259,10 +281,7 @@ fn execute_inspect(args: InspectArgs) -> Result<(), String> {
 }
 
 fn execute_derive(args: DeriveArgs) -> Result<(), String> {
-    let decoder = DngDecoder;
-    let image = decoder
-        .decode_path(&args.reference)
-        .map_err(|e| format!("decode failed: {e}"))?;
+    let image = decode_auto(&args.reference).map_err(|e| format!("decode failed: {e}"))?;
     let quad = args
         .quad
         .unwrap_or_else(|| default_quad_for_image(image.width, image.height));
@@ -270,7 +289,12 @@ fn execute_derive(args: DeriveArgs) -> Result<(), String> {
     let dataset = dataset::load(revision).map_err(|e| format!("dataset load failed: {e}"))?;
     let samples = calibration::sample_patches(&image, &quad)
         .map_err(|e| format!("patch sampling failed: {e}"))?;
-    let gate_failures = match calibration::evaluate_quality(&samples, &GateConfig::default()) {
+    let gate_cfg = if args.quick_and_dirty {
+        GateConfig::quick_and_dirty()
+    } else {
+        GateConfig::default()
+    };
+    let gate_failures = match calibration::evaluate_quality(&samples, &gate_cfg) {
         Ok(()) => Vec::new(),
         Err(f) => f,
     };
@@ -321,13 +345,14 @@ fn execute_derive(args: DeriveArgs) -> Result<(), String> {
     }
     let json_text = profile::to_json(&p);
     fs::write(&args.profile, json_text).map_err(|e| format!("writing profile: {e}"))?;
+
     if let Some(report_path) = args.report {
         let html = generate_html_report(
             &image,
             &quad,
             &validation,
             &gate_failures,
-            args.force,
+            args.force || args.quick_and_dirty,
             &p.digest,
         );
         if let Some(parent) = report_path.parent() {
@@ -385,7 +410,7 @@ fn generate_html_report(
         }
         list.push_str("</ul>");
         let badge = if forced {
-            "<p style=\"color:orange;\"><strong>Reference quality: OVERRIDDEN (--force used)</strong></p>"
+            "<p style=\"color:orange;\"><strong>Reference quality: OVERRIDDEN / QUICK & DIRTY</strong></p>"
         } else {
             "<p style=\"color:red;\"><strong>Reference quality: FAILED</strong></p>"
         };
@@ -462,8 +487,6 @@ fn execute_apply(args: ApplyArgs) -> Result<(), String> {
         ..Default::default()
     };
 
-    let decoder = DngDecoder;
-
     for input_path in inputs {
         let file_name = input_path
             .file_name()
@@ -483,7 +506,7 @@ fn execute_apply(args: ApplyArgs) -> Result<(), String> {
             continue;
         }
 
-        let decoded = match decoder.decode_path(&input_path) {
+        let decoded = match decode_auto(&input_path) {
             Ok(img) => img,
             Err(e) => {
                 summary.failed.push(BatchFileError {
@@ -608,11 +631,10 @@ fn collect_input_files(path: &Path) -> Result<Vec<PathBuf>, String> {
         if p.is_file() {
             if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
                 let ext_lower = ext.to_lowercase();
-                if ext_lower == "dng"
-                    || ext_lower == "raw"
-                    || ext_lower == "cr3"
-                    || ext_lower == "nef"
-                {
+                if matches!(
+                    ext_lower.as_str(),
+                    "dng" | "raw" | "cr3" | "nef" | "jpg" | "jpeg" | "png"
+                ) {
                     files.push(p);
                 }
             }
