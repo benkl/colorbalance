@@ -18,5 +18,8 @@ tauri = { version = "=2.12.1", features = [] }
 tauri-plugin-dialog = "2"
 thiserror = "2"
 
+[dev-dependencies]
+tauri = { version = "=2.12.1", features = ["test"] }
+
 [lints.rust]
 unsafe_code = "forbid"

@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import type { ChartQuad, ChartRevision, DeriveResult, BatchSummary, InspectResult } from './types';
-import { backend, chooseDirectory, chooseImage, chooseSavePath, listenForBatchProgress, listenForFileDrop } from './tauri';
+import { backend, chooseDirectory, chooseImage, chooseSavePath, listenForBatchProgress, listenForFileDrop, listenForFileDropHover } from './tauri';
 import type { BatchProgress } from './tauri';
+import { referenceFromDrop } from './interaction';
 import { LightTableOverlay } from './components/LightTableOverlay';
 import { ValidationPanel } from './components/ValidationPanel';
 import {
@@ -52,25 +53,29 @@ export const App: React.FC = () => {
   const [batchProgress, setBatchProgress] = useState<BatchProgress | null>(null);
 
   useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    listenForFileDrop(
-      (paths) => {
-        const supported = paths.find((path) => /\.(dng|jpe?g|png)$/i.test(path));
-        if (supported) {
-          setReferencePath(supported);
-          setErrorMessage('');
-          setStep(1);
-        }
-      },
-      setIsDropActive,
-    )
-      .then((stop) => {
-        unlisten = stop;
-      })
-      .catch(() => {
-        // Browser preview does not have a Tauri webview drag event source.
-      });
-    return () => unlisten?.();
+    let stopDrop: (() => void) | undefined;
+    let stopHover: (() => void) | undefined;
+    listenForFileDrop(({ paths }) => {
+      const supported = referenceFromDrop(paths);
+      if (supported) {
+        setReferencePath(supported);
+        setErrorMessage('');
+        setStep(1);
+      }
+    }).then((stop) => {
+      stopDrop = stop;
+    }).catch(() => {
+      // Browser preview has no native event bus.
+    });
+    listenForFileDropHover(setIsDropActive).then((stop) => {
+      stopHover = stop;
+    }).catch(() => {
+      // Browser preview has no native event bus.
+    });
+    return () => {
+      stopDrop?.();
+      stopHover?.();
+    };
   }, []);
 
   useEffect(() => {
