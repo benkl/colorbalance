@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import type { ChartQuad, ChartRevision, DeriveResult, BatchSummary, InspectResult } from './types';
 import { backend, chooseDirectory, chooseImage, chooseSavePath, listenForBatchProgress, listenForFileDrop, listenForFileDropHover } from './tauri';
 import type { BatchProgress } from './tauri';
@@ -44,13 +44,35 @@ export const App: React.FC = () => {
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
   const [isDropActive, setIsDropActive] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string>('');
-
+  const referenceInputRef = useRef<HTMLInputElement>(null);
   // Batch Processing State
   const [batchInputPath, setBatchInputPath] = useState<string>('');
   const [batchOutputPath, setBatchOutputPath] = useState<string>('');
   const [overwriteOutputs, setOverwriteOutputs] = useState<boolean>(false);
   const [batchSummary, setBatchSummary] = useState<BatchSummary | null>(null);
   const [batchProgress, setBatchProgress] = useState<BatchProgress | null>(null);
+  useEffect(() => {
+    const preventDefault = (event: DragEvent) => event.preventDefault();
+    const handleDrop = (event: DragEvent) => {
+      event.preventDefault();
+      setIsDropActive(false);
+      const file = Array.from(event.dataTransfer?.files ?? []).find((item) => /\.(dng|jpe?g|png)$/i.test(item.name));
+      if (!file) {
+        setErrorMessage('Drop a supported DNG, JPEG, or PNG reference image.');
+        return;
+      }
+      setReferencePath(file.name);
+      setReferencePreview(URL.createObjectURL(file));
+      setErrorMessage('Browser mode loaded the preview; use the native desktop app to process its filesystem path.');
+      setStep(1);
+    };
+    window.addEventListener('dragover', preventDefault);
+    window.addEventListener('drop', handleDrop);
+    return () => {
+      window.removeEventListener('dragover', preventDefault);
+      window.removeEventListener('drop', handleDrop);
+    };
+  }, []);
 
   useEffect(() => {
     let stopDrop: (() => void) | undefined;
@@ -98,8 +120,16 @@ export const App: React.FC = () => {
         setErrorMessage('');
       }
     } catch {
-      setErrorMessage('Native file dialog is available in the installed desktop application.');
+      referenceInputRef.current?.click();
     }
+  };
+
+  const handleBrowserReference = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    setReferencePath(file.name);
+    setReferencePreview(URL.createObjectURL(file));
+    setErrorMessage('Browser fallback selected the preview. Native processing requires the desktop file picker path.');
   };
 
   const inspectReference = async () => {
@@ -122,8 +152,9 @@ export const App: React.FC = () => {
 
   // Simulated / Mock Demo Loader when running in pure browser environment
   const loadSyntheticDemo = () => {
-    setReferencePath('fixtures/synthetic_reference_frame.dng');
-    setReferencePreview('');
+    setReferencePath('20261003_183314.jpg');
+    setReferencePreview('/test-data/20261003_183314.jpg');
+    setQuickAndDirty(true);
     setDeriveResult({
       profilePath: 'studio_calibration.cbprofile.json',
       reportPath: 'studio_calibration_report.html',
@@ -303,6 +334,15 @@ export const App: React.FC = () => {
                 </p>
               </div>
 
+              <input
+                ref={referenceInputRef}
+                type="file"
+                accept=".dng,.jpg,.jpeg,.png,image/jpeg,image/png"
+                onChange={handleBrowserReference}
+                className="hidden"
+                aria-hidden="true"
+                tabIndex={-1}
+              />
               <div className="space-y-2">
                 <label className="text-[10px] text-[var(--bb-smoke)] font-bold">SOURCE FILE PATH</label>
                 <div className="flex gap-2">
