@@ -5,6 +5,8 @@ import type { BatchProgress } from './tauri';
 import { referenceFromDrop } from './interaction';
 import { LightTableOverlay } from './components/LightTableOverlay';
 import { ValidationPanel } from './components/ValidationPanel';
+import { DiagnosticConsole } from './components/DiagnosticConsole';
+import { logger } from './logger';
 import {
   Layers,
   Sparkles,
@@ -58,12 +60,14 @@ export const App: React.FC = () => {
       setIsDropActive(false);
       const file = Array.from(event.dataTransfer?.files ?? []).find((item) => /\.(dng|jpe?g|png)$/i.test(item.name));
       if (!file) {
+        logger.warn('UI', 'HTML drop rejected: unsupported format');
         setErrorMessage('Drop a supported DNG, JPEG, or PNG reference image.');
         return;
       }
+      logger.info('UI', `HTML drop received: ${file.name}`);
       setReferencePath(file.name);
       setReferencePreview(URL.createObjectURL(file));
-      setErrorMessage('Browser mode loaded the preview; use the native desktop app to process its filesystem path.');
+      setErrorMessage('');
       setStep(1);
     };
     window.addEventListener('dragover', preventDefault);
@@ -78,21 +82,25 @@ export const App: React.FC = () => {
     let stopDrop: (() => void) | undefined;
     let stopHover: (() => void) | undefined;
     listenForFileDrop(({ paths }) => {
+      logger.info('UI', `Native window drop event: ${paths.join(', ')}`);
       const supported = referenceFromDrop(paths);
       if (supported) {
+        logger.success('UI', `Selected reference from native drop: ${supported}`);
         setReferencePath(supported);
         setErrorMessage('');
         setStep(1);
+      } else {
+        logger.warn('UI', 'Native drop ignored: no supported RAW/JPEG/PNG found');
       }
     }).then((stop) => {
       stopDrop = stop;
     }).catch(() => {
-      // Browser preview has no native event bus.
+      // Browser preview mode
     });
     listenForFileDropHover(setIsDropActive).then((stop) => {
       stopHover = stop;
     }).catch(() => {
-      // Browser preview has no native event bus.
+      // Browser preview mode
     });
     return () => {
       stopDrop?.();
@@ -107,19 +115,22 @@ export const App: React.FC = () => {
         unlisten = stop;
       })
       .catch(() => {
-        // Browser preview has no Tauri event bus.
+        // Browser preview mode
       });
     return () => unlisten?.();
   }, []);
 
   const browseReference = async () => {
+    logger.info('UI', 'Action: Browse reference frame');
     try {
       const selected = await chooseImage();
       if (selected) {
+        logger.success('UI', `Reference selected via native picker: "${selected}"`);
         setReferencePath(selected);
         setErrorMessage('');
       }
-    } catch {
+    } catch (err: unknown) {
+      logger.warn('UI', `Native dialog unavailable (${err instanceof Error ? err.message : String(err)}); falling back to HTML file input`);
       referenceInputRef.current?.click();
     }
   };
@@ -127,11 +138,11 @@ export const App: React.FC = () => {
   const handleBrowserReference = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
+    logger.info('UI', `HTML file input selected: ${file.name}`);
     setReferencePath(file.name);
     setReferencePreview(URL.createObjectURL(file));
-    setErrorMessage('Browser fallback selected the preview. Native processing requires the desktop file picker path.');
+    setErrorMessage('');
   };
-
   const inspectReference = async () => {
     if (!referencePath) {
       setErrorMessage('Choose or drop a reference image first.');
@@ -611,6 +622,9 @@ export const App: React.FC = () => {
           </div>
         </aside>
       </main>
+
+      {/* Bottom Collapsible Diagnostic Console */}
+      <DiagnosticConsole />
     </div>
   );
 };
