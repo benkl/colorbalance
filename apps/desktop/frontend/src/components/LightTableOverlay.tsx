@@ -72,10 +72,22 @@ export const LightTableOverlay: React.FC<Props> = ({
 
   const cornerLabels = ['TL', 'TR', 'BR', 'BL'];
 
-  // Handle pointer down on a corner reticle
+  // Offset (container px) from the pointer to the marker centre at grab time, so
+  // the marker follows the pointer 1:1 instead of snapping its centre to it.
+  const grabOffset = useRef<{ dx: number; dy: number }>({ dx: 0, dy: 0 });
+
   const handlePointerDown = (index: number) => (e: React.PointerEvent) => {
-    if (disabled) return;
-    (e.target as Element).setPointerCapture(e.pointerId);
+    if (disabled || !containerRef.current) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const rect = containerRef.current.getBoundingClientRect();
+    const centre = toScreen(quad[index]);
+    grabOffset.current = {
+      dx: centre.x - (e.clientX - rect.left),
+      dy: centre.y - (e.clientY - rect.top),
+    };
+    // Capture on the stage so move/up keep arriving however fast the pointer travels.
+    containerRef.current.setPointerCapture(e.pointerId);
     setActiveCorner(index);
   };
 
@@ -83,9 +95,9 @@ export const LightTableOverlay: React.FC<Props> = ({
     if (activeCorner === null || disabled || box.w === 0 || box.h === 0 || !containerRef.current) return;
     const rect = containerRef.current.getBoundingClientRect();
 
-    // Client coordinates relative to container top-left
-    const clientX = e.clientX - rect.left;
-    const clientY = e.clientY - rect.top;
+    // Where the marker centre should be, in container pixels.
+    const clientX = e.clientX - rect.left + grabOffset.current.dx;
+    const clientY = e.clientY - rect.top + grabOffset.current.dy;
 
     // Convert to image coordinates [0, imageWidth] x [0, imageHeight]
     const normX = Math.max(0, Math.min(1, (clientX - box.x) / box.w));
@@ -100,12 +112,13 @@ export const LightTableOverlay: React.FC<Props> = ({
   };
 
   const handlePointerUp = (e: React.PointerEvent) => {
-    if (activeCorner !== null) {
-      try {
-        (e.target as Element).releasePointerCapture(e.pointerId);
-      } catch {}
-      setActiveCorner(null);
+    if (activeCorner === null) return;
+    try {
+      containerRef.current?.releasePointerCapture(e.pointerId);
+    } catch {
+      // Capture was already released (e.g. by pointercancel).
     }
+    setActiveCorner(null);
   };
 
   // Convert image coordinates into container pixels for SVG rendering
@@ -259,11 +272,14 @@ export const LightTableOverlay: React.FC<Props> = ({
               <g
                 key={`reticle-${idx}`}
                 transform={`translate(${p.x}, ${p.y})`}
-                className="pointer-events-auto cursor-move transition-transform hover:scale-125"
+                className="pointer-events-auto cursor-move"
                 onPointerDown={handlePointerDown(idx)}
               >
-                <use href="#corner-reticle" />
+                {/* Invisible, generous hit area so the pointer cannot slip off mid-drag. */}
+                <circle r="16" fill="transparent" />
+                <use href="#corner-reticle" className="pointer-events-none" />
                 <text
+                  className="pointer-events-none"
                   x="12"
                   y="-8"
                   fill="#f5b931"
