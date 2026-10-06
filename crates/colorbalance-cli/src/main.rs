@@ -9,13 +9,12 @@ use colorbalance_core::calibration::{self, ChartQuad, GateConfig, GateFailure, V
 use colorbalance_core::chart::ChartRevision;
 use colorbalance_core::contract::DecodeContract;
 use colorbalance_core::dataset;
-use colorbalance_core::decode::{CameraIdentity, DecodedImage, RawDecoder};
+use colorbalance_core::decode::{CameraIdentity, DecodedImage};
 use colorbalance_core::interchange::{profile_to_clf, profile_to_cube};
 use colorbalance_core::output::encode_tiff_rgb_u16;
 use colorbalance_core::profile::{
     self, apply_transform, encode_srgb_u16, Profile, ValidationSummary,
 };
-use colorbalance_raw::dng::DngDecoder;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
@@ -231,17 +230,7 @@ pub struct BatchFileError {
 }
 
 fn decode_auto(path: &Path) -> Result<DecodedImage, String> {
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-    if ext == "jpg" || ext == "jpeg" || ext == "png" {
-        colorbalance_raw::decode_rendered_image(path).map_err(|e| format!("{e}"))
-    } else {
-        let decoder = DngDecoder;
-        decoder.decode_path(path).map_err(|e| format!("{e}"))
-    }
+    colorbalance_raw::decode_any(path).map_err(|e| format!("{e}"))
 }
 
 fn execute_inspect(args: InspectArgs) -> Result<(), String> {

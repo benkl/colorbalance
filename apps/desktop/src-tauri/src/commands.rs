@@ -3,13 +3,12 @@ use std::path::Path;
 
 use colorbalance_core::calibration::{self, ChartQuad, GateConfig};
 use colorbalance_core::chart::ChartRevision;
-use colorbalance_core::decode::{DecodedImage, RawDecoder};
+use colorbalance_core::decode::DecodedImage;
 use colorbalance_core::interchange::{profile_to_clf, profile_to_cube};
 use colorbalance_core::output::encode_tiff_rgb_u16;
 use colorbalance_core::profile::{
     self, apply_transform, encode_srgb_u16, Profile, ValidationSummary,
 };
-use colorbalance_raw::dng::DngDecoder;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::{Emitter, State, Window};
@@ -127,19 +126,7 @@ fn parse_revision(value: &str) -> Result<ChartRevision, BackendError> {
 }
 
 fn decode_auto(path: &Path) -> Result<DecodedImage, BackendError> {
-    let extension = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    if matches!(extension.as_str(), "jpg" | "jpeg" | "png") {
-        colorbalance_raw::decode_rendered_image(path)
-            .map_err(|error| BackendError::Message(error.to_string()))
-    } else {
-        DngDecoder
-            .decode_path(path)
-            .map_err(|error| BackendError::Message(error.to_string()))
-    }
+    colorbalance_raw::decode_any(path).map_err(|error| BackendError::Message(error.to_string()))
 }
 
 fn quad_from_payload(payload: Option<QuadPayload>, width: u32, height: u32) -> ChartQuad {

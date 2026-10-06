@@ -18,6 +18,47 @@ pub use rendered::{
     JPEG_DECODER_NAME, JPEG_DECODER_VERSION,
 };
 
+use std::io::Read;
+use std::path::Path;
+
+use colorbalance_core::decode::{DecodeError, DecodedImage, RawDecoder};
+
+/// Container formats recognised by their leading bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceKind {
+    /// Classic TIFF, which is what a DNG is. Handled by the DNG decoder.
+    Tiff,
+    /// JPEG or PNG. Handled by the rendered-image decoder.
+    Rendered,
+}
+
+/// Identify a file by its magic bytes, ignoring the file extension.
+///
+/// Phones and gallery apps routinely hand out JPEGs named `.dng` (and the
+/// reverse), so the extension cannot be trusted to pick a decoder.
+pub fn sniff_source(path: &Path) -> Result<SourceKind, DecodeError> {
+    let mut head = [0u8; 8];
+    let read = std::fs::File::open(path)?.read(&mut head)?;
+    let head = &head[..read];
+    if head.starts_with(&[0xFF, 0xD8, 0xFF]) || head.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Ok(SourceKind::Rendered)
+    } else if head.starts_with(b"II*\0") || head.starts_with(b"MM\0*") {
+        Ok(SourceKind::Tiff)
+    } else {
+        Err(DecodeError::UnsupportedFormat(
+            "unrecognized image data; expected a DNG, JPEG, or PNG file".to_owned(),
+        ))
+    }
+}
+
+/// Decode any supported source, choosing the decoder from the file's content.
+pub fn decode_any(path: &Path) -> Result<DecodedImage, DecodeError> {
+    match sniff_source(path)? {
+        SourceKind::Rendered => decode_rendered_image(path),
+        SourceKind::Tiff => DngDecoder.decode_path(path),
+    }
+}
+
 use colorbalance_core::contract::{ContractError, DecodeContract};
 
 /// Legacy LibRaw decoder identity recorded in profiles using the LibRaw path.

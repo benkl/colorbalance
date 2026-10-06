@@ -159,3 +159,59 @@ fn four_color_cfa_is_rejected() {
         "expected CFAPattern rejection, got: {error}"
     );
 }
+
+// Phones and gallery apps hand out JPEGs named `.dng`, so the file's bytes, not its
+// extension, must pick the decoder.
+mod decode_by_content {
+    use super::*;
+    use colorbalance_raw::{decode_any, sniff_source, SourceKind};
+
+    fn scratch(name: &str, extension: &str) -> PathBuf {
+        temp_path(name).with_extension(extension)
+    }
+
+    #[test]
+    fn jpeg_named_dng_decodes_as_a_rendered_image() {
+        let path = scratch("jpeg-as-dng", "dng");
+        let mut jpeg = Vec::new();
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            8,
+            6,
+            image::Rgb([90, 120, 60]),
+        ))
+        .write_to(
+            &mut std::io::Cursor::new(&mut jpeg),
+            image::ImageFormat::Jpeg,
+        )
+        .unwrap();
+        fs::write(&path, jpeg).unwrap();
+
+        assert_eq!(sniff_source(&path).unwrap(), SourceKind::Rendered);
+        let decoded = decode_any(&path).expect("a JPEG must decode whatever its extension says");
+        fs::remove_file(path).unwrap();
+        assert_eq!((decoded.width, decoded.height), (8, 6));
+    }
+
+    #[test]
+    fn real_dng_with_a_jpg_extension_still_decodes_as_raw() {
+        let path = scratch("dng-as-jpg", "jpg");
+        write_dng(&path, &base_spec(4, 4, vec![600; 16])).unwrap();
+
+        assert_eq!(sniff_source(&path).unwrap(), SourceKind::Tiff);
+        let decoded = decode_any(&path).expect("a DNG must decode whatever its extension says");
+        fs::remove_file(path).unwrap();
+        assert_eq!((decoded.width, decoded.height), (4, 4));
+    }
+
+    #[test]
+    fn unrecognised_data_is_rejected_with_a_clear_message() {
+        let path = scratch("garbage", "dng");
+        fs::write(&path, b"this is not an image at all").unwrap();
+        let error = decode_any(&path).unwrap_err().to_string();
+        fs::remove_file(path).unwrap();
+        assert!(
+            error.contains("expected a DNG, JPEG, or PNG"),
+            "got: {error}"
+        );
+    }
+}
