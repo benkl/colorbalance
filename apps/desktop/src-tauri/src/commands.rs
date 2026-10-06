@@ -223,6 +223,61 @@ pub fn inspect_reference(
     })
 }
 
+/// Turn the quality-gate failures into a short, actionable message.
+///
+/// Failures are grouped by patch and carry the measured value, so a user can
+/// tell "the chart is clipped" from "the corners are off" at a glance.
+pub fn gate_failure_message(failures: &[calibration::GateFailure]) -> String {
+    let clipped = failures
+        .iter()
+        .filter(|f| f.reason.starts_with("clipped"))
+        .count();
+    let noisy = failures
+        .iter()
+        .filter(|f| f.reason.contains("coefficient of variation"))
+        .count();
+    let layout = failures
+        .iter()
+        .any(|f| f.reason.starts_with("last row is not the neutral row"));
+
+    let mut lines = vec![format!(
+        "Quality gates failed ({} checks): {clipped} clipped, {noisy} too noisy{}.",
+        failures.len(),
+        if layout {
+            ", chart orientation looks wrong"
+        } else {
+            ""
+        }
+    )];
+    let mut seen: Vec<String> = Vec::new();
+    for failure in failures {
+        let label = failure
+            .patch
+            .map_or_else(|| "chart".to_owned(), |patch| format!("{patch:?}"));
+        let kind = failure
+            .reason
+            .replace(" coefficient of variation", " noise");
+        let entry = format!("{label}: {kind} ({})", failure.measured);
+        if !seen.contains(&entry) {
+            seen.push(entry);
+        }
+    }
+    for entry in seen.iter().take(6) {
+        lines.push(format!("- {entry}"));
+    }
+    if seen.len() > 6 {
+        lines.push(format!("- ...and {} more", seen.len() - 6));
+    }
+    if clipped > 0 {
+        lines.push(
+            "Clipped patches carry no colour information. Re-shoot at lower exposure, \
+             or tick Quick & Dirty to fit an approximation from a JPEG."
+                .to_owned(),
+        );
+    }
+    lines.join("\n")
+}
+
 #[tauri::command]
 pub fn derive_profile(
     path: String,
@@ -249,14 +304,7 @@ pub fn derive_profile(
         .err()
         .unwrap_or_default();
     if !failures.is_empty() && !force && !quick_and_dirty {
-        return Err(BackendError::Message(format!(
-            "quality gates failed: {}",
-            failures
-                .iter()
-                .map(|failure| failure.reason.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        )));
+        return Err(BackendError::Message(gate_failure_message(&failures)));
     }
 
     let (stages, validation) = calibration::fit(&samples, &dataset)

@@ -99,3 +99,46 @@ fn load_reference_returns_a_png_with_the_true_size() {
     );
     assert_eq!(json["quad"].as_array().map(Vec::len), Some(4));
 }
+
+#[test]
+fn rejected_reference_explains_which_patches_and_why() {
+    use colorbalance_fixtures::SceneDefect;
+
+    let work = temp_dir("rejected");
+    let scene = ChartScene {
+        defect: SceneDefect::ClipWhitePatch,
+        ..ChartScene::default()
+    };
+    let reference = work.join("clipped.dng");
+    render_chart_dng(&reference, &scene).unwrap();
+
+    let error = derive_profile(
+        reference.to_string_lossy().into_owned(),
+        "classic-before-nov-2014".to_owned(),
+        work.join("p.json").to_string_lossy().into_owned(),
+        None,
+        Some(serde_json::from_value(quad_payload(&scene)).unwrap()),
+        false,
+        false,
+    )
+    .expect_err("a clipped chart must be rejected")
+    .to_string();
+    let _ = std::fs::remove_dir_all(work);
+
+    // A name and a measurement, not a bare list of rule names.
+    assert!(
+        error.contains("White"),
+        "names the offending patch: {error}"
+    );
+    assert!(error.contains("clipped"), "says why: {error}");
+    assert!(error.contains("0x"), "includes the measured value: {error}");
+    assert!(
+        error.lines().count() <= 10,
+        "stays short enough to read: {error}"
+    );
+    // The lenient mode is only useful advice for clipped, rendered sources.
+    assert!(
+        error.contains("Quick & Dirty"),
+        "points at the way forward: {error}"
+    );
+}
