@@ -32,6 +32,7 @@ pub struct InspectResponse {
     quality_passed: bool,
     gate_failures: Vec<GateFailureResponse>,
     quad: [[f64; 2]; 4],
+    preview_data_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -128,6 +129,48 @@ fn quad_from_payload(payload: Option<QuadPayload>, width: u32, height: u32) -> C
         })
 }
 
+fn generate_preview_data_url(image: &DecodedImage) -> Option<String> {
+    let max_dim = 640u32;
+    let scale = if image.width > max_dim || image.height > max_dim {
+        f64::min(
+            f64::from(max_dim) / f64::from(image.width),
+            f64::from(max_dim) / f64::from(image.height),
+        )
+    } else {
+        1.0
+    };
+    let target_w = (f64::from(image.width) * scale).round() as u32;
+    let target_h = (f64::from(image.height) * scale).round() as u32;
+    if target_w == 0 || target_h == 0 {
+        return None;
+    }
+
+    let mut pixels = Vec::with_capacity((target_w * target_h * 3) as usize);
+    for y in 0..target_h {
+        let src_y = ((f64::from(y) / f64::from(target_h)) * f64::from(image.height)).floor() as u32;
+        for x in 0..target_w {
+            let src_x = ((f64::from(x) / f64::from(target_w)) * f64::from(image.width)).floor() as u32;
+            let rgb = image.rgb_at(src_x, src_y);
+            let r = (colorbalance_core::color::srgb_encode(f64::from(rgb[0])) * 255.0).round().clamp(0.0, 255.0) as u8;
+            let g = (colorbalance_core::color::srgb_encode(f64::from(rgb[1])) * 255.0).round().clamp(0.0, 255.0) as u8;
+            let b = (colorbalance_core::color::srgb_encode(f64::from(rgb[2])) * 255.0).round().clamp(0.0, 255.0) as u8;
+            pixels.push(r);
+            pixels.push(g);
+            pixels.push(b);
+        }
+    }
+
+    // Encode as raw PPM image format, which browsers parse natively
+    let mut ppm_bytes = Vec::new();
+    ppm_bytes.extend_from_slice(format!("P6\n{target_w} {target_h}\n255\n").as_bytes());
+    ppm_bytes.extend_from_slice(&pixels);
+
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine;
+    let b64 = STANDARD.encode(&ppm_bytes);
+    Some(format!("data:image/x-portable-pixmap;base64,{b64}"))
+}
+
 #[tauri::command]
 pub fn inspect_reference(
     path: String,
@@ -148,6 +191,7 @@ pub fn inspect_reference(
     let failures = calibration::evaluate_quality(&samples, &gate_config)
         .err()
         .unwrap_or_default();
+    let preview_data_url = generate_preview_data_url(&image);
     Ok(InspectResponse {
         camera: image.camera,
         image_width: image.width,
@@ -163,6 +207,7 @@ pub fn inspect_reference(
             })
             .collect(),
         quad: chart_quad.corners,
+        preview_data_url,
     })
 }
 

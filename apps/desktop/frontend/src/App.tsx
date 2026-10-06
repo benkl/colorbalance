@@ -158,6 +158,9 @@ export const App: React.FC = () => {
       const result = await backend.inspectReference(referencePath, chartRevision, quad, quickAndDirty);
       setInspectResult(result);
       setQuad(result.quad.map(([x, y]) => ({ x, y })) as ChartQuad);
+      if (result.previewDataUrl) {
+        setReferencePreview(result.previewDataUrl);
+      }
     } catch (error: unknown) {
       setErrorMessage(error instanceof Error ? error.message : String(error));
     } finally {
