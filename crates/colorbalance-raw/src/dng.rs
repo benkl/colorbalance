@@ -1,17 +1,19 @@
-//! Classic TIFF/DNG CFA decoder.
+//! Classic TIFF/DNG decoder for CFA and three-component LinearRaw images.
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use colorbalance_core::decode::{CameraIdentity, DecodeError, DecodedImage, RawDecoder};
+use colorbalance_core::decode::{
+    CameraIdentity, DecodeError, DecodedImage, RawDecoder, SensorLayout,
+};
 
 /// Name recorded for images decoded by this implementation.
 pub const DECODER_NAME: &str = "colorbalance-dng";
 /// Crate version recorded for images decoded by this implementation.
 pub const DECODER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// A decoder for uncompressed, classic-TIFF CFA DNG files.
+/// A decoder for supported camera-native, classic-TIFF DNG files.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct DngDecoder;
 
@@ -251,15 +253,18 @@ fn to_u16(value: u32, tag: u16) -> Result<u16, DngError> {
     u16::try_from(value).map_err(|_| corrupt(format!("tag {tag} is outside u16 range")))
 }
 
-fn reject_unsupported_tags(tiff: &Tiff<'_>) -> Result<(), DngError> {
+fn reject_unsupported_tags(tiff: &Tiff<'_>, width: u32, height: u32) -> Result<(), DngError> {
     for (tag, message) in [
         (322, "TileWidth"),
         (323, "TileLength"),
         (324, "TileOffsets"),
         (325, "TileByteCounts"),
         (50_712, "LinearizationTable"),
-        (50_720, "DefaultCropOrigin"),
-        (50_721, "DefaultCropSize"),
+        (50_715, "BlackLevelDeltaH"),
+        (50_716, "BlackLevelDeltaV"),
+        (50_830, "MaskedAreas"),
+        (51_008, "OpcodeList1"),
+        (51_022, "OpcodeList3"),
     ] {
         if tiff.entries.contains_key(&tag) {
             return Err(unsupported_layout(format!(
@@ -267,28 +272,371 @@ fn reject_unsupported_tags(tiff: &Tiff<'_>) -> Result<(), DngError> {
             )));
         }
     }
+    if tiff.entries.contains_key(&254) && tiff.scalar(254, &[3, 4])? != 0 {
+        return Err(unsupported_layout(
+            "IFD is a preview or reduced-resolution image",
+        ));
+    }
+    if tiff.entries.contains_key(&255) && tiff.scalar(255, &[3])? != 1 {
+        return Err(unsupported_layout("IFD is not a full-resolution image"));
+    }
+    if !tiff.entries.contains_key(&50_706) {
+        return Err(unsupported_format("missing DNGVersion: TIFF is not a DNG"));
+    }
+    if let Some(entry) = tiff.entries.get(&50_719) {
+        let values = crop_values(tiff, 50_719)?;
+        if entry.count != 2 || values.as_slice() != [0, 0] {
+            return Err(unsupported_layout("DefaultCropOrigin must be [0, 0]"));
+        }
+    }
+    if let Some(entry) = tiff.entries.get(&50_720) {
+        let values = crop_values(tiff, 50_720)?;
+        if entry.count != 2 || values.as_slice() != [width, height] {
+            return Err(unsupported_layout(
+                "DefaultCropSize must cover the full frame",
+            ));
+        }
+    }
+    if tiff.entries.contains_key(&50_829) {
+        let area = tiff.unsigned_values(50_829, &[3, 4])?;
+        if area.as_slice() != [0, 0, height, width] {
+            return Err(unsupported_layout("ActiveArea must cover the full frame"));
+        }
+    }
     Ok(())
+}
+
+fn crop_values(tiff: &Tiff<'_>, tag: u16) -> Result<Vec<u32>, DngError> {
+    let entry = tiff.required(tag)?;
+    if entry.field_type != 5 {
+        return tiff.unsigned_values(tag, &[3, 4]);
+    }
+    let data = tiff.data(entry)?;
+    data.chunks_exact(8)
+        .map(|chunk| {
+            let numerator = tiff.order.u32(&chunk[..4]);
+            let denominator = tiff.order.u32(&chunk[4..]);
+            if denominator == 0 || numerator % denominator != 0 {
+                return Err(unsupported_layout("crop values must be integral"));
+            }
+            Ok(numerator / denominator)
+        })
+        .collect()
+}
+
+fn validate_gain_maps(tiff: &Tiff<'_>) -> Result<(), DngError> {
+    let Some(entry) = tiff.entries.get(&51_009) else {
+        return Ok(());
+    };
+    if entry.field_type != 7 {
+        return Err(corrupt("OpcodeList2 must be UNDEFINED"));
+    }
+    let data = tiff.data(entry)?;
+    let mut rest = data.as_ref();
+    fn take<'a>(rest: &mut &'a [u8], len: usize) -> Result<&'a [u8], DngError> {
+        if rest.len() < len {
+            return Err(corrupt("truncated OpcodeList2"));
+        }
+        let (front, remaining) = rest.split_at(len);
+        *rest = remaining;
+        Ok(front)
+    }
+    fn be32(bytes: &[u8]) -> u32 {
+        u32::from_be_bytes(bytes[..4].try_into().unwrap())
+    }
+    let count = be32(take(&mut rest, 4)?);
+    if count > 1024 {
+        return Err(corrupt("OpcodeList2 count is unreasonable"));
+    }
+    for _ in 0..count {
+        let header = take(&mut rest, 16)?;
+        let size = be32(&header[12..]) as usize;
+        let payload = take(&mut rest, size)?;
+        if be32(header) != 9
+            || be32(&header[4..]) != 0x0103_0000
+            || be32(&header[8..]) != 1
+            || size != 80
+        {
+            return Err(unsupported_layout(
+                "OpcodeList2 contains an unsupported operation",
+            ));
+        }
+        let word = |offset| be32(&payload[offset..]);
+        let double = |offset| f64::from_be_bytes(payload[offset..offset + 8].try_into().unwrap());
+        // The map must contain one unit-gain sample. Its region can cover
+        // any part of the frame; unit gain remains an identity transform.
+        if word(0) >= word(8)
+            || word(4) >= word(12)
+            || word(16) > 2
+            || word(20) == 0
+            || word(16).saturating_add(word(20)) > 3
+            || word(24) == 0
+            || word(28) == 0
+            || word(32) != 1
+            || word(36) != 1
+            || double(40) != 1.0
+            || double(48) != 1.0
+            || !double(56).is_finite()
+            || !double(64).is_finite()
+            || word(72) != 1
+            || f32::from_be_bytes(payload[76..80].try_into().unwrap()) != 1.0
+        {
+            return Err(unsupported_layout("OpcodeList2 has a non-identity GainMap"));
+        }
+    }
+    if !rest.is_empty() {
+        return Err(corrupt("trailing OpcodeList2 data"));
+    }
+    Ok(())
+}
+
+fn linear_black_levels(tiff: &Tiff<'_>) -> Result<[u16; 3], DngError> {
+    let repeat = if tiff.entries.contains_key(&50_713) {
+        tiff.unsigned_values(50_713, &[3])?
+    } else {
+        vec![1, 1]
+    };
+    if repeat.as_slice() != [2, 2] && repeat.as_slice() != [1, 1] {
+        return Err(unsupported_layout("unsupported BlackLevelRepeatDim"));
+    }
+    let values = tiff.unsigned_values(50_714, &[3, 4])?;
+    let result = match values.as_slice() {
+        [one] if repeat.as_slice() == [1, 1] => [*one; 3],
+        [r, g, b] if repeat.as_slice() == [1, 1] => [*r, *g, *b],
+        [a, b, c, d, e, f, g, h, i, j, k, l]
+            if repeat.as_slice() == [2, 2]
+                && a == d
+                && d == g
+                && g == j
+                && b == e
+                && e == h
+                && h == k
+                && c == f
+                && f == i
+                && i == l =>
+        {
+            [*a, *b, *c]
+        }
+        _ => {
+            return Err(unsupported_layout(
+                "BlackLevel must be constant per RGB channel",
+            ))
+        }
+    };
+    Ok([
+        to_u16(result[0], 50_714)?,
+        to_u16(result[1], 50_714)?,
+        to_u16(result[2], 50_714)?,
+    ])
+}
+
+fn orientation(tiff: &Tiff<'_>) -> Result<u16, DngError> {
+    let value = if tiff.entries.contains_key(&274) {
+        to_u16(tiff.scalar(274, &[3])?, 274)?
+    } else {
+        1
+    };
+    if !matches!(value, 1 | 3 | 6 | 8) {
+        return Err(unsupported_layout(format!(
+            "unsupported Orientation tag 274 value {value}"
+        )));
+    }
+    Ok(value)
+}
+
+fn orient_pixels(
+    width: u32,
+    height: u32,
+    orientation: u16,
+    source_rgb: Vec<f32>,
+    source_clipped: Vec<u8>,
+) -> (u32, u32, Vec<f32>, Vec<u8>) {
+    let (out_width, out_height) = if matches!(orientation, 6 | 8) {
+        (height, width)
+    } else {
+        (width, height)
+    };
+    if orientation == 1 {
+        return (out_width, out_height, source_rgb, source_clipped);
+    }
+    let mut rgb = vec![0.0; source_rgb.len()];
+    let mut clipped = vec![0; source_clipped.len()];
+    for y in 0..height as usize {
+        for x in 0..width as usize {
+            let (ox, oy) = match orientation {
+                3 => (width as usize - 1 - x, height as usize - 1 - y),
+                6 => (height as usize - 1 - y, x),
+                8 => (y, width as usize - 1 - x),
+                _ => unreachable!(),
+            };
+            let src = y * width as usize + x;
+            let dst = oy * out_width as usize + ox;
+            rgb[dst * 3..dst * 3 + 3].copy_from_slice(&source_rgb[src * 3..src * 3 + 3]);
+            clipped[dst] = source_clipped[src];
+        }
+    }
+    (out_width, out_height, rgb, clipped)
+}
+
+fn parse_linear_raw(tiff: &Tiff<'_>, width: u32, height: u32) -> Result<DecodedImage, DngError> {
+    if tiff.scalar(259, &[3])? != 7 || tiff.scalar(277, &[3])? != 3 {
+        return Err(unsupported_layout(
+            "LinearRaw requires JPEG compression and 3 components",
+        ));
+    }
+    if tiff.entries.contains_key(&284) && tiff.scalar(284, &[3])? != 1 {
+        return Err(unsupported_layout(
+            "LinearRaw requires chunky planar layout",
+        ));
+    }
+    if tiff.unsigned_values(258, &[3])?.as_slice() != [12, 12, 12] {
+        return Err(unsupported_format(
+            "LinearRaw requires three 12-bit samples",
+        ));
+    }
+    if tiff.entries.contains_key(&33_421) || tiff.entries.contains_key(&33_422) {
+        return Err(unsupported_layout(
+            "LinearRaw must not contain a CFA pattern",
+        ));
+    }
+    validate_gain_maps(tiff)?;
+    let black = linear_black_levels(tiff)?;
+    let whites = tiff.unsigned_values(50_717, &[3, 4])?;
+    let white = match whites.as_slice() {
+        [value] => [*value; 3],
+        [r, g, b] => [*r, *g, *b],
+        _ => {
+            return Err(unsupported_layout(
+                "LinearRaw WhiteLevel must have one or three components",
+            ))
+        }
+    };
+    let white = [
+        to_u16(white[0], 50_717)?,
+        to_u16(white[1], 50_717)?,
+        to_u16(white[2], 50_717)?,
+    ];
+    if white.iter().zip(black).any(|(w, b)| *w <= b || *w > 4095) {
+        return Err(corrupt(
+            "LinearRaw WhiteLevel must exceed BlackLevel and fit 12 bits",
+        ));
+    }
+    let strips = strip_ranges(tiff)?;
+    if strips.len() != 1
+        || (tiff.entries.contains_key(&278) && tiff.scalar(278, &[3, 4])? != height)
+    {
+        return Err(unsupported_layout(
+            "LinearRaw requires a single full-height strip",
+        ));
+    }
+    let decoded = crate::ljpeg::decode(strips[0]).map_err(DngError::from)?;
+    if decoded.width != width as usize
+        || decoded.height != height as usize
+        || decoded.components != 3
+        || decoded.precision != 12
+    {
+        return Err(corrupt(
+            "lossless JPEG geometry or precision disagrees with DNG tags",
+        ));
+    }
+    if decoded.component_ids.as_slice() != [0, 1, 2] {
+        return Err(unsupported_layout(
+            "LinearRaw JPEG components must be in RGB order (0, 1, 2)",
+        ));
+    }
+    let pixels = (width as usize)
+        .checked_mul(height as usize)
+        .ok_or_else(|| corrupt("image dimensions overflow"))?;
+    let samples = pixels
+        .checked_mul(3)
+        .ok_or_else(|| corrupt("image sample count overflows"))?;
+    if decoded.samples.len() != samples {
+        return Err(corrupt("lossless JPEG sample count mismatch"));
+    }
+    let mut rgb = Vec::with_capacity(decoded.samples.len());
+    let mut clipped = Vec::with_capacity(pixels);
+    for sample in decoded.samples.chunks_exact(3) {
+        let mut flags = 0;
+        for (channel, &raw) in sample.iter().enumerate() {
+            if raw >= white[channel] {
+                flags |= 1 << channel;
+            }
+            rgb.push(
+                ((f64::from(raw) - f64::from(black[channel]))
+                    / f64::from(white[channel] - black[channel]))
+                .max(0.0) as f32,
+            );
+        }
+        clipped.push(flags);
+    }
+    let (width, height, rgb, clipped) =
+        orient_pixels(width, height, orientation(tiff)?, rgb, clipped);
+    Ok(DecodedImage {
+        sensor_layout: SensorLayout::LinearRaw,
+        width,
+        height,
+        rgb,
+        clipped,
+        black_levels: [black[0], black[1], black[2], 0],
+        white_levels: [white[0], white[1], white[2], 0],
+        cfa_pattern: [0; 4],
+        camera: CameraIdentity {
+            make: tiff.ascii(271)?,
+            model: tiff.ascii(272)?,
+            decoder: DECODER_NAME.to_owned(),
+            decoder_version: DECODER_VERSION.to_owned(),
+        },
+    })
+}
+
+fn strip_ranges<'a>(tiff: &Tiff<'a>) -> Result<Vec<&'a [u8]>, DngError> {
+    let offsets = tiff.unsigned_values(273, &[3, 4])?;
+    let counts = tiff.unsigned_values(279, &[3, 4])?;
+    if offsets.is_empty() || offsets.len() != counts.len() {
+        return Err(corrupt("invalid strip metadata"));
+    }
+    offsets
+        .into_iter()
+        .zip(counts)
+        .map(|(offset, count)| {
+            let start = offset as usize;
+            let end = start
+                .checked_add(count as usize)
+                .ok_or_else(|| corrupt("strip range overflow"))?;
+            tiff.bytes
+                .get(start..end)
+                .ok_or_else(|| corrupt("strip outside file"))
+        })
+        .collect()
 }
 
 fn parse_dng(bytes: &[u8]) -> Result<DecodedImage, DngError> {
     let tiff = Tiff::parse(bytes)?;
-    reject_unsupported_tags(&tiff)?;
-
     let width = tiff.scalar(256, &[3, 4])?;
     let height = tiff.scalar(257, &[3, 4])?;
     if width == 0 || height == 0 {
         return Err(corrupt("image dimensions must be nonzero"));
     }
+    reject_unsupported_tags(&tiff, width, height)?;
+    let version = tiff.unsigned_values(50_706, &[1])?;
+    if version.len() != 4 || version[0] != 1 || !(1..=6).contains(&version[1]) {
+        return Err(unsupported_format("unsupported DNGVersion"));
+    }
+    match tiff.scalar(262, &[3])? {
+        34_892 => return parse_linear_raw(&tiff, width, height),
+        32_803 => {}
+        other => {
+            return Err(unsupported_format(format!(
+                "unsupported PhotometricInterpretation {other}"
+            )))
+        }
+    }
+    validate_gain_maps(&tiff)?;
     if tiff.scalar(258, &[3])? != 16 {
         return Err(unsupported_format("BitsPerSample tag 258 must be 16"));
     }
     if tiff.scalar(259, &[3])? != 1 {
         return Err(unsupported_format("Compression tag 259 must be 1"));
-    }
-    if tiff.scalar(262, &[3])? != 32_803 {
-        return Err(unsupported_format(
-            "PhotometricInterpretation tag 262 must be CFA (32803)",
-        ));
     }
     if tiff.scalar(277, &[3])? != 1 {
         return Err(unsupported_layout("SamplesPerPixel tag 277 must be 1"));
@@ -318,10 +666,6 @@ fn parse_dng(bytes: &[u8]) -> Result<DecodedImage, DngError> {
             return Err(unsupported_layout("CFAPattern must contain R, G, and B"));
         }
     }
-    let version = tiff.unsigned_values(50_706, &[1])?;
-    if version.len() != 4 {
-        return Err(corrupt("DNGVersion tag 50706 must contain four bytes"));
-    }
     let black_levels = tiff.black_levels()?;
     let white_level = to_u16(tiff.scalar(50_717, &[3])?, 50_717)?;
     let white_levels = [white_level; 4];
@@ -329,19 +673,7 @@ fn parse_dng(bytes: &[u8]) -> Result<DecodedImage, DngError> {
         return Err(corrupt("BlackLevel must be less than WhiteLevel"));
     }
 
-    let orientation = if let Some(entry) = tiff.entries.get(&274) {
-        if entry.field_type != 3 || entry.count != 1 {
-            return Err(corrupt("Orientation tag 274 must be one SHORT"));
-        }
-        tiff.order.u16(&tiff.data(entry)?)
-    } else {
-        1
-    };
-    if !matches!(orientation, 1 | 3 | 6 | 8) {
-        return Err(unsupported_layout(format!(
-            "unsupported Orientation tag 274 value {orientation}"
-        )));
-    }
+    let orientation = orientation(&tiff)?;
 
     if tiff.entries.contains_key(&278) && tiff.scalar(278, &[3, 4])? == 0 {
         return Err(corrupt("RowsPerStrip tag 278 must be nonzero"));
@@ -457,6 +789,7 @@ fn parse_dng(bytes: &[u8]) -> Result<DecodedImage, DngError> {
     }
 
     Ok(DecodedImage {
+        sensor_layout: SensorLayout::Cfa,
         width: output_width,
         height: output_height,
         rgb,
@@ -473,7 +806,7 @@ fn parse_dng(bytes: &[u8]) -> Result<DecodedImage, DngError> {
     })
 }
 
-/// Decode an uncompressed classic-TIFF CFA DNG from a filesystem path.
+/// Decode a supported camera-native classic-TIFF DNG from a filesystem path.
 pub fn decode_dng(path: &Path) -> Result<DecodedImage, DngError> {
     let bytes = std::fs::read(path).map_err(DecodeError::from)?;
     parse_dng(&bytes)

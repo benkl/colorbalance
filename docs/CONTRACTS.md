@@ -74,7 +74,7 @@ pub enum DecodeError {
 }
 ```
 
-Normalization rule (decoders must follow exactly): `v_norm = (raw - black_c) / (white_c - black_c)` computed in f64 from the 16-bit photosite, per CFA position `c`, then stored as f32. Values below black clamp to 0.0. Values above white are NOT clamped; the photosite is flagged in `clipped` instead. A demosaiced pixel channel is flagged when ANY contributing photosite of that channel in its support window had `raw >= white_c` for its CFA position.
+Normalization rule (decoders must follow exactly): `v_norm = max(0, (raw - black_c) / (white_c - black_c))` computed in f64 from each RAW-domain sample, then stored as f32. Values above white are NOT clamped; the source sample is flagged in `clipped`. For CFA, `c` is the CFA position; the demosaiced pixel channel is flagged when ANY contributing photosite in its support window had `raw >= white_c`. For LinearRaw, `c` is the RGB component and each pixel's channel flag comes from that component before orientation or preview rendering. `sensor_layout` distinguishes CFA, LinearRaw, and rendered inputs; the CFA pattern is not meaningful for LinearRaw.
 
 ## Module `colorbalance-raw::dng` (file `crates/colorbalance-raw/src/dng.rs`)
 
@@ -92,11 +92,9 @@ pub fn decode_dng(path: &std::path::Path)
 
 Reader requirements:
 
-- Classic TIFF, little or big endian. Tags required: 256 ImageWidth, 257 ImageLength, 258 BitsPerSample=16, 259 Compression=1, 262 PhotometricInterpretation=32803 (CFA), 271 Make, 272 Model, 273 StripOffsets, 277 SamplesPerPixel=1, 279 StripByteCounts, 33421 CFARepeatPatternDim=[2,2], 33422 CFAPattern, 50706 DNGVersion, 50714 BlackLevel (SHORT scalar, SHORT×4, RATIONAL scalar, or RATIONAL×4), 50717 WhiteLevel (SHORT scalar). Optional: 274 Orientation (values 1,3,6,8; apply the flip so output is upright; other values → UnsupportedSensorLayout), 278 RowsPerStrip (multi-strip supported by concatenation).
-- Everything else (LinearRaw, other bit depths, other CFA sizes, JPEG compression, tiles, linearization tables, DefaultCrop) → `UnsupportedSensorLayout` or `UnsupportedFormat` with a message naming the tag and value.
-- Photosite order: row-major from strip data. CFA position = `(y % 2) * 2 + (x % 2)`.
-- Demosaic (deterministic "3×3 lattice mean"): output channel `C` at pixel `(x,y)` = mean of the normalized photosite values of channel `C` at all CFA sites of `C` within Chebyshev distance 1 of `(x,y)` (up to 4 sites; fewer at borders). For the site's own channel this includes the pixel itself. Clip flags: channel flagged if any contributing site was saturated. This is exact on flat regions, which is what patch sampling relies on.
-- Black/WhiteLevel arrays map per CFA position; scalar applies to all four.
+- The existing CFA path reads classic little- or big-endian TIFF DNGs with 16-bit uncompressed single-sample CFA, a 2×2 CFA pattern, and scalar or 2×2 black and white levels. It computes a deterministic 3×3 lattice-mean demosaic and maps pre-demosaic source clipping to output channels. Multi-strip uncompressed CFA is supported.
+- The LinearRaw path reads three-component, 12-bit, chunky DNGs with compression 7 (SOF3 lossless JPEG) in one full-height strip. It decodes Huffman-coded differences with byte stuffing and row-aligned restart intervals; mid-row restart intervals are rejected. Components must be RGB in order. Channel-wise black and white levels normalize the decoded samples directly—there is no CFA demosaic or scene-inferred white balance. Saturation is flagged for each component before orientation. This path does not treat the embedded JPEG preview as calibration input.
+- Full-frame DefaultCropOrigin (50719), DefaultCropSize (50720), and ActiveArea (50829) are accepted. Non-full-frame crops, tiles, linearization tables, unsupported opcode effects, and alternate sensor layouts fail closed rather than silently changing the image. Tag 50721 is ColorMatrix1, not a crop tag. Orientations 1, 3, 6, and 8 produce upright pixels.
 
 Writer (fixture support, same file or `dng_writer.rs` in this crate, exported for the fixtures crate):
 

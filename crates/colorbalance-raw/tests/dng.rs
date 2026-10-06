@@ -108,6 +108,109 @@ fn unsupported_photometric_is_rejected() {
 }
 
 #[test]
+fn full_frame_crop_is_accepted_but_smaller_crop_is_rejected() {
+    let path = temp_path("crop");
+    write_dng(&path, &base_spec(4, 4, vec![600; 16])).unwrap();
+    let original = fs::read(&path).unwrap();
+    let ifd_count = u16::from_le_bytes([original[8], original[9]]) as usize;
+    let insertion = 10 + 12 * ifd_count;
+    let mut bytes = original.clone();
+    bytes.splice(
+        insertion..insertion,
+        [
+            0x1f, 0xc6, 0x03, 0x00, 0x02, 0x00, 0x00, 0x00, 0, 0, 0, 0, 0x20, 0xc6, 0x03, 0x00,
+            0x02, 0x00, 0x00, 0x00, 4, 0, 4, 0,
+        ],
+    );
+    bytes[8..10].copy_from_slice(&((ifd_count + 2) as u16).to_le_bytes());
+    // Inserting IFD entries shifts all out-of-line values and the strip.
+    for index in 0..ifd_count + 2 {
+        let offset = 10 + index * 12;
+        let tag = u16::from_le_bytes([bytes[offset], bytes[offset + 1]]);
+        if matches!(tag, 271 | 272 | 273 | 50_714) {
+            let old = u32::from_le_bytes(bytes[offset + 8..offset + 12].try_into().unwrap());
+            bytes[offset + 8..offset + 12].copy_from_slice(&(old + 24).to_le_bytes());
+        }
+    }
+    fs::write(&path, &bytes).unwrap();
+    assert!(decode_dng(&path).is_ok());
+    // No crop may silently masquerade as the full camera frame.
+    bytes[insertion + 20..insertion + 22].copy_from_slice(&3_u16.to_le_bytes());
+    fs::write(&path, &bytes).unwrap();
+    let error = decode_dng(&path).unwrap_err().to_string();
+    fs::remove_file(path).unwrap();
+    assert!(error.contains("DefaultCropSize"), "{error}");
+}
+
+#[test]
+fn linear_raw_jpeg_uses_measured_channels_not_a_cfa() {
+    use colorbalance_core::decode::SensorLayout;
+
+    // A single SOF3 pixel with three zero differences from the 12-bit
+    // initial predictor (2048). Frame component IDs are R=0, G=1, B=2.
+    let jpeg: &[u8] = &[
+        0xff, 0xd8, 0xff, 0xc3, 0, 17, 12, 0, 1, 0, 1, 3, 0, 0x11, 0, 1, 0x11, 0, 2, 0x11, 0, 0xff,
+        0xc4, 0, 20, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xda, 0, 12, 3, 0,
+        0, 1, 0, 2, 0, 1, 0, 0, 0x1f, 0xff, 0xd9,
+    ];
+    let path = temp_path("linear-raw");
+    let mut data = b"II*\0\x08\0\0\0".to_vec();
+    let entries: &[(u16, u16, u32, u32)] = &[
+        (254, 4, 1, 0),
+        (256, 4, 1, 1),
+        (257, 4, 1, 1),
+        (258, 3, 3, 256),
+        (259, 3, 1, 7),
+        (262, 3, 1, 34_892),
+        (271, 2, 5, 262),
+        (272, 2, 6, 267),
+        (273, 4, 1, 285),
+        (274, 3, 1, 6),
+        (277, 3, 1, 3),
+        (278, 4, 1, 1),
+        (279, 4, 1, jpeg.len() as u32),
+        (284, 3, 1, 1),
+        (50_706, 1, 4, 0x0000_0601),
+        (50_714, 3, 3, 273),
+        (50_717, 3, 3, 279),
+        (50_719, 3, 2, 0),
+        (50_720, 3, 2, 0x0001_0001),
+    ];
+    data.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+    for &(tag, ty, count, value) in entries {
+        data.extend_from_slice(&tag.to_le_bytes());
+        data.extend_from_slice(&ty.to_le_bytes());
+        data.extend_from_slice(&count.to_le_bytes());
+        data.extend_from_slice(&value.to_le_bytes());
+    }
+    data.extend_from_slice(&0_u32.to_le_bytes());
+    data.resize(256, 0);
+    for _ in 0..3 {
+        data.extend_from_slice(&12_u16.to_le_bytes());
+    }
+    data.extend_from_slice(b"Test\0Phone\0");
+    data.resize(273, 0);
+    for level in [0_u16, 1024, 0, 4095, 3072, 2048] {
+        data.extend_from_slice(&level.to_le_bytes());
+    }
+    data.resize(285, 0);
+    data.extend_from_slice(jpeg);
+    fs::write(&path, data).unwrap();
+    let result = colorbalance_raw::decode_any(&path).unwrap();
+    fs::remove_file(path).unwrap();
+    assert_eq!(result.sensor_layout, SensorLayout::LinearRaw);
+    assert_eq!((result.width, result.height), (1, 1));
+    assert_eq!(result.cfa_pattern, [0; 4]);
+    assert_eq!(result.black_levels, [0, 1024, 0, 0]);
+    assert_eq!(result.white_levels, [4095, 3072, 2048, 0]);
+    assert_eq!(result.clipped_at(0, 0), 4);
+    let pixel = result.rgb_at(0, 0);
+    assert!((pixel[0] - 2048.0 / 4095.0).abs() < 1e-6);
+    assert!((pixel[1] - 1024.0 / 2048.0).abs() < 1e-6);
+    assert_eq!(pixel[2], 1.0);
+}
+
+#[test]
 fn decode_is_deterministic_across_repeated_decodes() {
     // The same DNG must decode to bit-identical normalized RGB, clip masks,
     // and levels on every run.

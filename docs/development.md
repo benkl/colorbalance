@@ -35,6 +35,8 @@ colorbalance decode-contract
 
 It prints the canonical RAW decode contract as JSON. The pinned settings are raw colorimetry, linear gamma, unity white balance multipliers, disabled auto brightening, AHD demosaic, clipped highlights, as-shot orientation, and 16-bit output. Any change to these values is a contract change and must update `crates/colorbalance-core/src/contract.rs`, its tests, the CLI test, and the CI grep list together.
 
+The built-in DNG decoder accepts uncompressed 16-bit CFA and a narrow three-component 12-bit LinearRaw/SOF3 lossless-JPEG layout (including the Samsung Galaxy S25 file checked in October 2026). Other camera RAW formats still need LibRaw. The LinearRaw path uses the DNG RGB components directly, flags saturation from those samples, and refuses unsupported crops or pixel-changing opcodes. `research/samsung_reference_decode.py` can independently decode a local SOF3 strip with `imagecodecs`, `numpy`, and `tifffile`; it is not a production dependency. It splits restart intervals because a single libjpeg decode can silently repeat the first interval on this file.
+
 ## Workspace layout
 
 | Crate | Role | wasm32 |

@@ -9,7 +9,9 @@
 use std::path::Path;
 
 use colorbalance_core::color::srgb_decode;
-use colorbalance_core::decode::{CameraIdentity, DecodeError, DecodedImage, RawDecoder};
+use colorbalance_core::decode::{
+    CameraIdentity, DecodeError, DecodedImage, RawDecoder, SensorLayout,
+};
 use image::{DynamicImage, ImageDecoder};
 
 /// Decoder identity for rendered image sources.
@@ -114,13 +116,14 @@ pub fn decode_rendered_image(path: &Path) -> Result<DecodedImage, DecodeError> {
     }
 
     Ok(DecodedImage {
+        sensor_layout: SensorLayout::Rendered,
         width,
         height,
         rgb,
         clipped,
         black_levels: [0; 4],
-        white_levels: [255; 4],
-        cfa_pattern: *b"RGBG",
+        white_levels: [255, 255, 255, 0],
+        cfa_pattern: [0; 4],
         camera: CameraIdentity {
             make: "Rendered Image (Quick & Dirty)".to_owned(),
             model: path

@@ -17,28 +17,39 @@ pub struct CameraIdentity {
     pub decoder_version: String,
 }
 
+/// Sampling layout before interpolation; `Rendered` is not camera-native RAW.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SensorLayout {
+    /// One photosite per pixel, in a 2 by 2 RGB mosaic.
+    Cfa,
+    /// Three measured color components at every pixel, with no CFA demosaic.
+    LinearRaw,
+    /// Camera-rendered image, not usable as camera-native RAW.
+    Rendered,
+}
+
 /// A decoded, normalized, upright camera-RGB image.
 ///
-/// Normalization: `v = (raw - black_c) / (white_c - black_c)` per CFA
-/// position `c`, computed in f64 from the 16-bit photosite and stored as
-/// f32. Values below black clamp to 0. Values above white are not clamped;
-/// their photosite is flagged in [`DecodedImage::clipped`] instead.
+/// Normalization: `v = (raw - black_c) / (white_c - black_c)`, computed in
+/// f64 from the camera samples and stored as f32. Values below black clamp
+/// to 0; samples at or above white are flagged in [`DecodedImage::clipped`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct DecodedImage {
+    pub sensor_layout: SensorLayout,
     pub width: u32,
     pub height: u32,
     /// Interleaved RGB, length `width * height * 3`, row-major, upright.
     pub rgb: Vec<f32>,
-    /// Per-pixel clip bitmask: bit 0 = R, bit 1 = G, bit 2 = B. A demosaiced
-    /// channel is flagged when any contributing photosite of that channel
-    /// in its support window was at or above its white level.
+    /// Per-pixel clip bitmask: bit 0 = R, bit 1 = G, bit 2 = B. CFA channels
+    /// flag saturated photosites in their demosaic support window; LinearRaw
+    /// channels flag their own camera samples before orientation or scaling.
     pub clipped: Vec<u8>,
-    /// Black level per CFA position `[0]=row0col0, [1]=row0col1,
-    /// `[2]=row1col0, `[3]=row1col1`.
+    /// Camera black levels: four CFA positions for [`SensorLayout::Cfa`], or
+    /// R, G, B in slots 0..3 for [`SensorLayout::LinearRaw`].
     pub black_levels: [u16; 4],
-    /// White (saturation) level per CFA position.
+    /// Camera saturation levels in the same layout as `black_levels`.
     pub white_levels: [u16; 4],
-    /// CFA color per position, `b'R' | b'G' | b'B'`.
+    /// CFA colors for CFA images; zeroed for non-CFA layouts.
     pub cfa_pattern: [u8; 4],
     pub camera: CameraIdentity,
 }

@@ -149,6 +149,7 @@ Rules:
 | D9 | CLF and `.cube` exports require the normalized camera-RGB decode contract and do not replace it | Accepted | 2026-10-03 |
 | D10 | Engine ships a built-in pure-Rust DNG decoder (uncompressed 16-bit CFA); LibRaw FFI remains planned for other camera formats and must agree with the built-in decoder on overlapping DNGs | Accepted | 2026-10-03 |
 | D11 | Web delivery mode: Tauri 2 desktop is the primary delivery vehicle. Standalone browser preview is supported with local client-side evaluation and simulated demo fixtures. Direct browser-local RAW decode is gated behind WebAssembly memory constraints. Native desktop has unrestricted local filesystem access and multi-threaded parallel batch execution. | Accepted | 2026-10-04 |
+| D12 | The built-in DNG decoder also accepts 3-component, 12-bit LinearRaw compressed with lossless JPEG SOF3, when metadata and opcodes preserve unbalanced linear camera RGB. CFA and LinearRaw remain distinct sensor layouts; clipping is flagged from source samples before orientation or preview. Full-frame crop and identity gain maps are allowed, other pixel-changing operations fail closed. LibRaw remains planned for other formats. | Accepted | 2026-10-06 |
 
 ## Platform and Browser Support Matrix
 

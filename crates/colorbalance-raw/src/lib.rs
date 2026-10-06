@@ -9,6 +9,7 @@
 
 pub mod dng;
 pub mod dng_writer;
+pub mod ljpeg;
 pub mod rendered;
 
 pub use dng::{decode_dng, DngDecoder, DngError, DECODER_NAME, DECODER_VERSION};
