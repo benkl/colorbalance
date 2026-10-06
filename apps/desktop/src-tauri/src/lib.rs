@@ -1,18 +1,18 @@
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
 
 use serde::{Deserialize, Serialize};
 use tauri::{App, Emitter, Manager, WindowEvent};
 use tauri_plugin_dialog::{DialogExt, FilePath};
 
 pub struct AppState {
-    pub cancellation: Mutex<bool>,
+    pub cancellation: colorbalance_core::CancelFlag,
 }
 
 impl Default for AppState {
     fn default() -> Self {
         Self {
-            cancellation: Mutex::new(false),
+            cancellation: std::sync::Arc::new(AtomicBool::new(false)),
         }
     }
 }

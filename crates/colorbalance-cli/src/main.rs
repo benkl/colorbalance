@@ -73,6 +73,9 @@ struct DeriveArgs {
     /// Output path for the human-readable HTML quality report
     #[arg(long, short = 'r')]
     report: Option<PathBuf>,
+    /// Output path for the SVG diagnostic overlay with quad and patch regions
+    #[arg(long)]
+    overlay: Option<PathBuf>,
     /// Optional manual corners: x1,y1,x2,y2,x3,y3,x4,y4 (TL, TR, BR, BL)
     #[arg(long, value_parser = parse_quad)]
     quad: Option<ChartQuad>,
@@ -102,6 +105,9 @@ struct ApplyArgs {
     /// Ignore camera make/model mismatch (default: fail closed)
     #[arg(long, default_value_t = false)]
     force: bool,
+    /// In-flight image bound for parallel decoding (default: 2)
+    #[arg(long, default_value_t = 2)]
+    workers: usize,
     /// Output path for the JSON batch summary
     #[arg(long)]
     summary: Option<PathBuf>,
@@ -363,6 +369,16 @@ fn execute_derive(args: DeriveArgs) -> Result<(), String> {
         fs::write(&report_path, html).map_err(|e| format!("writing report: {e}"))?;
     }
 
+    if let Some(overlay_path) = args.overlay {
+        let svg = generate_svg_overlay(&image, &quad);
+        if let Some(parent) = overlay_path.parent() {
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+        }
+        fs::write(&overlay_path, svg).map_err(|e| format!("writing overlay: {e}"))?;
+    }
+
     eprintln!(
         "Derived profile: {} (mean dE: {:.3}, max dE: {:.3})",
         args.profile.display(),
@@ -469,70 +485,111 @@ fn generate_html_report(
     )
 }
 
+/// Generate a standalone SVG overlay showing the detected/specified quad
+/// and the 24 sampled patch regions.
+fn generate_svg_overlay(image: &DecodedImage, quad: &ChartQuad) -> String {
+    let mut patches_svg = String::new();
+    for row in 0..4 {
+        for col in 0..6 {
+            let u0 = col as f64 / 6.0;
+            let u1 = (col + 1) as f64 / 6.0;
+            let v0 = row as f64 / 4.0;
+            let v1 = (row + 1) as f64 / 4.0;
+            let du = u1 - u0;
+            let dv = v1 - v0;
+            let su0 = u0 + 0.2 * du;
+            let su1 = u1 - 0.2 * du;
+            let sv0 = v0 + 0.2 * dv;
+            let sv1 = v1 - 0.2 * dv;
+            let bilinear = |u: f64, v: f64| -> [f64; 2] {
+                let top = [
+                    (1.0 - u) * quad.corners[0][0] + u * quad.corners[1][0],
+                    (1.0 - u) * quad.corners[0][1] + u * quad.corners[1][1],
+                ];
+                let bot = [
+                    (1.0 - u) * quad.corners[3][0] + u * quad.corners[2][0],
+                    (1.0 - u) * quad.corners[3][1] + u * quad.corners[2][1],
+                ];
+                [
+                    (1.0 - v) * top[0] + v * bot[0],
+                    (1.0 - v) * top[1] + v * bot[1],
+                ]
+            };
+            let p0 = bilinear(su0, sv0);
+            let p1 = bilinear(su1, sv0);
+            let p2 = bilinear(su1, sv1);
+            let p3 = bilinear(su0, sv1);
+            patches_svg.push_str(&format!(
+                "<polygon points=\"{:.1},{:.1} {:.1},{:.1} {:.1},{:.1} {:.1},{:.1}\" \
+                 fill=\"rgba(245,109,24,0.15)\" stroke=\"#f56d18\" stroke-width=\"1\" stroke-dasharray=\"2,2\" />\n",
+                p0[0], p0[1], p1[0], p1[1], p2[0], p2[1], p3[0], p3[1]
+            ));
+        }
+    }
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {} {}\">\n\
+         <polygon points=\"{:.1},{:.1} {:.1},{:.1} {:.1},{:.1} {:.1},{:.1}\" \
+          fill=\"rgba(0,128,255,0.15)\" stroke=\"#0080ff\" stroke-width=\"2\" />\n\
+         {}\
+         </svg>\n",
+        image.width,
+        image.height,
+        quad.corners[0][0],
+        quad.corners[0][1],
+        quad.corners[1][0],
+        quad.corners[1][1],
+        quad.corners[2][0],
+        quad.corners[2][1],
+        quad.corners[3][0],
+        quad.corners[3][1],
+        patches_svg
+    )
+}
+
 fn execute_apply(args: ApplyArgs) -> Result<(), String> {
     let prof_text =
         fs::read_to_string(&args.profile).map_err(|e| format!("cannot read profile: {e}"))?;
     let prof =
         profile::from_json(&prof_text).map_err(|e| format!("profile validation failed: {e}"))?;
 
-    let inputs = collect_input_files(&args.input)?;
+    let options = colorbalance_core::batch::BatchOptions {
+        output: args.output.clone(),
+        overwrite: args.overwrite,
+        workers: args.workers,
+        extensions: colorbalance_core::batch::DEFAULT_EXTENSIONS
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+    };
+    let inputs = colorbalance_core::batch::collect_inputs(&args.input, &options.extensions)?;
     if inputs.is_empty() {
         return Err(format!("no files found at {}", args.input.display()));
     }
 
-    fs::create_dir_all(&args.output).map_err(|e| e.to_string())?;
+    cleanup_stale_temp_files(&args.output);
 
-    let mut summary = BatchSummary {
-        total: inputs.len(),
-        ..Default::default()
-    };
-
-    for input_path in inputs {
-        let file_name = input_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("image");
-        let dest_name = format!(
-            "{}.tiff",
-            input_path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or(file_name)
-        );
-        let dest_path = args.output.join(&dest_name);
-
-        if dest_path.exists() && !args.overwrite {
-            summary.skipped.push(input_path.display().to_string());
-            continue;
+    let prof = std::sync::Arc::new(prof);
+    let force = args.force;
+    let overwrite = args.overwrite;
+    let process = move |input: &Path, output: PathBuf| -> Result<Option<PathBuf>, String> {
+        if output.exists() && !overwrite {
+            return Ok(None);
         }
 
-        let decoded = match decode_auto(&input_path) {
-            Ok(img) => img,
-            Err(e) => {
-                summary.failed.push(BatchFileError {
-                    file: input_path.display().to_string(),
-                    error: format!("decode failed: {e}"),
-                });
-                continue;
-            }
-        };
+        let decoded = decode_auto(input).map_err(|e| format!("decode failed: {e}"))?;
 
         if (decoded.camera.make != prof.camera.make || decoded.camera.model != prof.camera.model)
-            && !args.force
+            && !force
         {
-            summary.failed.push(BatchFileError {
-                file: input_path.display().to_string(),
-                error: format!(
-                    "camera mismatch (profile: {} {}, image: {} {})",
-                    prof.camera.make, prof.camera.model, decoded.camera.make, decoded.camera.model
-                ),
-            });
-            continue;
+            return Err(format!(
+                "camera mismatch (profile: {} {}, image: {} {})",
+                prof.camera.make, prof.camera.model, decoded.camera.make, decoded.camera.model
+            ));
         }
 
         let pixel_count = (decoded.width as usize) * (decoded.height as usize);
         let mut out_u16 = Vec::with_capacity(pixel_count * 3);
-
         for i in 0..pixel_count {
             let rgb_f64 = [
                 f64::from(decoded.rgb[i * 3]),
@@ -550,32 +607,51 @@ fn execute_apply(args: ApplyArgs) -> Result<(), String> {
         }
 
         let tiff_bytes = encode_tiff_rgb_u16(decoded.width, decoded.height, &out_u16);
-        let tmp_path = args.output.join(format!(
-            ".tmp-{}-{}.tiff",
-            std::process::id(),
-            fastrand_u64()
-        ));
-
+        let tmp_path = output
+            .parent()
+            .map(Path::new)
+            .unwrap_or(Path::new("."))
+            .join(format!(
+                ".tmp-{}-{}.tiff",
+                std::process::id(),
+                fastrand_u64()
+            ));
         if let Err(e) = fs::write(&tmp_path, &tiff_bytes) {
             let _ = fs::remove_file(&tmp_path);
-            summary.failed.push(BatchFileError {
-                file: input_path.display().to_string(),
-                error: format!("write failed: {e}"),
-            });
-            continue;
+            return Err(format!("write failed: {e}"));
         }
-
-        if let Err(e) = atomic_rename(&tmp_path, &dest_path) {
+        if let Err(e) = atomic_rename(&tmp_path, &output) {
             let _ = fs::remove_file(&tmp_path);
-            summary.failed.push(BatchFileError {
-                file: input_path.display().to_string(),
-                error: format!("rename failed: {e}"),
-            });
-            continue;
+            return Err(format!("rename failed: {e}"));
         }
+        Ok(Some(output))
+    };
 
-        summary.succeeded.push(input_path.display().to_string());
-    }
+    let core_summary = colorbalance_core::batch::run_batch(
+        inputs,
+        &options,
+        None,
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        process,
+    )?;
+
+    let summary = BatchSummary {
+        total: core_summary.total,
+        succeeded: core_summary
+            .succeeded
+            .into_iter()
+            .map(|r| r.input)
+            .collect(),
+        skipped: core_summary.skipped,
+        failed: core_summary
+            .failed
+            .into_iter()
+            .map(|r| BatchFileError {
+                file: r.input,
+                error: r.message.unwrap_or_else(|| "unknown error".to_string()),
+            })
+            .collect(),
+    };
 
     if let Some(sum_path) = args.summary {
         let text = serde_json::to_string_pretty(&summary).map_err(|e| e.to_string())?;
@@ -595,6 +671,19 @@ fn execute_apply(args: ApplyArgs) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// Remove leftover `.tmp-*.tiff` files from a previously crashed or cancelled run.
+fn cleanup_stale_temp_files(output_dir: &Path) {
+    if let Ok(entries) = fs::read_dir(output_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with(".tmp-") && name.ends_with(".tiff") {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+    }
 }
 
 fn fastrand_u64() -> u64 {
@@ -618,30 +707,6 @@ fn atomic_rename(from: &Path, to: &Path) -> std::io::Result<()> {
     {
         fs::rename(from, to)
     }
-}
-
-fn collect_input_files(path: &Path) -> Result<Vec<PathBuf>, String> {
-    if path.is_file() {
-        return Ok(vec![path.to_path_buf()]);
-    }
-    let mut files = Vec::new();
-    let entries = fs::read_dir(path).map_err(|e| e.to_string())?;
-    for entry in entries.flatten() {
-        let p = entry.path();
-        if p.is_file() {
-            if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
-                let ext_lower = ext.to_lowercase();
-                if matches!(
-                    ext_lower.as_str(),
-                    "dng" | "raw" | "cr3" | "nef" | "jpg" | "jpeg" | "png"
-                ) {
-                    files.push(p);
-                }
-            }
-        }
-    }
-    files.sort();
-    Ok(files)
 }
 
 fn execute_export(args: ExportArgs) -> Result<(), String> {

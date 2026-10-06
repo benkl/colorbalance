@@ -273,86 +273,60 @@ pub fn apply_batch(
     state: State<'_, AppState>,
     window: Window,
 ) -> Result<BatchResponse, BackendError> {
-    *state
+    state
         .cancellation
-        .lock()
-        .map_err(|_| BackendError::Message("cancellation lock poisoned".to_owned()))? = false;
+        .store(false, std::sync::atomic::Ordering::Relaxed);
     let profile_text = fs::read_to_string(&profile_path)?;
-    let profile = profile::from_json(&profile_text)
-        .map_err(|error| BackendError::Message(error.to_string()))?;
-    fs::create_dir_all(&output_path)?;
+    let profile = std::sync::Arc::new(
+        profile::from_json(&profile_text)
+            .map_err(|error| BackendError::Message(error.to_string()))?,
+    );
     let input = Path::new(&input_path);
-    let paths = if input.is_file() {
-        vec![input.to_path_buf()]
-    } else {
-        fs::read_dir(input)?
-            .flatten()
-            .map(|entry| entry.path())
-            .filter(|path| path.is_file())
-            .filter(|path| {
-                matches!(
-                    path.extension()
-                        .and_then(|e| e.to_str())
-                        .unwrap_or_default()
-                        .to_ascii_lowercase()
-                        .as_str(),
-                    "dng" | "jpg" | "jpeg" | "png"
-                )
-            })
-            .collect()
+    let options = colorbalance_core::BatchOptions {
+        output: Path::new(&output_path).to_path_buf(),
+        overwrite,
+        workers: colorbalance_core::DEFAULT_WORKERS,
+        extensions: colorbalance_core::DEFAULT_EXTENSIONS
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
     };
-    let mut result = BatchResponse {
-        succeeded: Vec::new(),
-        skipped: Vec::new(),
-        failed: Vec::new(),
-        total: paths.len(),
-    };
-    for (index, input_file) in paths.into_iter().enumerate() {
-        let _ = window.emit(
+    let inputs = colorbalance_core::collect_inputs(input, &options.extensions)
+        .map_err(BackendError::Message)?;
+    if let Ok(entries) = fs::read_dir(&options.output) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with(".tmp-") && name.ends_with(".tiff")
+                || name.ends_with(".tiff.tmp")
+            {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+    }
+    let result_total = inputs.len();
+    let window_clone = window.clone();
+    let progress = std::sync::Arc::new(move |input: &std::path::Path, index: usize, total: usize| {
+        let _ = window_clone.emit(
             "batch-progress",
             serde_json::json!({
                 "completed": index,
-                "total": result.total,
-                "file": input_file.display().to_string()
+                "total": total,
+                "file": input.display().to_string()
             }),
         );
-        if *state
-            .cancellation
-            .lock()
-            .map_err(|_| BackendError::Message("cancellation lock poisoned".to_owned()))?
-        {
-            break;
+    });
+    let process = move |input: &std::path::Path, output: std::path::PathBuf| {
+        if output.exists() && !overwrite {
+            return Ok(None);
         }
-        let stem = input_file
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("image");
-        let output_file = Path::new(&output_path).join(format!("{stem}.tiff"));
-        if output_file.exists() && !overwrite {
-            result.skipped.push(input_file.display().to_string());
-            continue;
-        }
-        let image = match decode_auto(&input_file) {
-            Ok(image) => image,
-            Err(error) => {
-                result.failed.push(BatchFailure {
-                    file: input_file.display().to_string(),
-                    error: error.to_string(),
-                });
-                continue;
-            }
-        };
+        let image = decode_auto(input).map_err(|e| e.to_string())?;
         if (image.camera.make != profile.camera.make || image.camera.model != profile.camera.model)
             && !force
         {
-            result.failed.push(BatchFailure {
-                file: input_file.display().to_string(),
-                error: format!(
-                    "camera mismatch: {} {}",
-                    image.camera.make, image.camera.model
-                ),
-            });
-            continue;
+            return Err(format!(
+                "camera mismatch: {} {}",
+                image.camera.make, image.camera.model
+            ));
         }
         let mut pixels = Vec::with_capacity(image.rgb.len());
         for rgb in image.rgb.as_chunks::<3>().0 {
@@ -368,28 +342,51 @@ pub fn apply_batch(
             pixels.extend_from_slice(&encode_srgb_u16(encoded));
         }
         let data = encode_tiff_rgb_u16(image.width, image.height, &pixels);
-        let temporary = output_file.with_extension("tiff.tmp");
-        fs::write(&temporary, data)?;
-        fs::rename(&temporary, &output_file)?;
-        result.succeeded.push(input_file.display().to_string());
-    }
+        let temporary = output.with_extension("tiff.tmp");
+        fs::write(&temporary, data).map_err(|e| e.to_string())?;
+        fs::rename(&temporary, &output).map_err(|e| e.to_string())?;
+        Ok(Some(output))
+    };
+    let summary = colorbalance_core::run_batch(
+        inputs,
+        &options,
+        Some(progress),
+        state.cancellation.clone(),
+        process,
+    )
+    .map_err(BackendError::Message)?;
     let _ = window.emit(
         "batch-progress",
         serde_json::json!({
-            "completed": result.succeeded.len() + result.skipped.len() + result.failed.len(),
-            "total": result.total,
+            "completed": result_total,
+            "total": result_total,
             "file": null
         }),
     );
-    Ok(result)
+    Ok(BatchResponse {
+        succeeded: summary
+            .succeeded
+            .into_iter()
+            .map(|r| r.input)
+            .collect(),
+        skipped: summary.skipped,
+        failed: summary
+            .failed
+            .into_iter()
+            .map(|r| BatchFailure {
+                file: r.input,
+                error: r.message.unwrap_or_default(),
+            })
+            .collect(),
+        total: summary.total,
+    })
 }
 
 #[tauri::command]
 pub fn cancel_batch(state: State<'_, AppState>) -> Result<(), BackendError> {
-    *state
+    state
         .cancellation
-        .lock()
-        .map_err(|_| BackendError::Message("cancellation lock poisoned".to_owned()))? = true;
+        .store(true, std::sync::atomic::Ordering::Relaxed);
     Ok(())
 }
 

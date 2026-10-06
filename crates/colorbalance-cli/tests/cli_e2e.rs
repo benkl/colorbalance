@@ -35,6 +35,7 @@ fn end_to_end_fixture_derive_apply_and_interchange() {
     let report_path = work.join("studio-report.html");
     let out_dir = work.join("balanced");
     let clf_path = work.join("studio.clf");
+    let overlay_path = work.join("studio-overlay.svg");
     let cube_path = work.join("studio.cube");
 
     let bin = env!("CARGO_BIN_EXE_colorbalance");
@@ -86,6 +87,8 @@ fn end_to_end_fixture_derive_apply_and_interchange() {
         .arg(&profile_path)
         .arg("--report")
         .arg(&report_path)
+        .arg("--overlay")
+        .arg(&overlay_path)
         .output()
         .unwrap();
     assert!(
@@ -95,7 +98,10 @@ fn end_to_end_fixture_derive_apply_and_interchange() {
     );
     assert!(profile_path.exists());
     assert!(report_path.exists());
-
+    assert!(overlay_path.exists());
+    let overlay_svg = fs::read_to_string(&overlay_path).unwrap();
+    assert!(overlay_svg.contains("<svg"));
+    assert!(overlay_svg.contains("<polygon"));
     // 3. apply
     let summary_path = work.join("summary.json");
     let apply_out = std::process::Command::new(bin)
@@ -265,6 +271,129 @@ fn apply_skips_existing_output_without_overwrite_flag() {
         serde_json::from_str(&fs::read_to_string(&summary_path).unwrap()).unwrap();
     assert_eq!(sum_json["skipped"].as_array().unwrap().len(), 1);
     assert_eq!(sum_json["succeeded"].as_array().unwrap().len(), 0);
+
+    let _ = fs::remove_dir_all(work);
+}
+
+#[test]
+fn batch_handles_good_corrupt_existing_and_duplicate_names() {
+    let work = temp_dir("batch-mixed");
+    let ref_dng = work.join("ref.dng");
+    let scene = ChartScene::default();
+    render_chart_dng(&ref_dng, &scene).unwrap();
+
+    let profile_path = work.join("p.json");
+    let bin = env!("CARGO_BIN_EXE_colorbalance");
+    let quad_str = format!(
+        "{},{},{},{},{},{},{},{}",
+        scene.quad[0][0],
+        scene.quad[0][1],
+        scene.quad[1][0],
+        scene.quad[1][1],
+        scene.quad[2][0],
+        scene.quad[2][1],
+        scene.quad[3][0],
+        scene.quad[3][1],
+    );
+    let derive_res = std::process::Command::new(bin)
+        .arg("derive")
+        .arg(&ref_dng)
+        .arg("--chart")
+        .arg("classic-before-nov-2014")
+        .arg("--quad")
+        .arg(&quad_str)
+        .arg("--profile")
+        .arg(&profile_path)
+        .output()
+        .unwrap();
+    assert!(
+        derive_res.status.success(),
+        "derive: {}",
+        String::from_utf8_lossy(&derive_res.stderr)
+    );
+
+    // Input tree: two good files (duplicated names across subdirs), one corrupt
+    // file, one file whose output already exists.
+    let shoot = work.join("shoot");
+    let sub_a = shoot.join("a");
+    let sub_b = shoot.join("b");
+    fs::create_dir_all(&sub_a).unwrap();
+    fs::create_dir_all(&sub_b).unwrap();
+    render_chart_dng(&sub_a.join("dup.dng"), &scene).unwrap();
+    render_chart_dng(&sub_b.join("dup.dng"), &scene).unwrap();
+    render_chart_dng(&shoot.join("good.dng"), &scene).unwrap();
+    fs::write(shoot.join("corrupt.dng"), b"not a DNG file").unwrap();
+
+    let out_dir = work.join("out");
+    fs::create_dir_all(&out_dir).unwrap();
+    fs::write(out_dir.join("good.tiff"), b"original-unmodified-content").unwrap();
+
+    let summary_path = work.join("summary.json");
+    let apply_out = std::process::Command::new(bin)
+        .arg("apply")
+        .arg(&profile_path)
+        .arg(&shoot)
+        .arg("-o")
+        .arg(&out_dir)
+        .arg("--summary")
+        .arg(&summary_path)
+        .output()
+        .unwrap();
+    // One file failed, so the command exits non-zero, but the summary must
+    // still be written and the completed files must remain valid.
+    assert!(!apply_out.status.success());
+
+    let sum_json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&summary_path).unwrap()).unwrap();
+    assert_eq!(sum_json["total"], 4);
+    assert_eq!(sum_json["succeeded"].as_array().unwrap().len(), 2);
+    assert_eq!(sum_json["skipped"].as_array().unwrap().len(), 1);
+    assert_eq!(sum_json["failed"].as_array().unwrap().len(), 1);
+
+    // Collision-safe names: the two duplicate-stem inputs produce distinct outputs.
+    assert!(out_dir.join("dup.tiff").exists());
+    assert!(out_dir.join("dup-1.tiff").exists());
+    // The skipped output is untouched.
+    assert_eq!(
+        fs::read(out_dir.join("good.tiff")).unwrap(),
+        b"original-unmodified-content"
+    );
+    // No unfinished temporary files remain in the output directory.
+    let temp_files: Vec<_> = fs::read_dir(&out_dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with(".tmp-"))
+        .collect();
+    assert!(
+        temp_files.is_empty(),
+        "stale temp files remain: {temp_files:?}"
+    );
+
+    // Stale temp files from a crashed run are cleaned on the next run.
+    fs::write(out_dir.join(".tmp-99999-1.tiff"), b"stale").unwrap();
+    let apply_out2 = std::process::Command::new(bin)
+        .arg("apply")
+        .arg(&profile_path)
+        .arg(&shoot)
+        .arg("-o")
+        .arg(&out_dir)
+        .arg("--overwrite")
+        .arg("--summary")
+        .arg(&summary_path)
+        .output()
+        .unwrap();
+    assert!(!apply_out2.status.success());
+    let leftover: Vec<_> = fs::read_dir(&out_dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with(".tmp-"))
+        .collect();
+    assert!(
+        leftover.is_empty(),
+        "stale temp files not cleaned: {leftover:?}"
+    );
 
     let _ = fs::remove_dir_all(work);
 }

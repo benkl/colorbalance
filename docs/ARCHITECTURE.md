@@ -148,5 +148,16 @@ Rules:
 | D8 | Profile format is `*.cbprofile.json` regardless of deployment mode | Accepted | 2026-10-03 |
 | D9 | CLF and `.cube` exports require the normalized camera-RGB decode contract and do not replace it | Accepted | 2026-10-03 |
 | D10 | Engine ships a built-in pure-Rust DNG decoder (uncompressed 16-bit CFA); LibRaw FFI remains planned for other camera formats and must agree with the built-in decoder on overlapping DNGs | Accepted | 2026-10-03 |
+| D11 | Web delivery mode: Tauri 2 desktop is the primary delivery vehicle. Standalone browser preview is supported with local client-side evaluation and simulated demo fixtures. Direct browser-local RAW decode is gated behind WebAssembly memory constraints. Native desktop has unrestricted local filesystem access and multi-threaded parallel batch execution. | Accepted | 2026-10-04 |
+
+## Platform and Browser Support Matrix
+
+| Platform / Environment | Tier | Capabilities | Notes |
+| --- | --- | --- | --- |
+| Windows 10/11 x64 (Tauri Desktop) | Tier 1 | Native RAW decode (DNG), rendered image decode (JPEG/PNG), multi-threaded batch, native dialogs, native window drag-and-drop, 16-bit TIFF output | Primary release target |
+| macOS 12+ x64 / Apple Silicon (Tauri Desktop) | Tier 1 | Full native feature parity with Windows | Native build target |
+| Linux x64 (Tauri Desktop / WebKitGTK) | Tier 1 | Full native feature parity with Windows | Native build target |
+| Chrome / Edge (Browser Preview) | Tier 2 | Interactive light-table UI, 4-corner warp alignment, simulation demo, client-side preview rendering | Requires File System Access API for directory writes |
+| Firefox / Safari (Browser Preview) | Tier 2 | Interactive light-table UI, 4-corner warp alignment, simulation demo | File upload fallback for single-image inspection |
 
 Earlier planning proposed Python with PySide6. Decisions D2 through D4 supersede that stack because browser delivery became a product requirement. The milestone structure, color pipeline, quality gates, and interchange rules in `IMPLEMENTATION_PLAN.md` are unchanged.

@@ -106,3 +106,56 @@ fn unsupported_photometric_is_rejected() {
     fs::remove_file(path).unwrap();
     assert!(error.contains("PhotometricInterpretation"));
 }
+
+#[test]
+fn decode_is_deterministic_across_repeated_decodes() {
+    // The same DNG must decode to bit-identical normalized RGB, clip masks,
+    // and levels on every run.
+    let path = temp_path("determinism");
+    let mut photosites = Vec::new();
+    for y in 0..6 {
+        for x in 0..6 {
+            photosites.push(100 + ((y * 6 + x) * 37) as u16 % 1000);
+        }
+    }
+    write_dng(&path, &base_spec(6, 6, photosites)).unwrap();
+    let first = decode_dng(&path).unwrap();
+    let second = decode_dng(&path).unwrap();
+    fs::remove_file(path).unwrap();
+    assert_eq!(first.width, second.width);
+    assert_eq!(first.height, second.height);
+    assert_eq!(first.black_levels, second.black_levels);
+    assert_eq!(first.white_levels, second.white_levels);
+    assert_eq!(first.cfa_pattern, second.cfa_pattern);
+    assert_eq!(first.rgb.len(), second.rgb.len());
+    assert!(first
+        .rgb
+        .iter()
+        .zip(second.rgb.iter())
+        .all(|(a, b)| a.to_bits() == b.to_bits()));
+    assert_eq!(first.clipped, second.clipped);
+}
+
+#[test]
+fn four_color_cfa_is_rejected() {
+    // Bayer (RGGB) is the only supported layout; a fourth CFA color value
+    // must fail with a clear error, not decode.
+    let path = temp_path("four-color");
+    write_dng(&path, &base_spec(4, 4, vec![600; 16])).unwrap();
+    let mut bytes = fs::read(&path).unwrap();
+    // IFD entry signature for CFAPattern: tag 33422 (0x828E), BYTE (1), count 4.
+    let signature: &[u8] = &[0x8E, 0x82, 0x01, 0x00, 0x04, 0x00, 0x00, 0x00];
+    let pos = bytes
+        .windows(8)
+        .position(|w| w == signature)
+        .expect("CFAPattern tag present in fixture");
+    // Inline value holds [R, G, G, B]; set the fourth color to 3.
+    bytes[pos + 8 + 3] = 3;
+    fs::write(&path, &bytes).unwrap();
+    let error = decode_dng(&path).unwrap_err().to_string();
+    fs::remove_file(path).unwrap();
+    assert!(
+        error.contains("CFAPattern"),
+        "expected CFAPattern rejection, got: {error}"
+    );
+}

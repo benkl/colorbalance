@@ -28,7 +28,7 @@ export const App: React.FC = () => {
   // Workflow State
   const [referencePath, setReferencePath] = useState<string>('');
   const [referencePreview, setReferencePreview] = useState<string>('');
-  const [chartRevision, setChartRevision] = useState<ChartRevision>('classic-before-nov-2014');
+  const [chartRevision, setChartRevision] = useState<ChartRevision | ''>('');
   const [quickAndDirty, setQuickAndDirty] = useState<boolean>(false);
   const [forceDerive] = useState<boolean>(false);
 
@@ -148,6 +148,10 @@ export const App: React.FC = () => {
       setErrorMessage('Choose or drop a reference image first.');
       return;
     }
+    if (!chartRevision) {
+      setErrorMessage('Explicitly select the physical chart revision before inspecting.');
+      return;
+    }
     setIsProcessing(true);
     setErrorMessage('');
     try {
@@ -197,6 +201,10 @@ export const App: React.FC = () => {
   const handleRunDerive = () => {
     if (!referencePath) {
       setErrorMessage('Choose or drop a reference image before deriving a profile.');
+      return;
+    }
+    if (!chartRevision) {
+      setErrorMessage('Explicitly select the physical chart revision before deriving a profile.');
       return;
     }
     setErrorMessage('');
@@ -389,14 +397,14 @@ export const App: React.FC = () => {
                 <label className="text-[10px] text-[var(--bb-smoke)] font-bold">PHYSICAL CHART REVISION</label>
                 <select
                   value={chartRevision}
-                  onChange={(e) => setChartRevision(e.target.value as ChartRevision)}
+                  onChange={(e) => setChartRevision(e.target.value as ChartRevision | '')}
                   className="w-full bg-[var(--bb-vacuum)] border border-[var(--bb-border)] px-2.5 py-1.5 text-xs text-[var(--bb-sand)] focus:border-[var(--bb-gold)] outline-none"
                 >
+                  <option value="" disabled>-- SELECT PHYSICAL CHART REVISION --</option>
                   <option value="classic-before-nov-2014">ColorChecker Classic (Pre-Nov 2014)</option>
                   <option value="classic-from-nov-2014">ColorChecker Classic / Calibrite (Post-Nov 2014)</option>
                 </select>
               </div>
-
               {/* Quick & Dirty Mode Toggle */}
               <div className="p-3 bg-[var(--bb-panel)] border border-[var(--bb-border)] space-y-2">
                 <label className="flex items-center gap-2 cursor-pointer">
@@ -420,7 +428,7 @@ export const App: React.FC = () => {
                 <button
                   type="button"
                   onClick={handleRunDerive}
-                  disabled={isProcessing || !referencePath}
+                  disabled={isProcessing || !referencePath || !chartRevision}
                   className="ui-button ui-button-primary w-full py-3 disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                   <Play className="w-4 h-4 fill-current" />

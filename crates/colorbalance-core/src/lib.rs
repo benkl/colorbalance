@@ -10,6 +10,7 @@
 //! `docs/ARCHITECTURE.md` for the platform decisions, and
 //! `docs/CONTRACTS.md` for the binding module interfaces.
 
+pub mod batch;
 pub mod calibration;
 pub mod chart;
 pub mod color;
@@ -20,6 +21,10 @@ pub mod interchange;
 pub mod output;
 pub mod profile;
 
+pub use batch::{
+    collect_inputs, run_batch, unique_output_path, BatchFileResult, BatchOptions, BatchSummary,
+    CancelFlag, CancelState, DEFAULT_EXTENSIONS, DEFAULT_WORKERS,
+};
 pub use chart::{ChartModel, ChartPatch, ChartRevision};
 pub use contract::{
     DecodeContract, DemosaicAlgorithm, HighlightPolicy, OrientationPolicy, OutputColor,
