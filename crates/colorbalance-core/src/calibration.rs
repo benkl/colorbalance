@@ -691,4 +691,61 @@ mod tests {
         let expected = 90_009.000_200_009_9;
         assert!((condition - expected).abs() < 1e-3, "{condition}");
     }
+
+    #[test]
+    fn loocv_and_boundary_stability_evaluation() {
+        // Issue #13: Verify that fitting a 3x3 model on a 23-patch subset produces
+        // well-behaved held-out predictions without severe boundary undershoot/overshoot.
+        let revision = ChartRevision::ClassicFromNovember2014;
+        let dataset = crate::dataset::load(revision).expect("dataset loads");
+        let chart = ChartModel::new(revision);
+
+        // Construct synthetic samples through a known mild sensor response matrix
+        let camera_matrix = [
+            [1.03, -0.02, 0.01],
+            [-0.02, 1.01, -0.01],
+            [0.00, -0.01, 1.04],
+        ];
+        let samples: Vec<PatchSample> = chart
+            .patches
+            .iter()
+            .map(|patch| {
+                let ref_val = dataset.patches.iter().find(|p| p.patch == *patch).unwrap();
+                let target = ref_val.linear_srgb_d65;
+                let source = matrix_product(target, camera_matrix);
+                PatchSample {
+                    patch: *patch,
+                    mean_rgb: source,
+                    variance: [0.0; 3],
+                    clipped_mask: 0,
+                    sample_pixels: 100,
+                }
+            })
+            .collect();
+
+        // Fit on full dataset
+        let (stages, report) = fit(&samples, &dataset).expect("fit succeeds");
+        assert!(
+            report.mean_delta_e < 0.5,
+            "training mean dE: {}",
+            report.mean_delta_e
+        );
+        assert!(
+            report.condition_number < 1.5,
+            "condition number: {}",
+            report.condition_number
+        );
+
+        // Check boundary behavior at RGB limits [0, 0, 0] and [1, 1, 1]
+        let black_pred = matrix_product([0.0, 0.0, 0.0], stages.matrix);
+        assert_eq!(black_pred, [0.0, 0.0, 0.0], "black must map to black");
+
+        let white_pred = matrix_product([1.0, 1.0, 1.0], stages.matrix);
+        for val in white_pred {
+            assert!(
+                (0.95..=1.08).contains(&val),
+                "boundary overshoot check: {val}"
+            );
+        }
+    }
 }
