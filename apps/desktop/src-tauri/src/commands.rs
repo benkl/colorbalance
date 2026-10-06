@@ -129,46 +129,42 @@ fn quad_from_payload(payload: Option<QuadPayload>, width: u32, height: u32) -> C
         })
 }
 
-fn generate_preview_data_url(image: &DecodedImage) -> Option<String> {
-    let max_dim = 640u32;
-    let scale = if image.width > max_dim || image.height > max_dim {
-        f64::min(
-            f64::from(max_dim) / f64::from(image.width),
-            f64::from(max_dim) / f64::from(image.height),
-        )
-    } else {
-        1.0
-    };
-    let target_w = (f64::from(image.width) * scale).round() as u32;
-    let target_h = (f64::from(image.height) * scale).round() as u32;
-    if target_w == 0 || target_h == 0 {
-        return None;
-    }
+/// Longest side, in pixels, of the preview sent to the UI.
+const PREVIEW_MAX_DIM: u32 = 1600;
 
-    let mut pixels = Vec::with_capacity((target_w * target_h * 3) as usize);
-    for y in 0..target_h {
-        let src_y = ((f64::from(y) / f64::from(target_h)) * f64::from(image.height)).floor() as u32;
-        for x in 0..target_w {
-            let src_x = ((f64::from(x) / f64::from(target_w)) * f64::from(image.width)).floor() as u32;
-            let rgb = image.rgb_at(src_x, src_y);
-            let r = (colorbalance_core::color::srgb_encode(f64::from(rgb[0])) * 255.0).round().clamp(0.0, 255.0) as u8;
-            let g = (colorbalance_core::color::srgb_encode(f64::from(rgb[1])) * 255.0).round().clamp(0.0, 255.0) as u8;
-            let b = (colorbalance_core::color::srgb_encode(f64::from(rgb[2])) * 255.0).round().clamp(0.0, 255.0) as u8;
-            pixels.push(r);
-            pixels.push(g);
-            pixels.push(b);
-        }
-    }
+/// Everything the UI needs to show a freshly chosen reference image.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoadedReference {
+    /// Upright width in pixels; chart coordinates use this space.
+    pub image_width: u32,
+    pub image_height: u32,
+    /// Default chart quad (TL, TR, BR, BL) in full-resolution pixels.
+    pub quad: [[f64; 2]; 4],
+    /// `data:image/png;base64,...` preview that keeps the image aspect ratio.
+    pub preview_data_url: String,
+}
 
-    // Encode as raw PPM image format, which browsers parse natively
-    let mut ppm_bytes = Vec::new();
-    ppm_bytes.extend_from_slice(format!("P6\n{target_w} {target_h}\n255\n").as_bytes());
-    ppm_bytes.extend_from_slice(&pixels);
-
+fn preview_data_url(image: &DecodedImage) -> Result<String, BackendError> {
     use base64::engine::general_purpose::STANDARD;
     use base64::Engine;
-    let b64 = STANDARD.encode(&ppm_bytes);
-    Some(format!("data:image/x-portable-pixmap;base64,{b64}"))
+    let png = colorbalance_raw::render_preview_png(image, PREVIEW_MAX_DIM)
+        .map_err(|error| BackendError::Message(error.to_string()))?;
+    Ok(format!("data:image/png;base64,{}", STANDARD.encode(png)))
+}
+
+/// Decode a reference image and return a displayable preview with its true
+/// dimensions, so the light-table can show it before any calibration step.
+#[tauri::command]
+pub fn load_reference(path: String) -> Result<LoadedReference, BackendError> {
+    let image = decode_auto(Path::new(&path))?;
+    let quad = quad_from_payload(None, image.width, image.height);
+    Ok(LoadedReference {
+        image_width: image.width,
+        image_height: image.height,
+        quad: quad.corners,
+        preview_data_url: preview_data_url(&image)?,
+    })
 }
 
 #[tauri::command]
@@ -191,7 +187,7 @@ pub fn inspect_reference(
     let failures = calibration::evaluate_quality(&samples, &gate_config)
         .err()
         .unwrap_or_default();
-    let preview_data_url = generate_preview_data_url(&image);
+    let preview = Some(preview_data_url(&image)?);
     Ok(InspectResponse {
         camera: image.camera,
         image_width: image.width,
@@ -207,7 +203,7 @@ pub fn inspect_reference(
             })
             .collect(),
         quad: chart_quad.corners,
-        preview_data_url,
+        preview_data_url: preview,
     })
 }
 
@@ -341,25 +337,24 @@ pub fn apply_batch(
     if let Ok(entries) = fs::read_dir(&options.output) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
-            if name.starts_with(".tmp-") && name.ends_with(".tiff")
-                || name.ends_with(".tiff.tmp")
-            {
+            if name.starts_with(".tmp-") && name.ends_with(".tiff") || name.ends_with(".tiff.tmp") {
                 let _ = fs::remove_file(entry.path());
             }
         }
     }
     let result_total = inputs.len();
     let window_clone = window.clone();
-    let progress = std::sync::Arc::new(move |input: &std::path::Path, index: usize, total: usize| {
-        let _ = window_clone.emit(
-            "batch-progress",
-            serde_json::json!({
-                "completed": index,
-                "total": total,
-                "file": input.display().to_string()
-            }),
-        );
-    });
+    let progress =
+        std::sync::Arc::new(move |input: &std::path::Path, index: usize, total: usize| {
+            let _ = window_clone.emit(
+                "batch-progress",
+                serde_json::json!({
+                    "completed": index,
+                    "total": total,
+                    "file": input.display().to_string()
+                }),
+            );
+        });
     let process = move |input: &std::path::Path, output: std::path::PathBuf| {
         if output.exists() && !overwrite {
             return Ok(None);
@@ -409,11 +404,7 @@ pub fn apply_batch(
         }),
     );
     Ok(BatchResponse {
-        succeeded: summary
-            .succeeded
-            .into_iter()
-            .map(|r| r.input)
-            .collect(),
+        succeeded: summary.succeeded.into_iter().map(|r| r.input).collect(),
         skipped: summary.skipped,
         failed: summary
             .failed

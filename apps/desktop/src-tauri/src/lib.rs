@@ -56,6 +56,7 @@ pub fn run_app() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            crate::commands::load_reference,
             crate::commands::inspect_reference,
             crate::commands::derive_profile,
             crate::commands::apply_batch,

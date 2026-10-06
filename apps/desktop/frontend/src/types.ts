@@ -31,6 +31,13 @@ export interface InspectResult {
   previewDataUrl?: string;
 }
 
+/** Result of decoding a reference image for display, before any calibration. */
+export interface LoadedReference {
+  imageWidth: number;
+  imageHeight: number;
+  quad: [[number, number], [number, number], [number, number], [number, number]];
+  previewDataUrl: string;
+}
 export interface PatchValidation {
   patch: string;
   sourceRgb: [number, number, number];

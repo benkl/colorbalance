@@ -1,0 +1,72 @@
+{
+  "schema-version": "1.0",
+  "decode-contract": {
+    "decoder": "colorbalance-rendered-jpeg",
+    "decoder-version": "0.1.0",
+    "output-color": "raw",
+    "output-depth": "u16",
+    "gamma": [
+      1.0,
+      1.0
+    ],
+    "white-balance": {
+      "unity": {
+        "user-mul": [
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ]
+      }
+    },
+    "no-auto-bright": true,
+    "demosaic": "ahd",
+    "highlight": "clip",
+    "orientation": "as-shot",
+    "no-auto-scale": false
+  },
+  "camera": {
+    "make": "Rendered Image (Quick & Dirty)",
+    "model": "JPG",
+    "decoder": "colorbalance-rendered-jpeg",
+    "decoder-version": "0.1.0"
+  },
+  "chart-revision": "classic-from-november2014",
+  "dataset-digest": "0396277212d10d4818b4f46510d9b587636ecedd6646af1de5770fe702cc019e",
+  "reference-digest": "db559c4de3b436e86b47b1b2190b4f31269e60a7bc012ec954a0910ec0fb740a",
+  "transform": {
+    "exposure-scale": 0.41128587711998593,
+    "channel-scale": [
+      1.1105959707213295,
+      0.983465365794014,
+      1.1207173797691103
+    ],
+    "matrix": [
+      [
+        -0.044628002680617423,
+        -0.20692076401206355,
+        -0.35119337274505524
+      ],
+      [
+        1.0221917737100457,
+        0.2994137998862379,
+        0.8123729859526252
+      ],
+      [
+        -0.10970228883911988,
+        0.6614105670065737,
+        0.21777645888085556
+      ]
+    ]
+  },
+  "validation": {
+    "mean-delta-e": 26.949081870418667,
+    "max-delta-e": 56.6326964656641,
+    "p95-delta-e": 45.02455873521,
+    "neutral-max-delta-e": 56.6326964656641,
+    "skin-max-delta-e": 21.694665836979866,
+    "condition-number": 12.528268524036626,
+    "patch-count": 24
+  },
+  "digest": "09a05854e1c8ca4eed9e2f1d5d8798c3e26cc163961be42103691daace5d7f14"
+}

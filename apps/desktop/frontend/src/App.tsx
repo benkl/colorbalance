@@ -28,6 +28,8 @@ export const App: React.FC = () => {
   // Workflow State
   const [referencePath, setReferencePath] = useState<string>('');
   const [referencePreview, setReferencePreview] = useState<string>('');
+  // True pixel size of the displayed image; chart coordinates live in this space.
+  const [imageSize, setImageSize] = useState<{ width: number; height: number }>({ width: 480, height: 320 });
   const [chartRevision, setChartRevision] = useState<ChartRevision | ''>('');
   const [quickAndDirty, setQuickAndDirty] = useState<boolean>(false);
   const [forceDerive] = useState<boolean>(false);
@@ -67,9 +69,7 @@ export const App: React.FC = () => {
         return;
       }
       logger.info('UI', `HTML drop received: ${file.name}`);
-      setReferencePath(file.name);
-      setReferencePreview(URL.createObjectURL(file));
-      setErrorMessage('');
+      showBrowserFile(file);
       setStep(1);
     };
     window.addEventListener('dragover', preventDefault);
@@ -88,8 +88,7 @@ export const App: React.FC = () => {
       const supported = referenceFromDrop(paths);
       if (supported) {
         logger.success('UI', `Selected reference from native drop: ${supported}`);
-        setReferencePath(supported);
-        setErrorMessage('');
+        void showReference(supported);
         setStep(1);
       } else {
         logger.warn('UI', 'Native drop ignored: no supported RAW/JPEG/PNG found');
@@ -122,14 +121,60 @@ export const App: React.FC = () => {
     return () => unlisten?.();
   }, []);
 
+  /** Default chart rectangle: 8% margin on every side of the image. */
+  const defaultQuad = (width: number, height: number): ChartQuad => {
+    const mx = Math.round(width * 0.08);
+    const my = Math.round(height * 0.08);
+    return [
+      { x: mx, y: my },
+      { x: width - mx, y: my },
+      { x: width - mx, y: height - my },
+      { x: mx, y: height - my },
+    ];
+  };
+
+  /** Native path: Rust decodes (EXIF-upright) and returns a PNG preview plus true dimensions. */
+  const showReference = async (path: string) => {
+    setReferencePath(path);
+    setErrorMessage('');
+    setInspectResult(null);
+    try {
+      const loaded = await backend.loadReference(path);
+      setReferencePreview(loaded.previewDataUrl);
+      setImageSize({ width: loaded.imageWidth, height: loaded.imageHeight });
+      setQuad(loaded.quad.map(([x, y]) => ({ x, y })) as ChartQuad);
+      logger.success('UI', `Preview ready: ${loaded.imageWidth}x${loaded.imageHeight}`);
+    } catch (err: unknown) {
+      setReferencePreview('');
+      setErrorMessage(`Could not load image: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
+  /** Browser path: the webview decodes the file, so its natural size is authoritative. */
+  const showBrowserFile = (file: File) => {
+    const url = URL.createObjectURL(file);
+    const probe = new Image();
+    probe.onload = () => {
+      setReferencePath(file.name);
+      setReferencePreview(url);
+      setImageSize({ width: probe.naturalWidth, height: probe.naturalHeight });
+      setQuad(defaultQuad(probe.naturalWidth, probe.naturalHeight));
+      setInspectResult(null);
+      setErrorMessage('');
+    };
+    probe.onerror = () => {
+      URL.revokeObjectURL(url);
+      setErrorMessage(`The browser cannot display "${file.name}". Use the desktop app for DNG files.`);
+    };
+    probe.src = url;
+  };
   const browseReference = async () => {
     logger.info('UI', 'Action: Browse reference frame');
     try {
       const selected = await chooseImage();
       if (selected) {
         logger.success('UI', `Reference selected via native picker: "${selected}"`);
-        setReferencePath(selected);
-        setErrorMessage('');
+        await showReference(selected);
       }
     } catch (err: unknown) {
       logger.warn('UI', `Native dialog unavailable (${err instanceof Error ? err.message : String(err)}); falling back to HTML file input`);
@@ -141,9 +186,8 @@ export const App: React.FC = () => {
     const file = event.target.files?.[0];
     if (!file) return;
     logger.info('UI', `HTML file input selected: ${file.name}`);
-    setReferencePath(file.name);
-    setReferencePreview(URL.createObjectURL(file));
-    setErrorMessage('');
+    showBrowserFile(file);
+    event.target.value = '';
   };
 
   const inspectReference = async () => {
@@ -172,17 +216,17 @@ export const App: React.FC = () => {
   };
 
   const loadSyntheticDemo = () => {
-    setReferencePath('20261003_183314.jpg');
-    setReferencePreview('/test-data/20261003_183314.jpg');
+    // Measure the displayed size (EXIF-upright) rather than assuming the stored one.
+    const probe = new Image();
+    probe.onload = () => {
+      setReferencePath('20261003_183314.jpg');
+      setReferencePreview(probe.src);
+      setImageSize({ width: probe.naturalWidth, height: probe.naturalHeight });
+      setQuad(defaultQuad(probe.naturalWidth, probe.naturalHeight));
+    };
+    probe.src = '/test-data/20261003_183314.jpg';
     setChartRevision('classic-from-nov-2014');
     setQuickAndDirty(true);
-    // Demo image is 1864×1398 — set quad to that coordinate space with 8% margins
-    setQuad([
-      { x: 149, y: 112 },   // 8% of 1864, 8% of 1398
-      { x: 1715, y: 112 },  // 92%
-      { x: 1715, y: 1286 }, // 92%
-      { x: 149, y: 1286 },
-    ]);
     setDeriveResult({
       profilePath: 'studio_calibration.cbprofile.json',
       reportPath: 'studio_calibration_report.html',
@@ -363,6 +407,8 @@ export const App: React.FC = () => {
         <div className="flex-1 min-w-0 h-full border-r border-[var(--bb-border)] flex flex-col bg-[var(--bb-vacuum)] overflow-hidden">
           <LightTableOverlay
             imageSrc={referencePreview}
+            imageWidth={imageSize.width}
+            imageHeight={imageSize.height}
             quad={quad}
             onQuadChange={setQuad}
             onBrowse={browseReference}

@@ -2,7 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 import { logger } from './logger.ts';
-import type { BatchSummary, ChartQuad, ChartRevision, DeriveResult, InspectResult } from './types';
+import type { BatchSummary, ChartQuad, ChartRevision, DeriveResult, InspectResult, LoadedReference } from './types';
 
 export type { UnlistenFn };
 
@@ -18,6 +18,7 @@ export interface DroppedFiles {
 }
 
 export interface BackendBridge {
+  loadReference(path: string): Promise<LoadedReference>;
   inspectReference(path: string, revision: ChartRevision, quad?: ChartQuad, quickAndDirty?: boolean): Promise<InspectResult>;
   deriveProfile(path: string, revision: ChartRevision, profilePath: string, reportPath?: string, quad?: ChartQuad, quickAndDirty?: boolean, force?: boolean): Promise<DeriveResult>;
   applyBatch(profilePath: string, inputPath: string, outputPath: string, overwrite?: boolean, force?: boolean): Promise<BatchSummary>;
@@ -26,6 +27,17 @@ export interface BackendBridge {
 }
 
 export const backend: BackendBridge = {
+  loadReference: async (path) => {
+    logger.ipc('IPC', `Invoking load_reference on "${path}"`);
+    try {
+      const result = await invoke<LoadedReference>('load_reference', { path });
+      logger.success('IPC', `load_reference succeeded: ${result.imageWidth}x${result.imageHeight}`);
+      return result;
+    } catch (err: unknown) {
+      logger.error('IPC', `load_reference failed: ${err instanceof Error ? err.message : String(err)}`);
+      throw err;
+    }
+  },
   inspectReference: async (path, revision, quad, quickAndDirty) => {
     logger.ipc('IPC', `Invoking inspect_reference on "${path}" [${revision}] (quickAndDirty: ${Boolean(quickAndDirty)})`);
     try {

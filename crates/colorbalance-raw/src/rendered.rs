@@ -10,6 +10,7 @@ use std::path::Path;
 
 use colorbalance_core::color::srgb_decode;
 use colorbalance_core::decode::{CameraIdentity, DecodeError, DecodedImage, RawDecoder};
+use image::{DynamicImage, ImageDecoder};
 
 /// Decoder identity for rendered image sources.
 pub const JPEG_DECODER_NAME: &str = "colorbalance-rendered-jpeg";
@@ -25,11 +26,58 @@ impl RawDecoder for RenderedImageDecoder {
         decode_rendered_image(path)
     }
 }
-pub fn decode_rendered_image(path: &Path) -> Result<DecodedImage, DecodeError> {
-    let dyn_img = image::ImageReader::open(path)?
+
+/// Decode a rendered image upright: the EXIF orientation recorded by the camera
+/// is applied so pixels match what any viewer (including a browser `<img>`)
+/// displays. Chart coordinates therefore refer to the visible orientation.
+pub fn decode_upright(path: &Path) -> Result<DynamicImage, DecodeError> {
+    let corrupt = |e: image::ImageError| {
+        DecodeError::CorruptFile(format!("failed to decode rendered image: {e}"))
+    };
+    let mut decoder = image::ImageReader::open(path)?
         .with_guessed_format()?
-        .decode()
-        .map_err(|e| DecodeError::CorruptFile(format!("failed to decode rendered image: {e}")))?;
+        .into_decoder()
+        .map_err(corrupt)?;
+    let orientation = decoder.orientation().map_err(corrupt)?;
+    let mut image = DynamicImage::from_decoder(decoder).map_err(corrupt)?;
+    image.apply_orientation(orientation);
+    Ok(image)
+}
+
+/// Render a display preview of a decoded image as PNG bytes.
+///
+/// The image is sRGB-encoded and downscaled so its longest side is at most
+/// `max_dim` (never upscaled). PNG is used because every webview decodes it;
+/// the preview keeps the decoded image's aspect ratio and orientation, so
+/// chart coordinates stay in full-resolution pixel space.
+pub fn render_preview_png(image: &DecodedImage, max_dim: u32) -> Result<Vec<u8>, DecodeError> {
+    let mut bytes = Vec::with_capacity(image.rgb.len());
+    for &value in &image.rgb {
+        let encoded = colorbalance_core::color::srgb_encode(f64::from(value).clamp(0.0, 1.0));
+        bytes.push((encoded * 255.0).round().clamp(0.0, 255.0) as u8);
+    }
+    let full = image::RgbImage::from_raw(image.width, image.height, bytes).ok_or_else(|| {
+        DecodeError::CorruptFile("pixel buffer does not match dimensions".to_owned())
+    })?;
+    let longest = image.width.max(image.height);
+    let preview = if longest > max_dim {
+        let scale = f64::from(max_dim) / f64::from(longest);
+        let width = ((f64::from(image.width) * scale).round() as u32).max(1);
+        let height = ((f64::from(image.height) * scale).round() as u32).max(1);
+        image::imageops::resize(&full, width, height, image::imageops::FilterType::Triangle)
+    } else {
+        full
+    };
+    let mut out = Vec::new();
+    image::DynamicImage::ImageRgb8(preview)
+        .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+        .map_err(|e| DecodeError::CorruptFile(format!("failed to encode preview: {e}")))?;
+    Ok(out)
+}
+
+/// Decode a JPEG or PNG file into an approximate linear `DecodedImage`.
+pub fn decode_rendered_image(path: &Path) -> Result<DecodedImage, DecodeError> {
+    let dyn_img = decode_upright(path)?;
 
     let rgb8 = dyn_img.into_rgb8();
     let width = rgb8.width();
@@ -106,5 +154,52 @@ mod tests {
         assert_eq!(decoded.clipped[0] & 1, 1);
         // G is unclipped
         assert_eq!(decoded.clipped[0] & 2, 0);
+    }
+
+    /// Splice an EXIF APP1 segment carrying `orientation` right after the SOI marker.
+    fn with_exif_orientation(jpeg: &[u8], orientation: u8) -> Vec<u8> {
+        let mut payload = b"Exif\0\0".to_vec();
+        payload.extend_from_slice(&[0x49, 0x49, 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00]);
+        payload.extend_from_slice(&[0x01, 0x00]);
+        payload.extend_from_slice(&[0x12, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00]);
+        payload.extend_from_slice(&[orientation, 0x00, 0x00, 0x00]);
+        payload.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+        let length = (payload.len() + 2) as u16;
+        let mut out = vec![0xFF, 0xD8, 0xFF, 0xE1];
+        out.extend_from_slice(&length.to_be_bytes());
+        out.extend_from_slice(&payload);
+        out.extend_from_slice(&jpeg[2..]);
+        out
+    }
+
+    #[test]
+    fn exif_orientation_is_applied_so_decode_matches_what_viewers_show() {
+        // A landscape 8x4 JPEG tagged "rotate 90 clockwise" displays as portrait 4x8.
+        let img = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            8,
+            4,
+            image::Rgb([200, 100, 50]),
+        ));
+        let mut plain = Vec::new();
+        img.write_to(
+            &mut std::io::Cursor::new(&mut plain),
+            image::ImageFormat::Jpeg,
+        )
+        .unwrap();
+        let tagged = with_exif_orientation(&plain, 6);
+
+        let dir = std::env::temp_dir();
+        let plain_path = dir.join(format!("cb-orient-plain-{}.jpg", std::process::id()));
+        let tagged_path = dir.join(format!("cb-orient-6-{}.jpg", std::process::id()));
+        std::fs::write(&plain_path, &plain).unwrap();
+        std::fs::write(&tagged_path, &tagged).unwrap();
+
+        let upright_plain = decode_rendered_image(&plain_path).unwrap();
+        let upright_tagged = decode_rendered_image(&tagged_path).unwrap();
+        let _ = std::fs::remove_file(plain_path);
+        let _ = std::fs::remove_file(tagged_path);
+
+        assert_eq!((upright_plain.width, upright_plain.height), (8, 4));
+        assert_eq!((upright_tagged.width, upright_tagged.height), (4, 8));
     }
 }
