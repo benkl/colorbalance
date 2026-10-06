@@ -48,41 +48,41 @@ export const DiagnosticConsole: React.FC = () => {
   };
 
   return (
-    <div className="w-full bg-[var(--bb-vacuum)] border-t border-[var(--bb-border)] flex flex-col transition-all">
+    <div className="w-full bg-[var(--bb-vacuum)] border-t border-[var(--bb-border)] flex flex-col shrink-0 select-none font-mono">
       {/* Console Header Bar */}
-      <div className="h-8 bg-[var(--bb-panel)] px-3 flex items-center justify-between border-b border-[var(--bb-border)] text-xs select-none">
+      <div className="h-7 bg-[var(--bb-panel)] px-3 flex items-center justify-between border-b border-[var(--bb-border)] text-[10px]">
         <div className="flex items-center gap-2">
-          <Terminal className="w-3.5 h-3.5 text-[var(--bb-gold)]" />
-          <span className="font-bold tracking-wider text-[var(--bb-sand)] text-[11px]">
+          <Terminal className="w-3 h-3 text-[var(--bb-gold)]" />
+          <span className="font-bold tracking-wider text-[var(--bb-sand)]">
             TELEMETRY LOG STREAM
           </span>
-          <span className="px-1.5 py-0.2 text-[9px] bg-[var(--bb-surface)] text-[var(--bb-smoke)] border border-[var(--bb-border)]">
+          <span className="px-1 py-0.2 bg-[var(--bb-surface)] text-[var(--bb-smoke)] border border-[var(--bb-border)]">
             {entries.length} EVENTS
           </span>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1.5">
           <button
             type="button"
             onClick={copyLogs}
-            className="px-2 py-0.5 bg-[var(--bb-surface)] hover:bg-[var(--bb-panel)] text-[10px] text-[var(--bb-sand)] border border-[var(--bb-border)] flex items-center gap-1 transition-colors"
+            className="px-1.5 py-0.5 bg-[var(--bb-surface)] hover:bg-[var(--bb-panel)] text-[9px] text-[var(--bb-sand)] border border-[var(--bb-border)] flex items-center gap-1 cursor-pointer"
           >
-            {copied ? <Check className="w-3 h-3 text-[var(--bb-amber)]" /> : <Copy className="w-3 h-3" />}
+            {copied ? <Check className="w-2.5 h-2.5 text-[var(--bb-amber)]" /> : <Copy className="w-2.5 h-2.5" />}
             {copied ? 'COPIED' : 'COPY'}
           </button>
           <button
             type="button"
             onClick={() => logger.clear()}
-            className="px-2 py-0.5 bg-[var(--bb-surface)] hover:bg-[var(--bb-panel)] text-[10px] text-[var(--bb-sand)] border border-[var(--bb-border)] flex items-center gap-1 transition-colors"
+            className="px-1.5 py-0.5 bg-[var(--bb-surface)] hover:bg-[var(--bb-panel)] text-[9px] text-[var(--bb-sand)] border border-[var(--bb-border)] flex items-center gap-1 cursor-pointer"
           >
-            <Trash2 className="w-3 h-3" /> CLEAR
+            <Trash2 className="w-2.5 h-2.5" /> CLEAR
           </button>
           <button
             type="button"
             onClick={() => setIsExpanded(!isExpanded)}
-            className="px-2 py-0.5 bg-[var(--bb-surface)] hover:bg-[var(--bb-panel)] text-[10px] text-[var(--bb-gold)] border border-[var(--bb-border)] flex items-center gap-1 transition-colors"
+            className="px-1.5 py-0.5 bg-[var(--bb-surface)] hover:bg-[var(--bb-panel)] text-[9px] text-[var(--bb-gold)] border border-[var(--bb-border)] flex items-center gap-1 cursor-pointer"
           >
-            {isExpanded ? <ChevronDown className="w-3 h-3" /> : <ChevronUp className="w-3 h-3" />}
+            {isExpanded ? <ChevronDown className="w-2.5 h-2.5" /> : <ChevronUp className="w-2.5 h-2.5" />}
             {isExpanded ? 'COLLAPSE' : 'EXPAND'}
           </button>
         </div>
@@ -90,22 +90,22 @@ export const DiagnosticConsole: React.FC = () => {
 
       {/* Console Log Feed */}
       {isExpanded && (
-        <div className="h-36 overflow-y-auto p-2.5 font-mono text-[11px] leading-relaxed space-y-1 bg-[var(--bb-space)]/90 select-text">
+        <div className="h-28 overflow-y-auto p-2 text-[10px] leading-tight space-y-0.5 bg-[var(--bb-space)]/95 select-text">
           {entries.map((entry) => (
-            <div key={entry.id} className="flex items-start gap-2 hover:bg-[var(--bb-surface)]/60 px-1 py-0.5 rounded-xs">
-              <span className="text-[10px] text-[var(--bb-ash)] shrink-0 select-none">
+            <div key={entry.id} className="flex items-start gap-1.5 hover:bg-[var(--bb-surface)]/60 px-1 py-0.5">
+              <span className="text-[9px] text-[var(--bb-ash)] shrink-0 select-none">
                 {entry.timestamp}
               </span>
-              <span className={`px-1 py-0.2 text-[9px] uppercase border shrink-0 select-none ${levelBadge[entry.level] || ''}`}>
+              <span className={`px-1 py-0 text-[8px] uppercase border shrink-0 select-none ${levelBadge[entry.level] || ''}`}>
                 {entry.level}
               </span>
-              <span className="text-[10px] text-[var(--bb-smoke)] shrink-0 font-bold select-none">
+              <span className="text-[9px] text-[var(--bb-smoke)] shrink-0 font-bold select-none">
                 [{entry.source}]
               </span>
               <span className={`flex-1 break-all ${levelColor[entry.level] || 'text-[var(--bb-sand)]'}`}>
                 {entry.message}
                 {entry.data !== undefined && (
-                  <pre className="text-[9px] text-[var(--bb-smoke)] mt-0.5 bg-[var(--bb-panel)]/80 p-1 border border-[var(--bb-border)] overflow-x-auto">
+                  <pre className="text-[8px] text-[var(--bb-smoke)] mt-0.5 bg-[var(--bb-panel)]/80 p-1 border border-[var(--bb-border)] overflow-x-auto">
                     {typeof entry.data === 'string' ? entry.data : JSON.stringify(entry.data, null, 2)}
                   </pre>
                 )}

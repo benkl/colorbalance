@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useRef, useState, useLayoutEffect, useCallback } from 'react';
 import type { Point, ChartQuad } from '../types';
 
 interface Props {
@@ -10,6 +10,7 @@ interface Props {
   onBrowse?: () => void;
   disabled?: boolean;
 }
+
 export const LightTableOverlay: React.FC<Props> = ({
   imageSrc,
   imageWidth = 480,
@@ -21,9 +22,57 @@ export const LightTableOverlay: React.FC<Props> = ({
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const [activeCorner, setActiveCorner] = useState<number | null>(null);
-  const cornerLabels = ['TL [0,0]', 'TR [5,0]', 'BR [5,3]', 'BL [0,3]'];
 
-  // Handle SVG coordinate transformation on drag
+  // Exact letterbox placement of the image inside the container
+  const [box, setBox] = useState<{ x: number; y: number; w: number; h: number }>({
+    x: 0,
+    y: 0,
+    w: 0,
+    h: 0,
+  });
+
+  const updateLayout = useCallback(() => {
+    if (!containerRef.current) return;
+    const { clientWidth: cw, clientHeight: ch } = containerRef.current;
+    if (cw === 0 || ch === 0) return;
+
+    const imgAspect = imageWidth / imageHeight;
+    const contAspect = cw / ch;
+
+    let w: number;
+    let h: number;
+    let x: number;
+    let y: number;
+
+    if (contAspect > imgAspect) {
+      // Container is wider than image: height fits, letterbox sides
+      h = ch;
+      w = h * imgAspect;
+      x = (cw - w) / 2;
+      y = 0;
+    } else {
+      // Container is taller than image: width fits, letterbox top/bottom
+      w = cw;
+      h = w / imgAspect;
+      x = 0;
+      y = (ch - h) / 2;
+    }
+
+    setBox({ x, y, w, h });
+  }, [imageWidth, imageHeight]);
+
+  useLayoutEffect(() => {
+    updateLayout();
+    const el = containerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(updateLayout);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [updateLayout]);
+
+  const cornerLabels = ['TL', 'TR', 'BR', 'BL'];
+
+  // Handle pointer down on a corner reticle
   const handlePointerDown = (index: number) => (e: React.PointerEvent) => {
     if (disabled) return;
     (e.target as Element).setPointerCapture(e.pointerId);
@@ -31,18 +80,22 @@ export const LightTableOverlay: React.FC<Props> = ({
   };
 
   const handlePointerMove = (e: React.PointerEvent) => {
-    if (activeCorner === null || disabled || !containerRef.current) return;
+    if (activeCorner === null || disabled || box.w === 0 || box.h === 0 || !containerRef.current) return;
     const rect = containerRef.current.getBoundingClientRect();
-    
-    // Convert client coords to normalized image coordinate space (imageWidth x imageHeight)
-    const relX = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-    const relY = Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height));
 
-    const newX = relX * imageWidth;
-    const newY = relY * imageHeight;
+    // Client coordinates relative to container top-left
+    const clientX = e.clientX - rect.left;
+    const clientY = e.clientY - rect.top;
+
+    // Convert to image coordinates [0, imageWidth] x [0, imageHeight]
+    const normX = Math.max(0, Math.min(1, (clientX - box.x) / box.w));
+    const normY = Math.max(0, Math.min(1, (clientY - box.y) / box.h));
+
+    const imgX = normX * imageWidth;
+    const imgY = normY * imageHeight;
 
     const newQuad = [...quad] as ChartQuad;
-    newQuad[activeCorner] = { x: Math.round(newX * 10) / 10, y: Math.round(newY * 10) / 10 };
+    newQuad[activeCorner] = { x: Math.round(imgX * 10) / 10, y: Math.round(imgY * 10) / 10 };
     onQuadChange(newQuad);
   };
 
@@ -55,169 +108,179 @@ export const LightTableOverlay: React.FC<Props> = ({
     }
   };
 
-  // Generate 24 patch sample center grid boxes
-  const gridCells = [];
-  for (let r = 0; r < 4; r++) {
-    for (let c = 0; c < 6; c++) {
-      const u0 = c / 6;
-      const u1 = (c + 1) / 6;
-      const v0 = r / 4;
-      const v1 = (r + 1) / 4;
+  // Convert image coordinates into container pixels for SVG rendering
+  const toScreen = (p: Point): Point => ({
+    x: box.x + (p.x / imageWidth) * box.w,
+    y: box.y + (p.y / imageHeight) * box.h,
+  });
 
-      // Sample central 60% box (u in [u0 + 0.2du, u1 - 0.2du])
-      const du = u1 - u0;
-      const dv = v1 - v0;
-      const su0 = u0 + 0.2 * du;
-      const su1 = u1 - 0.2 * du;
-      const sv0 = v0 + 0.2 * dv;
-      const sv1 = v1 - 0.2 * dv;
+  // Calculate bilinear 24-patch sample boxes in container screen space
+  const gridPolygons: string[] = [];
+  if (box.w > 0 && box.h > 0) {
+    for (let r = 0; r < 4; r++) {
+      for (let c = 0; c < 6; c++) {
+        const u0 = c / 6;
+        const u1 = (c + 1) / 6;
+        const v0 = r / 4;
+        const v1 = (r + 1) / 4;
+        const du = u1 - u0;
+        const dv = v1 - v0;
 
-      const bilinear = (u: number, v: number): Point => {
-        const top = {
-          x: (1 - u) * quad[0].x + u * quad[1].x,
-          y: (1 - u) * quad[0].y + u * quad[1].y,
+        const bilinear = (u: number, v: number): Point => {
+          const top = {
+            x: (1 - u) * quad[0].x + u * quad[1].x,
+            y: (1 - u) * quad[0].y + u * quad[1].y,
+          };
+          const bot = {
+            x: (1 - u) * quad[3].x + u * quad[2].x,
+            y: (1 - u) * quad[3].y + u * quad[2].y,
+          };
+          const imgP = {
+            x: (1 - v) * top.x + v * bot.x,
+            y: (1 - v) * top.y + v * bot.y,
+          };
+          return toScreen(imgP);
         };
-        const bot = {
-          x: (1 - u) * quad[3].x + u * quad[2].x,
-          y: (1 - u) * quad[3].y + u * quad[2].y,
-        };
-        return {
-          x: (1 - v) * top.x + v * bot.x,
-          y: (1 - v) * top.y + v * bot.y,
-        };
-      };
 
-      const pTL = bilinear(su0, sv0);
-      const pTR = bilinear(su1, sv0);
-      const pBR = bilinear(su1, sv1);
-      const pBL = bilinear(su0, sv1);
+        const pTL = bilinear(u0 + 0.2 * du, v0 + 0.2 * dv);
+        const pTR = bilinear(u1 - 0.2 * du, v0 + 0.2 * dv);
+        const pBR = bilinear(u1 - 0.2 * du, v1 - 0.2 * dv);
+        const pBL = bilinear(u0 + 0.2 * du, v1 - 0.2 * dv);
 
-      gridCells.push(
-        <polygon
-          key={`cell-${r}-${c}`}
-          points={`${pTL.x},${pTL.y} ${pTR.x},${pTR.y} ${pBR.x},${pBR.y} ${pBL.x},${pBL.y}`}
-          fill="rgba(245, 109, 24, 0.08)"
-          stroke="#f56d18"
-          strokeWidth="0.8"
-          strokeDasharray="2,2"
-        />
-      );
+        gridPolygons.push(`${pTL.x},${pTL.y} ${pTR.x},${pTR.y} ${pBR.x},${pBR.y} ${pBL.x},${pBL.y}`);
+      }
     }
   }
 
+  const screenCorners = quad.map(toScreen);
+
   return (
-    <div className="relative w-full h-full flex flex-col items-center justify-center p-4">
-      {/* Light-Table Top Precision Status Header */}
-      <div className="w-full flex items-center justify-between pb-2 mb-2 border-b border-[var(--bb-border)] text-xs text-[var(--bb-smoke)]">
+    <div className="w-full h-full flex flex-col min-h-0 bg-[var(--bb-space)] select-none">
+      {/* Light-Table Top Metadata Status HUD */}
+      <div className="h-8 shrink-0 px-3 bg-[var(--bb-vacuum)] border-b border-[var(--bb-border)] flex items-center justify-between text-[11px] font-mono text-[var(--bb-smoke)]">
         <div className="flex items-center gap-3">
-          <span className="text-[var(--bb-gold)] font-semibold flex items-center gap-1">
-            <span className="inline-block w-2 h-2 rounded-full bg-[var(--bb-amber)] animate-ping"></span>
+          <span className="text-[var(--bb-gold)] font-bold flex items-center gap-1.5">
+            <span className="w-1.5 h-1.5 rounded-full bg-[var(--bb-gold)] animate-ping" />
             OPTICAL LIGHT-TABLE
           </span>
-          <span>DIM: {imageWidth}×{imageHeight}px</span>
-          <span>CHART: 24-PATCH CLASSIC</span>
+          <span className="text-[var(--bb-ash)]">|</span>
+          <span>{imageWidth}×{imageHeight} PX</span>
+          <span className="text-[var(--bb-ash)]">|</span>
+          <span className="text-[var(--bb-sand)]">24-PATCH BILINEAR</span>
         </div>
-        <div className="flex items-center gap-4">
-          <span className="text-[var(--bb-ash)]">CROSSHAIR PINS: 4-PT BILINEAR WARP</span>
-          <div className="flex gap-1">
-            {quad.map((p, i) => (
-              <span key={i} className="px-1.5 py-0.5 bg-[var(--bb-panel)] text-[var(--bb-sand)] text-[10px] border border-[var(--bb-border)]">
-                P{i}: {Math.round(p.x)},{Math.round(p.y)}
-              </span>
-            ))}
-          </div>
+        <div className="flex items-center gap-2">
+          {quad.map((p, i) => (
+            <span
+              key={i}
+              className="px-1.5 py-0.5 bg-[var(--bb-panel)] text-[10px] text-[var(--bb-sand)] border border-[var(--bb-border)]"
+            >
+              {cornerLabels[i]}: {Math.round(p.x)},{Math.round(p.y)}
+            </span>
+          ))}
         </div>
       </div>
 
-      {/* Main Viewport Container */}
+      {/* Fully Contained Image Viewport */}
       <div
         ref={containerRef}
-        className="relative w-full aspect-[3/2] max-h-[580px] bg-[var(--bb-vacuum)] light-table-viewport border border-[var(--bb-border)] rounded-sm overflow-hidden flex items-center justify-center scanlines cursor-crosshair-custom"
+        className="relative flex-1 min-h-0 w-full light-table-grid overflow-hidden cursor-crosshair-custom"
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
       >
-        {/* Background Image / Placeholder Pattern */}
-        {imageSrc ? (
+        {/* Letterboxed Canvas Area */}
+        {imageSrc && box.w > 0 ? (
           <img
             src={imageSrc}
             alt="Reference preview"
-            className="w-full h-full object-contain pointer-events-none"
+            style={{
+              position: 'absolute',
+              left: `${box.x}px`,
+              top: `${box.y}px`,
+              width: `${box.w}px`,
+              height: `${box.h}px`,
+            }}
+            className="pointer-events-none object-fill shadow-[0_0_40px_rgba(0,0,0,0.8)]"
             draggable={false}
           />
-        ) : (
+        ) : !imageSrc ? (
           <button
             type="button"
             onClick={onBrowse}
-            className="w-full h-full light-table-grid flex items-center justify-center cursor-pointer border-none bg-transparent hover:bg-[var(--bb-surface)]/20 transition-colors group"
+            className="absolute inset-0 w-full h-full flex items-center justify-center bg-transparent border-none cursor-pointer group"
           >
-            <div className="text-center space-y-2 p-6 bg-[var(--bb-space)]/90 border border-[var(--bb-border-bright)] group-hover:border-[var(--bb-gold)] transition-colors">
-              <p className="text-[var(--bb-amber)] group-hover:text-[var(--bb-gold)] font-semibold tracking-wider text-sm">
-                CLICK TO OPEN FILE OR DROP IMAGE HERE
-              </p>
-              <p className="text-[var(--bb-smoke)] text-xs">
-                SUPPORTS RAW (DNG) AND COMPRESSED (JPEG/PNG) LIGHT-TABLE FRAMES
-              </p>
+            <div className="p-8 bg-[var(--bb-surface)]/95 border border-[var(--bb-border-bright)] group-hover:border-[var(--bb-gold)] text-center space-y-2 transition-all shadow-[0_0_30px_rgba(0,0,0,0.8)]">
+              <div className="text-xs font-bold tracking-widest text-[var(--bb-amber)] group-hover:text-[var(--bb-gold)]">
+                + CLICK TO OPEN OR DROP REFERENCE FRAME HERE
+              </div>
+              <div className="text-[10px] text-[var(--bb-smoke)] tracking-wide">
+                SUPPORTS DNG (RAW), JPEG, AND PNG COLORCHECKER CAPTURES
+              </div>
             </div>
           </button>
+        ) : null}
+
+        {/* Precision Reticle & Sample Box SVG Layer */}
+        {box.w > 0 && box.h > 0 && (
+          <svg
+            className="absolute inset-0 w-full h-full pointer-events-none"
+            style={{ overflow: 'visible' }}
+          >
+            <defs>
+              <g id="corner-reticle">
+                <circle r="7" fill="rgba(61, 10, 5, 0.4)" stroke="#f28f1f" strokeWidth="1.5" />
+                <line x1="-12" y1="0" x2="12" y2="0" stroke="#f5b931" strokeWidth="1" />
+                <line x1="0" y1="-12" x2="0" y2="12" stroke="#f5b931" strokeWidth="1" />
+                <circle r="1.8" fill="#fffdf2" />
+              </g>
+            </defs>
+
+            {/* Boundary Quad Polygon */}
+            <polygon
+              points={screenCorners.map((p) => `${p.x},${p.y}`).join(' ')}
+              fill="rgba(235, 100, 21, 0.05)"
+              stroke="#eb6415"
+              strokeWidth="1.5"
+            />
+
+            {/* 24-Patch Central Sampling Boxes */}
+            {gridPolygons.map((pts, idx) => (
+              <polygon
+                key={`patch-box-${idx}`}
+                points={pts}
+                fill="rgba(242, 143, 31, 0.08)"
+                stroke="#f28f1f"
+                strokeWidth="0.8"
+                strokeDasharray="2,2"
+              />
+            ))}
+
+            {/* Draggable Corner Reticles */}
+            {screenCorners.map((p, idx) => (
+              <g
+                key={`reticle-${idx}`}
+                transform={`translate(${p.x}, ${p.y})`}
+                className="pointer-events-auto cursor-move transition-transform hover:scale-125"
+                onPointerDown={handlePointerDown(idx)}
+              >
+                <use href="#corner-reticle" />
+                <text
+                  x="12"
+                  y="-8"
+                  fill="#f5b931"
+                  fontSize="10"
+                  fontFamily="JetBrains Mono, monospace"
+                  fontWeight="700"
+                  filter="drop-shadow(0 0 2px #040201)"
+                >
+                  {cornerLabels[idx]}
+                </text>
+              </g>
+            ))}
+          </svg>
         )}
 
-        {/* Precision Coordinate & Grid Overlay */}
-        <svg
-          viewBox={`0 0 ${imageWidth} ${imageHeight}`}
-          className="absolute inset-0 w-full h-full pointer-events-auto"
-          preserveAspectRatio="xMidYMid meet"
-        >
-          <defs>
-            {/* Corner Marker Reticle */}
-            <g id="reticle-pin">
-              <circle r="8" fill="rgba(196, 39, 12, 0.2)" stroke="#fa9723" strokeWidth="1.5" />
-              <line x1="-14" y1="0" x2="14" y2="0" stroke="#fcc238" strokeWidth="1" />
-              <line x1="0" y1="-14" x2="0" y2="14" stroke="#fcc238" strokeWidth="1" />
-              <circle r="2" fill="#fffdf2" />
-            </g>
-          </defs>
-
-          {/* Chart Boundary Polygon */}
-          <polygon
-            points={`${quad[0].x},${quad[0].y} ${quad[1].x},${quad[1].y} ${quad[2].x},${quad[2].y} ${quad[3].x},${quad[3].y}`}
-            fill="rgba(245, 109, 24, 0.06)"
-            stroke="#f56d18"
-            strokeWidth="1.8"
-          />
-
-          {/* Bilinear 24-Patch Sample Boxes */}
-          {gridCells}
-
-          {/* Draggable Corner Pins */}
-          {quad.map((p, idx) => (
-            <g
-              key={`corner-${idx}`}
-              transform={`translate(${p.x}, ${p.y})`}
-              className="cursor-move hover:scale-125 transition-transform"
-              onPointerDown={handlePointerDown(idx)}
-            >
-              <use href="#reticle-pin" />
-              <text
-                x="14"
-                y="-10"
-                fill="#fcc238"
-                fontSize="11"
-                fontFamily="JetBrains Mono, monospace"
-                fontWeight="700"
-                filter="drop-shadow(0 0 2px #000)"
-              >
-                {cornerLabels[idx]}
-              </text>
-            </g>
-          ))}
-        </svg>
-
-        {/* Optical Loupe Coordinates HUD (Bottom Left) */}
-        <div className="absolute bottom-3 left-3 bg-[var(--bb-space)]/90 border border-[var(--bb-border)] px-3 py-1.5 text-[10px] text-[var(--bb-sand)] font-mono flex items-center gap-3">
-          <span className="text-[var(--bb-gold)]">RETICLE WARP LOCK</span>
-          <span>CALIBRATED MATRIX REGION 6×4</span>
-          <span className="text-[var(--bb-smoke)]">[CLICK & DRAG PIN MARKERS TO ALIGN]</span>
-        </div>
+        {/* Scanline Overlay */}
+        <div className="absolute inset-0 scanlines-overlay pointer-events-none opacity-40" />
       </div>
     </div>
   );
