@@ -350,6 +350,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "colorbalance-core",
+ "colorbalance-fixtures",
  "colorbalance-raw",
  "serde",
  "serde_json",
@@ -358,6 +359,15 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-dialog",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "colorbalance-fixtures"
+version = "0.1.0"
+dependencies = [
+ "colorbalance-core",
+ "colorbalance-raw",
+ "serde_json",
 ]
 
 [[package]]

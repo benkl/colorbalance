@@ -11,7 +11,8 @@ export interface CameraIdentity {
   make: string;
   model: string;
   decoder: string;
-  decoderVersion: string;
+  // The core serializes CameraIdentity kebab-case, so this key is hyphenated.
+  'decoder-version': string;
 }
 
 export interface InspectGateFailure {
@@ -59,7 +60,7 @@ export interface ValidationSummary {
 
 export interface DeriveResult {
   profilePath: string;
-  reportPath: string;
+  reportPath: string | null;
   digest: string;
   validation: ValidationSummary;
   patches: PatchValidation[];

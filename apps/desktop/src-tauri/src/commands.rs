@@ -43,6 +43,34 @@ struct GateFailureResponse {
     measured: String,
 }
 
+/// Validation metrics as the UI consumes them (camelCase, includes the median).
+///
+/// This is deliberately separate from the profile's on-disk `ValidationSummary`,
+/// whose kebab-case format is part of the `*.cbprofile.json` schema.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ValidationResponse {
+    mean_delta_e: f64,
+    median_delta_e: f64,
+    p95_delta_e: f64,
+    max_delta_e: f64,
+    neutral_max_delta_e: f64,
+    skin_max_delta_e: f64,
+    condition_number: f64,
+    patch_count: u32,
+}
+
+/// One chart patch, source vs. corrected vs. target, for the validation table.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PatchResponse {
+    patch: String,
+    source_rgb: [f64; 3],
+    corrected_rgb: [f64; 3],
+    target_rgb: [f64; 3],
+    delta_e: f64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeriveResponse {
@@ -50,7 +78,8 @@ pub struct DeriveResponse {
     report_path: Option<String>,
     digest: String,
     quality_passed: bool,
-    validation: ValidationSummary,
+    validation: ValidationResponse,
+    patches: Vec<PatchResponse>,
     warnings: Vec<String>,
 }
 
@@ -294,12 +323,34 @@ pub fn derive_profile(
             "Quick-and-dirty approximation: source was rendered JPEG/PNG, not RAW.".to_owned(),
         );
     }
+    let validation_response = ValidationResponse {
+        mean_delta_e: validation.mean_delta_e,
+        median_delta_e: validation.median_delta_e,
+        p95_delta_e: validation.p95_delta_e,
+        max_delta_e: validation.max_delta_e,
+        neutral_max_delta_e: validation.neutral_max_delta_e,
+        skin_max_delta_e: validation.skin_max_delta_e,
+        condition_number: validation.condition_number,
+        patch_count: profile_value.validation.patch_count,
+    };
+    let patches = validation
+        .per_patch
+        .iter()
+        .map(|row| PatchResponse {
+            patch: format!("{:?}", row.patch),
+            source_rgb: row.source_rgb,
+            corrected_rgb: row.corrected_rgb,
+            target_rgb: row.target_rgb,
+            delta_e: row.delta_e,
+        })
+        .collect();
     Ok(DeriveResponse {
         profile_path,
         report_path,
         digest: profile_value.digest,
         quality_passed: warnings.is_empty(),
-        validation: profile_value.validation,
+        validation: validation_response,
+        patches,
         warnings,
     })
 }
