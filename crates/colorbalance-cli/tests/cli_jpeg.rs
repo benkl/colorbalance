@@ -27,7 +27,7 @@ fn quick_and_dirty_jpeg_derive_and_apply_workflow() {
     // 1. Render a chart DNG, decode it, and save it as a compressed JPEG to model a stinky source
     let scene = ChartScene::default();
     render_chart_dng(&ref_dng, &scene).unwrap();
-    let decoded = colorbalance_raw::decode_dng(&ref_dng).unwrap();
+    let decoded = colorbalance_raw::decode_raw(&ref_dng).unwrap();
     let mut img_buf = image::RgbImage::new(decoded.width, decoded.height);
     for y in 0..decoded.height {
         for x in 0..decoded.width {
@@ -134,6 +134,78 @@ fn quick_and_dirty_jpeg_derive_and_apply_workflow() {
     assert_eq!(sum_json["total"], 2);
     assert_eq!(sum_json["succeeded"].as_array().unwrap().len(), 2);
     assert_eq!(sum_json["failed"].as_array().unwrap().len(), 0);
+    assert!(sum_json["warnings"].as_array().unwrap().is_empty());
+
+    let original = fs::read_to_string(&profile_path).unwrap();
+    let mut profile = colorbalance_core::profile::from_json(&original).unwrap();
+    profile.decode_contract.decoder_version = "older-rendered-decoder".to_owned();
+    profile.camera.decoder_version = "older-rendered-decoder".to_owned();
+    profile.digest = colorbalance_core::profile::digest(&profile);
+    fs::write(&profile_path, colorbalance_core::profile::to_json(&profile)).unwrap();
+
+    let drift_summary = work.join("drift_summary.json");
+    let drift_out = std::process::Command::new(bin)
+        .arg("apply")
+        .arg(&profile_path)
+        .arg(&shot_jpg1)
+        .arg("-o")
+        .arg(work.join("drift_output"))
+        .arg("--summary")
+        .arg(&drift_summary)
+        .output()
+        .unwrap();
+    assert!(drift_out.status.success());
+    let drift: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&drift_summary).unwrap()).unwrap();
+    assert_eq!(drift["warnings"].as_array().unwrap().len(), 1);
+    assert!(drift["warnings"][0]["warning"]
+        .as_str()
+        .unwrap()
+        .contains("decoder version differs"));
+
+    profile.decode_contract.decoder = "libraw".to_owned();
+    profile.camera.decoder = "libraw".to_owned();
+    profile.digest = colorbalance_core::profile::digest(&profile);
+    fs::write(&profile_path, colorbalance_core::profile::to_json(&profile)).unwrap();
+    let mismatch_summary = work.join("mismatch_summary.json");
+    let mismatch_out = std::process::Command::new(bin)
+        .arg("apply")
+        .arg(&profile_path)
+        .arg(&shot_jpg1)
+        .arg("-o")
+        .arg(work.join("mismatch_output"))
+        .arg("--summary")
+        .arg(&mismatch_summary)
+        .output()
+        .unwrap();
+    assert!(!mismatch_out.status.success());
+    let mismatch: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&mismatch_summary).unwrap()).unwrap();
+    assert!(mismatch["failed"][0]["error"]
+        .as_str()
+        .unwrap()
+        .contains("decoder mismatch"));
+    assert!(mismatch["warnings"].as_array().unwrap().is_empty());
+
+    let forced_out = std::process::Command::new(bin)
+        .arg("apply")
+        .arg(&profile_path)
+        .arg(&shot_jpg1)
+        .arg("-o")
+        .arg(work.join("forced_output"))
+        .arg("--force")
+        .arg("--summary")
+        .arg(work.join("forced_summary.json"))
+        .output()
+        .unwrap();
+    assert!(forced_out.status.success());
+    let forced: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(work.join("forced_summary.json")).unwrap())
+            .unwrap();
+    assert!(forced["warnings"][0]["warning"]
+        .as_str()
+        .unwrap()
+        .contains("forced decode-contract mismatch"));
 
     let _ = fs::remove_dir_all(work);
 }

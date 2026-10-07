@@ -9,6 +9,7 @@ description = "ColorBalance image and RAW decode layer"
 [dependencies]
 colorbalance-core = { workspace = true }
 image = { workspace = true }
+rawler = "=0.8.0"
 thiserror = { workspace = true }
 
 [lints.rust]

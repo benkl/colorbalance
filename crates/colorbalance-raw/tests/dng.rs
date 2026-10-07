@@ -2,7 +2,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use colorbalance_raw::{decode_dng, write_dng, DngWriteSpec};
+use colorbalance_raw::{decode_raw, write_dng, DngWriteSpec};
 
 fn temp_path(name: &str) -> PathBuf {
     let nonce = SystemTime::now()
@@ -40,7 +40,7 @@ fn photosite_round_trip_preserves_levels_and_cfa_mapping() {
         }
     }
     write_dng(&path, &base_spec(4, 4, photosites)).unwrap();
-    let image = decode_dng(&path).unwrap();
+    let image = decode_raw(&path).unwrap();
     fs::remove_file(path).unwrap();
     assert_eq!(image.black_levels, [100, 200, 300, 400]);
     assert_eq!(image.white_levels, [1100; 4]);
@@ -56,15 +56,17 @@ fn photosite_round_trip_preserves_levels_and_cfa_mapping() {
 
 #[test]
 fn sparse_single_channel_clipping_only_marks_its_support() {
+    // One saturated red photosite at (8, 8). AHD support radius is 5, so the
+    // red flag covers x, y in 3..=13 and nothing else; green and blue stay clear.
     let path = temp_path("clip");
-    let mut photosites = vec![600; 36];
-    photosites[2 * 6 + 2] = 1100;
-    write_dng(&path, &base_spec(6, 6, photosites)).unwrap();
-    let image = decode_dng(&path).unwrap();
+    let mut photosites = vec![600; 16 * 16];
+    photosites[8 * 16 + 8] = 1100;
+    write_dng(&path, &base_spec(16, 16, photosites)).unwrap();
+    let image = decode_raw(&path).unwrap();
     fs::remove_file(path).unwrap();
-    for y in 0..6 {
-        for x in 0..6 {
-            let expected = if (1..=3).contains(&x) && (1..=3).contains(&y) {
+    for y in 0..16 {
+        for x in 0..16 {
+            let expected = if (3..=13).contains(&x) && (3..=13).contains(&y) {
                 1
             } else {
                 0
@@ -82,7 +84,7 @@ fn orientation_six_rotates_clockwise_and_swaps_dimensions() {
     let mut spec = base_spec(4, 6, photosites);
     spec.orientation = 6;
     write_dng(&path, &spec).unwrap();
-    let image = decode_dng(&path).unwrap();
+    let image = decode_raw(&path).unwrap();
     fs::remove_file(path).unwrap();
     assert_eq!((image.width, image.height), (6, 4));
     assert_eq!(image.rgb_at(5, 0)[0], 0.0);
@@ -102,7 +104,7 @@ fn unsupported_photometric_is_rejected() {
         }
     }
     fs::write(&path, bytes).unwrap();
-    let error = decode_dng(&path).unwrap_err().to_string();
+    let error = decode_raw(&path).unwrap_err().to_string();
     fs::remove_file(path).unwrap();
     assert!(error.contains("PhotometricInterpretation"));
 }
@@ -133,13 +135,13 @@ fn full_frame_crop_is_accepted_but_smaller_crop_is_rejected() {
         }
     }
     fs::write(&path, &bytes).unwrap();
-    assert!(decode_dng(&path).is_ok());
+    assert!(decode_raw(&path).is_ok());
     // No crop may silently masquerade as the full camera frame.
     bytes[insertion + 20..insertion + 22].copy_from_slice(&3_u16.to_le_bytes());
     fs::write(&path, &bytes).unwrap();
-    let error = decode_dng(&path).unwrap_err().to_string();
+    let error = decode_raw(&path).unwrap_err().to_string();
     fs::remove_file(path).unwrap();
-    assert!(error.contains("DefaultCropSize"), "{error}");
+    assert!(error.contains("not the full frame"), "{error}");
 }
 
 #[test]
@@ -222,8 +224,8 @@ fn decode_is_deterministic_across_repeated_decodes() {
         }
     }
     write_dng(&path, &base_spec(6, 6, photosites)).unwrap();
-    let first = decode_dng(&path).unwrap();
-    let second = decode_dng(&path).unwrap();
+    let first = decode_raw(&path).unwrap();
+    let second = decode_raw(&path).unwrap();
     fs::remove_file(path).unwrap();
     assert_eq!(first.width, second.width);
     assert_eq!(first.height, second.height);
@@ -255,11 +257,11 @@ fn four_color_cfa_is_rejected() {
     // Inline value holds [R, G, G, B]; set the fourth color to 3.
     bytes[pos + 8 + 3] = 3;
     fs::write(&path, &bytes).unwrap();
-    let error = decode_dng(&path).unwrap_err().to_string();
+    let error = decode_raw(&path).unwrap_err().to_string();
     fs::remove_file(path).unwrap();
     assert!(
-        error.contains("CFAPattern"),
-        "expected CFAPattern rejection, got: {error}"
+        error.contains("RGB Bayer"),
+        "expected non-RGB CFA rejection, got: {error}"
     );
 }
 
@@ -300,7 +302,7 @@ mod decode_by_content {
         let path = scratch("dng-as-jpg", "jpg");
         write_dng(&path, &base_spec(4, 4, vec![600; 16])).unwrap();
 
-        assert_eq!(sniff_source(&path).unwrap(), SourceKind::Tiff);
+        assert_eq!(sniff_source(&path).unwrap(), SourceKind::Raw);
         let decoded = decode_any(&path).expect("a DNG must decode whatever its extension says");
         fs::remove_file(path).unwrap();
         assert_eq!((decoded.width, decoded.height), (4, 4));
@@ -313,7 +315,7 @@ mod decode_by_content {
         let error = decode_any(&path).unwrap_err().to_string();
         fs::remove_file(path).unwrap();
         assert!(
-            error.contains("expected a DNG, JPEG, or PNG"),
+            error.contains("expected a DNG, JPEG, PNG, or camera RAW"),
             "got: {error}"
         );
     }

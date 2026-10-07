@@ -80,6 +80,7 @@ test('UI end-to-end: native file drop loads image, enables derive, and completes
       succeeded: ['001.jpg', '002.jpg', '003.jpg'],
       skipped: [],
       failed: [],
+      warnings: [{ file: '002.jpg', warning: 'decoder version drift: profile built with 1, current 2' }],
     };
   });
 
@@ -145,6 +146,9 @@ test('UI end-to-end: native file drop loads image, enables derive, and completes
   );
   assert.equal(batchSummary.total, 3);
   assert.equal(batchSummary.succeeded.length, 3);
+  assert.deepEqual(batchSummary.warnings, [
+    { file: '002.jpg', warning: 'decoder version drift: profile built with 1, current 2' },
+  ]);
 });
 
 test('chart detection bridge keeps status and corners separate from revision and preview', async () => {

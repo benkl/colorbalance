@@ -119,8 +119,10 @@ pub fn render_preview_rgb(
         sums.fill(0.0);
         for y in row_start..row_end {
             let line = &rgb[y * width * 3..(y + 1) * width * 3];
-            for (&(col_start, col_end), sum) in columns.iter().zip(sums.chunks_exact_mut(3)) {
-                for pixel in line[col_start * 3..col_end * 3].chunks_exact(3) {
+            for (&(col_start, col_end), sum) in
+                columns.iter().zip(sums.as_chunks_mut::<3>().0.iter_mut())
+            {
+                for pixel in line[col_start * 3..col_end * 3].as_chunks::<3>().0 {
                     sum[0] += (pixel[0] * gain[0]).clamp(0.0, 1.0);
                     sum[1] += (pixel[1] * gain[1]).clamp(0.0, 1.0);
                     sum[2] += (pixel[2] * gain[2]).clamp(0.0, 1.0);
@@ -128,7 +130,7 @@ pub fn render_preview_rgb(
             }
         }
         let rows_in_span = (row_end - row_start) as f32;
-        for (&(col_start, col_end), sum) in columns.iter().zip(sums.chunks_exact(3)) {
+        for (&(col_start, col_end), sum) in columns.iter().zip(sums.as_chunks::<3>().0) {
             let count = rows_in_span * (col_end - col_start) as f32;
             for &total in sum {
                 let encoded = colorbalance_core::color::srgb_encode(f64::from(total / count));

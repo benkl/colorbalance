@@ -1,6 +1,6 @@
 # ColorBalance architecture
 
-Status: milestones 1 to 4 are implemented (CLI, built-in DNG decoder, calibration core, batch apply, CLF and `.cube` export, Tauri 2 desktop app). Milestone 5 is open: `colorbalance-core` builds for `wasm32`, but there is no wasm-bindgen glue, worker, browser app, hosted mode, or LibRaw FFI yet. This document records the platform and performance decisions behind the product. `IMPLEMENTATION_PLAN.md` defines the milestones. When a decision here changes, update the decision log at the end of this file and the affected issues in the same change.
+Status: milestones 1 to 4 are implemented (CLI, rawler-based RAW decode with an in-repo AHD demosaic, calibration core, batch apply, CLF and `.cube` export, Tauri 2 desktop app). Milestone 5 is open: `colorbalance-core` builds for `wasm32`, but there is no wasm-bindgen glue, worker, browser app, or hosted mode yet. This document records the platform and performance decisions behind the product. `IMPLEMENTATION_PLAN.md` defines the milestones. When a decision here changes, update the decision log at the end of this file and the affected issues in the same change.
 
 ## Product shape
 
@@ -11,8 +11,8 @@ ColorBalance derives a color transform from one ColorChecker Classic RAW referen
 | Mode | Status | Role |
 | --- | --- | --- |
 | Rust CLI, native | shipped | `decode-contract`, `inspect`, `derive`, `apply`, `export`. No automatic chart detection; manual `--quad` or an 8% inset rectangle |
-| Tauri 2 desktop with React UI | shipped, unsigned, no published release | Full local workflow with built-in DNG and JPEG/PNG decode, automatic chart finding, unrestricted file access. LibRaw is not linked |
-| Browser, WebAssembly engine | not started | The core builds for `wasm32` in CI. Parity tests, worker, and RAW decode are open (issues 21 to 23). Gated on the LibRaw WebAssembly spike (issue 22) |
+| Tauri 2 desktop with React UI | shipped, unsigned, no published release | Full local workflow with rawler RAW decode, JPEG/PNG decode, automatic chart finding, unrestricted file access |
+| Browser, WebAssembly engine | not started | The core builds for `wasm32` in CI (it does not depend on rawler). Parity tests, worker, and RAW decode are open (issues 21 to 23). Browser RAW decode needs a spike on whether rawler builds and fits for `wasm32` (issue 22) |
 | Hosted web service | not started | Optional, deferred until upload cost and demand are known (issue 24) |
 
 Tauri ships first because it reuses the web UI while keeping RAW decoding native. The browser and hosted modes are added behind the same engine API, never as a second color implementation.
@@ -22,7 +22,7 @@ Tauri ships first because it reuses the web UI while keeping RAW decoding native
 | Concern | Technology | Reason |
 | --- | --- | --- |
 | Color engine, fitting, batch logic | Rust | One core compiles to native, WebAssembly, and server workers; predictable memory behavior for large images |
-| RAW decode | Built-in pure-Rust DNG decoder (shipped), LibRaw FFI planned for other camera formats | Deterministic normalize-and-flag decode now; broad camera coverage later, cross-checked against the built-in decoder |
+| RAW decode | `rawler` crate returns undemosaiced photosites; AHD demosaic lives in `colorbalance-core` | One maintained decoder instead of a hand-written one. The decoder name and rawler version are recorded in every profile (D18) |
 | Chart detection | Pure Rust in `colorbalance-core`, on a bounded thumbnail | One deterministic detector for native and potential WebAssembly use, without OpenCV; weak or competing matches return no automatic corners |
 | Matrix math | `nalgebra` | Least squares and 3x3 fitting without a hand-rolled solver |
 | Parallelism | `rayon` | Native per-image and per-tile CPU parallelism |
@@ -43,7 +43,7 @@ Python is the reference and verification stack, not the production pixel path. I
 ```text
 crates/
   colorbalance-core/      # color math, chart sampling and detection, fitting, profiles, batch scheduler, exports
-  colorbalance-raw/       # built-in DNG decoder, JPEG/PNG loading; LibRaw FFI planned (native only)
+  colorbalance-raw/       # rawler adapter, JPEG/PNG loading, test-only DNG writer (native only)
   colorbalance-cli/       # clap CLI (native only)
   colorbalance-fixtures/  # shared test fixtures
 apps/
@@ -56,7 +56,7 @@ tests/                    # cross-crate fixtures
 docs/                     # plan, architecture, usage, development, packaging, release gate
 ```
 
-`colorbalance-core` must compile for native and `wasm32` targets and must not depend on LibRaw, Tauri, or the CLI. Everything RAW-specific lives in `colorbalance-raw` and is injected as a trait implementation.
+`colorbalance-core` must compile for native and `wasm32` targets and must not depend on rawler, Tauri, or the CLI. Everything file-format-specific lives in `colorbalance-raw` and is injected as a trait implementation.
 
 ## Engine API
 
@@ -72,7 +72,7 @@ export_cube(...) -> CubeArtifact
 
 Each caller supplies a decoder implementation:
 
-- native CLI and Tauri use the LibRaw decoder;
+- native CLI and Tauri use the rawler adapter in `colorbalance-raw`;
 - the browser uses the WebAssembly decoder selected in milestone 5;
 - tests use synthetic and fixture decoders.
 
@@ -111,7 +111,7 @@ Everything after decode is per-pixel independent and runs in tiles or scanlines:
 decode tile -> normalize -> channel scaling -> 3x3 matrix -> clip and count -> sRGB encode -> write
 ```
 
-Demosaicing may require the full frame and stays inside LibRaw initially. The pipeline after decoding must not allocate additional full-size copies.
+Demosaicing needs the full frame. It runs in `colorbalance-core::ahd` on the whole decoded mosaic. The pipeline after decoding must not allocate additional full-size copies.
 
 ### CPU before GPU
 
@@ -137,7 +137,7 @@ The shipped transform is one scalar, three channel multipliers, one 3x3 matrix, 
 ```text
 React UI -> Axum API -> PostgreSQL job state
                      -> S3-compatible storage, presigned multipart uploads
-                     -> native Rust workers with LibRaw
+                     -> native Rust workers with the rawler decoder
                      -> SSE progress, signed download URLs
 ```
 
@@ -156,19 +156,20 @@ Rules:
 | D2 | Color engine is Rust, shared by CLI, desktop, browser, and server | Accepted | 2026-10-03 |
 | D3 | Python is research and verification only, not a runtime dependency | Accepted | 2026-10-03 |
 | D4 | Desktop ships as Tauri 2 with the React UI | Accepted | 2026-10-03 |
-| D5 | Browser execution is a measured experiment gated on the LibRaw WebAssembly spike | Accepted | 2026-10-03 |
+| D5 | Browser execution is a measured experiment gated on a browser RAW decode spike (issue 22) | Accepted | 2026-10-03 |
 | D6 | Hosted mode is optional and deferred until upload cost and demand are known | Accepted | 2026-10-03 |
 | D7 | CPU paths first; WebGPU is optional acceleration, never required | Accepted | 2026-10-03 |
 | D8 | Profile format is `*.cbprofile.json` regardless of deployment mode | Accepted | 2026-10-03 |
 | D9 | CLF and `.cube` exports require the normalized camera-RGB decode contract and do not replace it | Accepted | 2026-10-03 |
-| D10 | Engine ships a built-in pure-Rust DNG decoder (uncompressed 16-bit CFA); LibRaw FFI remains planned for other camera formats and must agree with the built-in decoder on overlapping DNGs | Accepted | 2026-10-03 |
+| D10 | ~~Built-in pure-Rust DNG decoder with LibRaw FFI planned~~ Superseded by D18 | Superseded | 2026-10-07 |
 | D11 | Web delivery mode: Tauri 2 desktop is the primary delivery vehicle. Standalone browser preview is supported with local client-side evaluation and simulated demo fixtures. Direct browser-local RAW decode is gated behind WebAssembly memory constraints. Native desktop has unrestricted local filesystem access and multi-threaded parallel batch execution. | Accepted | 2026-10-04 |
-| D12 | The built-in DNG decoder also accepts 3-component, 12-bit LinearRaw compressed with lossless JPEG SOF3, when metadata and opcodes preserve unbalanced linear camera RGB. CFA and LinearRaw remain distinct sensor layouts; clipping is flagged from source samples before orientation or preview. Full-frame crop and identity gain maps are allowed, other pixel-changing operations fail closed. LibRaw remains planned for other formats. | Accepted | 2026-10-06 |
+| D12 | The decoder accepts 3-component, 12-bit LinearRaw compressed with lossless JPEG SOF3, when metadata preserves unbalanced linear camera RGB. CFA and LinearRaw remain distinct sensor layouts; clipping is flagged from source samples before orientation or preview. Full-frame crop only; other crops fail closed. Since D18 rawler performs the decode and the pixel-changing DNG opcodes are no longer checked by this project. | Accepted (amended by D18) | 2026-10-06 |
 | D13 | Desktop commands never run RAW or image work on the main thread: async commands plus `spawn_blocking`, with progress events for UI feedback | Accepted | 2026-10-07 |
 | D14 | Desktop caches one decoded reference keyed on path, length and mtime, for load, inspect, derive and correct. Colour results are unchanged: a hit returns the identical decode, any file change is a miss, and correction never mutates the shared image | Accepted | 2026-10-07 |
 | D15 | Previews average the linear image down to the preview size first, then sRGB-encode only the output. Replaces encode-full-frame then Triangle resize. Release, 45 MP: 3.1-3.5 s to 0.24 s | Accepted | 2026-10-07 |
 | D16 | Replace planned OpenCV-bound chart detection with a pure-Rust detector in `colorbalance-core` over a bounded thumbnail. Automatic detection runs after preview only through 12 MP; larger images and retries use an explicit action. Misses and ambiguous candidates use manual corners; physical chart revision always requires user selection. Detector latency and limits must be measured, not assumed. | Accepted | 2026-10-07 |
 | D17 | Documentation states shipped behavior only. The CLI keeps manual `--quad` input and does not call the detector until a decision record changes that. Support-matrix tiers describe intent; the Verified column records what has actually been run. | Accepted | 2026-10-07 |
+| D18 | RAW decode uses the `rawler` 0.8 crate for every camera format; the hand-written DNG decoder and its lossless-JPEG code are deleted. The demosaic is a real AHD (directional green interpolation, colour-difference interpolation, CIELab homogeneity vote) in `colorbalance-core/src/ahd.rs`, so the contract's `demosaic: ahd` is true. Clipping flags are computed per photosite before demosaicing and then spread over the 11x11 neighbourhood (support radius 5) of each clipped photosite. Contract identity is `rawler-ahd` plus the rawler version. Apply blocks on a decoder-name or settings mismatch and `--force` records the override; a version-only difference is a warning in the batch result. The gate coefficient of variation divides by `max(mean, 0.01)` so near-zero out-of-gamut channels are not judged on quantization noise. The workspace minimum Rust version is 1.89 because rawler requires it. rawler is LGPL-2.1 and the project has no licence yet, so distribution terms must be settled before release. `dng_writer.rs` stays for test fixtures only. Profiles with decoder `colorbalance-dng` do not match and must be re-derived. | Accepted | 2026-10-07 |
 
 ## Platform and Browser Support Matrix
 

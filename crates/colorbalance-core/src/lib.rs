@@ -2,7 +2,7 @@
 //!
 //! This crate holds every color and profile concept shared by the CLI, the
 //! desktop application, the browser build, and server workers. It must compile
-//! for native and `wasm32` targets and must not depend on LibRaw, Tauri, or
+//! for native and `wasm32` targets and must not depend on rawler, Tauri, or
 //! any UI crate. RAW-specific decoding is injected through traits defined
 //! here and implemented in `colorbalance-raw`.
 //!
@@ -10,6 +10,7 @@
 //! `docs/ARCHITECTURE.md` for the platform decisions, and
 //! `docs/CONTRACTS.md` for the binding module interfaces.
 
+pub mod ahd;
 pub mod batch;
 pub mod calibration;
 pub mod chart;

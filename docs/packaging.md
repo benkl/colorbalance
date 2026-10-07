@@ -12,7 +12,7 @@ This document defines the build, verification, and distribution process for stan
 
 ## 2. Prerequisites
 
-- **Rust toolchain**: 1.85+ stable with MSVC toolchain on Windows.
+- **Rust toolchain**: 1.89+ stable with MSVC toolchain on Windows.
 - **Node.js**: 20+ with npm.
 - **WebView Runtime**: Evergreen Microsoft Edge WebView2 on Windows (pre-installed on Windows 10/11).
 - **System Python is NOT required**: the binary is standalone native Rust and statically bundles all dependencies.

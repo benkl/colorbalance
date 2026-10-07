@@ -93,7 +93,7 @@ pub fn write_dng(path: &Path, spec: &DngWriteSpec) -> io::Result<()> {
         ));
     }
 
-    const ENTRY_COUNT: u16 = 17;
+    const ENTRY_COUNT: u16 = 18;
     const HEADER_SIZE: u32 = 8;
     let ifd_size = 2_u32 + u32::from(ENTRY_COUNT) * 12 + 4;
     let extra_base = HEADER_SIZE + ifd_size;
@@ -222,6 +222,12 @@ pub fn write_dng(path: &Path, spec: &DngWriteSpec) -> io::Result<()> {
             field_type: 1,
             count: 4,
             value: dng_version_inline,
+        },
+        Entry {
+            tag: 50_713,
+            field_type: 3,
+            count: 2,
+            value: dimensions_inline,
         },
         Entry {
             tag: 50_714,

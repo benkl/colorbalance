@@ -101,7 +101,7 @@ struct ApplyArgs {
     /// Overwrite existing output files (default: skip/fail existing)
     #[arg(long, default_value_t = false)]
     overwrite: bool,
-    /// Ignore camera make/model mismatch (default: fail closed)
+    /// Ignore camera or decode-contract mismatch (default: fail closed)
     #[arg(long, default_value_t = false)]
     force: bool,
     /// In-flight image bound for parallel decoding (default: 2)
@@ -218,6 +218,7 @@ struct InspectGateFailure {
 pub struct BatchSummary {
     pub succeeded: Vec<String>,
     pub skipped: Vec<String>,
+    pub warnings: Vec<BatchWarning>,
     pub failed: Vec<BatchFileError>,
     pub total: usize,
 }
@@ -227,6 +228,13 @@ pub struct BatchSummary {
 pub struct BatchFileError {
     pub file: String,
     pub error: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct BatchWarning {
+    pub file: String,
+    pub warning: String,
 }
 
 fn decode_auto(path: &Path) -> Result<DecodedImage, String> {
@@ -309,7 +317,17 @@ fn execute_derive(args: DeriveArgs) -> Result<(), String> {
         calibration::fit(&samples, &dataset).map_err(|e| format!("fit failed: {e}"))?;
     let ref_digest =
         sha256_file(&args.reference).map_err(|e| format!("failed to hash reference: {e}"))?;
-    let contract = DecodeContract::canonical(&image.camera.decoder, &image.camera.decoder_version);
+    let contract = if image.sensor_layout == colorbalance_core::decode::SensorLayout::Rendered {
+        DecodeContract::canonical(&image.camera.decoder, &image.camera.decoder_version)
+    } else {
+        let contract = colorbalance_raw::canonical_contract();
+        if contract.decoder != image.camera.decoder
+            || contract.decoder_version != image.camera.decoder_version
+        {
+            return Err("RAW decoder identity disagrees with its contract".to_owned());
+        }
+        contract
+    };
     let p_initial = Profile {
         schema_version: profile::SCHEMA_VERSION.to_owned(),
         decode_contract: contract,
@@ -563,9 +581,11 @@ fn execute_apply(args: ApplyArgs) -> Result<(), String> {
 
     cleanup_stale_temp_files(&args.output);
 
+    let (warning_tx, warning_rx) = std::sync::mpsc::channel::<BatchWarning>();
     let prof = std::sync::Arc::new(prof);
     let force = args.force;
     let overwrite = args.overwrite;
+    let file_warnings = warning_tx.clone();
     let process = move |input: &Path, output: PathBuf| -> Result<Option<PathBuf>, String> {
         if output.exists() && !overwrite {
             return Ok(None);
@@ -581,6 +601,34 @@ fn execute_apply(args: ApplyArgs) -> Result<(), String> {
                 prof.camera.make, prof.camera.model, decoded.camera.make, decoded.camera.model
             ));
         }
+
+        if prof.camera.decoder != prof.decode_contract.decoder
+            || prof.camera.decoder_version != prof.decode_contract.decoder_version
+        {
+            return Err(
+                "profile camera decoder identity disagrees with its decode contract".to_owned(),
+            );
+        }
+        let actual = if decoded.sensor_layout == colorbalance_core::decode::SensorLayout::Rendered {
+            DecodeContract::canonical(&decoded.camera.decoder, &decoded.camera.decoder_version)
+        } else {
+            let contract = colorbalance_raw::canonical_contract();
+            if contract.decoder != decoded.camera.decoder
+                || contract.decoder_version != decoded.camera.decoder_version
+            {
+                return Err(format!(
+                    "RAW decoder identity disagrees with its contract (image: {} {}, contract: {} {})",
+                    decoded.camera.decoder, decoded.camera.decoder_version,
+                    contract.decoder, contract.decoder_version
+                ));
+            }
+            contract
+        };
+        let warning = match prof.decode_contract.compare_for_apply(&actual) {
+            Ok(warning) => warning,
+            Err(error) if force => Some(format!("forced decode-contract mismatch: {error}")),
+            Err(error) => return Err(error.to_string()),
+        };
 
         let pixel_count = (decoded.width as usize) * (decoded.height as usize);
         let mut out_u16 = Vec::with_capacity(pixel_count * 3);
@@ -618,6 +666,12 @@ fn execute_apply(args: ApplyArgs) -> Result<(), String> {
             let _ = fs::remove_file(&tmp_path);
             return Err(format!("rename failed: {e}"));
         }
+        if let Some(warning) = warning {
+            let _ = file_warnings.send(BatchWarning {
+                file: input.display().to_string(),
+                warning,
+            });
+        }
         Ok(Some(output))
     };
 
@@ -637,6 +691,12 @@ fn execute_apply(args: ApplyArgs) -> Result<(), String> {
             .map(|r| r.input)
             .collect(),
         skipped: core_summary.skipped,
+        warnings: {
+            drop(warning_tx);
+            let mut warnings: Vec<_> = warning_rx.into_iter().collect();
+            warnings.sort_by(|a, b| a.file.cmp(&b.file));
+            warnings
+        },
         failed: core_summary
             .failed
             .into_iter()
@@ -650,6 +710,9 @@ fn execute_apply(args: ApplyArgs) -> Result<(), String> {
     if let Some(sum_path) = args.summary {
         let text = serde_json::to_string_pretty(&summary).map_err(|e| e.to_string())?;
         fs::write(sum_path, text).map_err(|e| e.to_string())?;
+    }
+    for warning in &summary.warnings {
+        eprintln!("Warning ({}): {}", warning.file, warning.warning);
     }
 
     eprintln!(

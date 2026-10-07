@@ -3,6 +3,7 @@ use std::path::Path;
 
 use colorbalance_core::calibration::{self, ChartQuad, GateConfig};
 use colorbalance_core::chart::ChartRevision;
+use colorbalance_core::contract::DecodeContract;
 use colorbalance_core::decode::DecodedImage;
 use colorbalance_core::detection::{detect_chart, Detection};
 use colorbalance_core::interchange::{profile_to_clf, profile_to_cube};
@@ -100,6 +101,7 @@ pub struct DeriveResponse {
 pub struct BatchResponse {
     succeeded: Vec<String>,
     skipped: Vec<String>,
+    warnings: Vec<BatchWarning>,
     failed: Vec<BatchFailure>,
     total: usize,
 }
@@ -109,6 +111,13 @@ pub struct BatchResponse {
 struct BatchFailure {
     file: String,
     error: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BatchWarning {
+    file: String,
+    warning: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -439,10 +448,19 @@ pub fn derive_profile_cached(
     let mut reference_hasher = Sha256::new();
     reference_hasher.update(reference_bytes);
     let reference_digest = format!("{:x}", reference_hasher.finalize());
-    let contract = colorbalance_core::contract::DecodeContract::canonical(
-        &image.camera.decoder,
-        &image.camera.decoder_version,
-    );
+    let contract = if image.sensor_layout == colorbalance_core::decode::SensorLayout::Rendered {
+        DecodeContract::canonical(&image.camera.decoder, &image.camera.decoder_version)
+    } else {
+        let contract = colorbalance_raw::canonical_contract();
+        if contract.decoder != image.camera.decoder
+            || contract.decoder_version != image.camera.decoder_version
+        {
+            return Err(BackendError::Message(
+                "RAW decoder identity disagrees with its contract".to_owned(),
+            ));
+        }
+        contract
+    };
     let initial = Profile {
         schema_version: profile::SCHEMA_VERSION.to_owned(),
         decode_contract: contract,
@@ -581,19 +599,27 @@ pub fn apply_batch(
             },
         )
     };
+    let (warning_tx, warning_rx) = std::sync::mpsc::channel::<BatchWarning>();
     let process = {
         let on_progress = on_progress.clone();
         let finished = finished.clone();
+        let warning_tx = warning_tx.clone();
         move |input: &std::path::Path, output: std::path::PathBuf| {
             let result = (|| {
                 if output.exists() && !overwrite {
                     return Ok(None);
                 }
                 let mut image = decode_auto(input).map_err(|e| e.to_string())?;
-                check_camera(&profile, &image)?;
+                let warning = check_camera(&profile, &image)?;
                 let (pixels, _) = correct_in_place(&profile, &mut image);
                 let data = encode_tiff_rgb_u16(image.width, image.height, &pixels);
                 write_atomically(&output, &data).map_err(|e| e.to_string())?;
+                if let Some(warning) = warning {
+                    let _ = warning_tx.send(BatchWarning {
+                        file: input.display().to_string(),
+                        warning,
+                    });
+                }
                 Ok(Some(output))
             })();
             let done = finished.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
@@ -606,6 +632,12 @@ pub fn apply_batch(
             .map_err(BackendError::Message)?;
     Ok(BatchResponse {
         succeeded: summary.succeeded.into_iter().map(|r| r.input).collect(),
+        warnings: {
+            drop(warning_tx);
+            let mut warnings: Vec<_> = warning_rx.into_iter().collect();
+            warnings.sort_by(|a, b| a.file.cmp(&b.file));
+            warnings
+        },
         skipped: summary.skipped,
         failed: summary
             .failed
@@ -619,15 +651,41 @@ pub fn apply_batch(
     })
 }
 
-/// Fail closed when the image was not captured by the profile's camera.
-fn check_camera(profile: &Profile, image: &DecodedImage) -> Result<(), String> {
+/// Fail closed on camera, decoder or non-version decode-contract mismatch.
+fn check_camera(profile: &Profile, image: &DecodedImage) -> Result<Option<String>, String> {
     if image.camera.make != profile.camera.make || image.camera.model != profile.camera.model {
         return Err(format!(
             "camera mismatch (profile: {} {}, image: {} {})",
             profile.camera.make, profile.camera.model, image.camera.make, image.camera.model
         ));
     }
-    Ok(())
+    if profile.camera.decoder != profile.decode_contract.decoder
+        || profile.camera.decoder_version != profile.decode_contract.decoder_version
+    {
+        return Err(
+            "profile camera decoder identity disagrees with its decode contract".to_owned(),
+        );
+    }
+    let actual =
+        if image.sensor_layout == colorbalance_core::decode::SensorLayout::Rendered {
+            DecodeContract::canonical(&image.camera.decoder, &image.camera.decoder_version)
+        } else {
+            let contract = colorbalance_raw::canonical_contract();
+            if contract.decoder != image.camera.decoder
+                || contract.decoder_version != image.camera.decoder_version
+            {
+                return Err(format!(
+                "RAW decoder identity disagrees with its contract (image: {} {}, contract: {} {})",
+                image.camera.decoder, image.camera.decoder_version,
+                contract.decoder, contract.decoder_version
+            ));
+            }
+            contract
+        };
+    profile
+        .decode_contract
+        .compare_for_apply(&actual)
+        .map_err(|e| e.to_string())
 }
 
 /// Apply the profile to every pixel and return the sRGB-encoded 16-bit samples
@@ -757,7 +815,7 @@ pub fn correct_image_cached(
         }
     }
     let image = decode_cached(cache, &input_path, report, steps)?;
-    check_camera(&profile, &image).map_err(BackendError::Message)?;
+    let version_warning = check_camera(&profile, &image).map_err(BackendError::Message)?;
     let before_data_url = preview_cached(cache, &image, report, 2, steps)?;
     report("Applying the transform", 3, steps);
     let (width, height) = (image.width, image.height);
@@ -779,6 +837,9 @@ pub fn correct_image_cached(
     }
 
     let mut warnings = Vec::new();
+    if let Some(warning) = version_warning {
+        warnings.push(warning);
+    }
     if let Some(quality) = &profile.quality {
         if quality.quick_and_dirty {
             warnings.push("Profile came from a rendered image: approximate.".to_owned());
@@ -882,4 +943,48 @@ fn build_report_html(
     }
     html.push_str("</table>");
     html
+}
+
+#[cfg(test)]
+mod apply_contract_tests {
+    use super::*;
+
+    #[test]
+    fn apply_rejects_decoder_drift_and_reports_version_drift() {
+        let mut profile =
+            profile::from_json(include_str!("../colorbalance_profile.cbprofile.json"))
+                .expect("valid fixture profile");
+        let actual = colorbalance_raw::canonical_contract();
+        profile.decode_contract = actual.clone();
+        profile.camera.decoder = actual.decoder.clone();
+        profile.camera.decoder_version = actual.decoder_version.clone();
+        let mut image = DecodedImage {
+            sensor_layout: colorbalance_core::decode::SensorLayout::Cfa,
+            width: 1,
+            height: 1,
+            rgb: vec![0.0; 3],
+            clipped: vec![0],
+            black_levels: [0; 4],
+            white_levels: [u16::MAX; 4],
+            cfa_pattern: [0, 1, 1, 2],
+            display_neutral: None,
+            camera: profile.camera.clone(),
+        };
+        assert_eq!(check_camera(&profile, &image), Ok(None));
+        profile.decode_contract.decoder_version = "old".to_owned();
+        profile.camera.decoder_version = "old".to_owned();
+        assert!(check_camera(&profile, &image)
+            .unwrap()
+            .unwrap()
+            .contains("decoder version differs"));
+        image.camera.decoder = "libraw".to_owned();
+        assert!(check_camera(&profile, &image)
+            .unwrap_err()
+            .contains("RAW decoder identity"));
+        image.camera.decoder = actual.decoder;
+        profile.decode_contract.no_auto_scale = true;
+        assert!(check_camera(&profile, &image)
+            .unwrap_err()
+            .contains("decode settings differ"));
+    }
 }

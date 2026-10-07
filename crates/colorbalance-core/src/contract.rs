@@ -25,7 +25,7 @@ pub enum ContractError {
     Orientation(OrientationPolicy),
 }
 
-/// LibRaw `output_color` selection. Only `Raw` is valid in the contract.
+/// Output color selection. Only `Raw` is valid in the contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum OutputColor {
@@ -33,7 +33,7 @@ pub enum OutputColor {
     Raw,
 }
 
-/// LibRaw output bit depth. Only `U16` is valid in the contract.
+/// Output bit depth. Only `U16` is valid in the contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum OutputDepth {
@@ -92,7 +92,7 @@ pub enum OrientationPolicy {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct DecodeContract {
-    /// Decoder implementation identity, for example `libraw`.
+    /// Decoder implementation identity, for example `rawler-ahd`.
     pub decoder: String,
     /// Decoder implementation version the contract was pinned against.
     pub decoder_version: String,
@@ -105,6 +105,15 @@ pub struct DecodeContract {
     pub highlight: HighlightPolicy,
     pub orientation: OrientationPolicy,
     pub no_auto_scale: bool,
+}
+
+/// Apply-time mismatch between a saved profile and the decoder currently in use.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ContractMismatch {
+    #[error("decoder mismatch (profile: {profile}, image: {image})")]
+    Decoder { profile: String, image: String },
+    #[error("decode settings differ from the profile's pinned contract")]
+    Settings,
 }
 
 impl DecodeContract {
@@ -125,6 +134,35 @@ impl DecodeContract {
             orientation: OrientationPolicy::AsShot,
             no_auto_scale: false,
         }
+    }
+
+    /// Check the actual decoder contract against the profile contract. A version
+    /// change alone is allowed, but must be reported to the caller.
+    pub fn compare_for_apply(&self, actual: &Self) -> Result<Option<String>, ContractMismatch> {
+        if self.decoder != actual.decoder {
+            return Err(ContractMismatch::Decoder {
+                profile: self.decoder.clone(),
+                image: actual.decoder.clone(),
+            });
+        }
+        if self.output_color != actual.output_color
+            || self.output_depth != actual.output_depth
+            || self.gamma != actual.gamma
+            || self.white_balance != actual.white_balance
+            || self.no_auto_bright != actual.no_auto_bright
+            || self.demosaic != actual.demosaic
+            || self.highlight != actual.highlight
+            || self.orientation != actual.orientation
+            || self.no_auto_scale != actual.no_auto_scale
+        {
+            return Err(ContractMismatch::Settings);
+        }
+        Ok((self.decoder_version != actual.decoder_version).then(|| {
+            format!(
+                "decoder version differs (profile: {} {}, image: {} {})",
+                self.decoder, self.decoder_version, actual.decoder, actual.decoder_version
+            )
+        }))
     }
 
     /// Reject any deviation from the pinned settings.
@@ -171,13 +209,13 @@ mod tests {
 
     #[test]
     fn canonical_contract_passes_validation() {
-        let contract = DecodeContract::canonical("libraw", "0.21.0");
+        let contract = DecodeContract::canonical("rawler-ahd", "0.8.0");
         assert!(contract.validate().is_ok());
     }
 
     #[test]
     fn canonical_contract_round_trips_through_json() {
-        let contract = DecodeContract::canonical("libraw", "0.21.0");
+        let contract = DecodeContract::canonical("rawler-ahd", "0.8.0");
         let json = serde_json::to_string(&contract).expect("serialize");
         let parsed: DecodeContract = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(parsed, contract);
@@ -186,7 +224,7 @@ mod tests {
 
     #[test]
     fn camera_white_balance_is_rejected() {
-        let mut contract = DecodeContract::canonical("libraw", "0.21.0");
+        let mut contract = DecodeContract::canonical("rawler-ahd", "0.8.0");
         contract.white_balance = WhiteBalancePolicy::CameraMetadata;
         assert_eq!(
             contract.validate(),
@@ -198,7 +236,7 @@ mod tests {
 
     #[test]
     fn non_unity_multipliers_are_rejected() {
-        let mut contract = DecodeContract::canonical("libraw", "0.21.0");
+        let mut contract = DecodeContract::canonical("rawler-ahd", "0.8.0");
         contract.white_balance = WhiteBalancePolicy::Unity {
             user_mul: [1.0, 1.0, 1.0, 1.2],
         };
@@ -207,20 +245,44 @@ mod tests {
 
     #[test]
     fn srgb_output_and_auto_bright_are_rejected() {
-        let mut contract = DecodeContract::canonical("libraw", "0.21.0");
+        let mut contract = DecodeContract::canonical("rawler-ahd", "0.8.0");
         contract.no_auto_bright = false;
         assert_eq!(contract.validate(), Err(ContractError::AutoBright));
 
-        let mut contract = DecodeContract::canonical("libraw", "0.21.0");
+        let mut contract = DecodeContract::canonical("rawler-ahd", "0.8.0");
         contract.gamma = [1.0 / 2.4, 12.92];
         assert_eq!(contract.validate(), Err(ContractError::AutoBright));
     }
 
     #[test]
+    fn apply_rejects_decoder_name_and_settings_but_reports_version_drift() {
+        let saved = DecodeContract::canonical("rawler-ahd", "0.7.9");
+        let actual = DecodeContract::canonical("rawler-ahd", "0.8.0");
+        assert!(saved
+            .compare_for_apply(&actual)
+            .unwrap()
+            .unwrap()
+            .contains("0.7.9"));
+        assert_eq!(actual.compare_for_apply(&actual), Ok(None));
+
+        let other = DecodeContract::canonical("libraw", "0.8.0");
+        assert!(matches!(
+            saved.compare_for_apply(&other),
+            Err(ContractMismatch::Decoder { .. })
+        ));
+        let mut other = actual.clone();
+        other.no_auto_scale = true;
+        assert_eq!(
+            saved.compare_for_apply(&other),
+            Err(ContractMismatch::Settings)
+        );
+    }
+
+    #[test]
     fn unknown_fields_are_rejected() {
         let json = r#"{
-            "decoder": "libraw",
-            "decoder-version": "0.21.0",
+            "decoder": "rawler-ahd",
+            "decoder-version": "0.8.0",
             "output-color": "raw",
             "output-depth": "u16",
             "gamma": [1.0, 1.0],

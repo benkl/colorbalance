@@ -5,7 +5,7 @@ How to build, test, and verify ColorBalance locally. See `AGENTS.md` for working
 ## Toolchain
 
 - Rust stable, managed with rustup. `rust-toolchain.toml` selects it automatically.
-- Minimum supported Rust version: 1.85 (workspace `rust-version`).
+- Minimum supported Rust version: 1.89 (workspace `rust-version`).
 - The `wasm32-unknown-unknown` target is required to check `colorbalance-core` for the browser build:
 
 ```text
@@ -35,14 +35,14 @@ colorbalance decode-contract
 
 It prints the canonical RAW decode contract as JSON. The pinned settings are raw colorimetry, linear gamma, unity white balance multipliers, disabled auto brightening, AHD demosaic, clipped highlights, as-shot orientation, and 16-bit output. Any change to these values is a contract change and must update `crates/colorbalance-core/src/contract.rs`, its tests, the CLI test, and the CI grep list together.
 
-The built-in DNG decoder accepts uncompressed 16-bit CFA and a narrow three-component 12-bit LinearRaw/SOF3 lossless-JPEG layout (including the Samsung Galaxy S25 file checked in October 2026). Other camera RAW formats still need LibRaw. The LinearRaw path uses the DNG RGB components directly, flags saturation from those samples, and refuses unsupported crops or pixel-changing opcodes. `research/samsung_reference_decode.py` can independently decode a local SOF3 strip with `imagecodecs`, `numpy`, and `tifffile`; it is not a production dependency. It splits restart intervals because a single libjpeg decode can silently repeat the first interval on this file.
+RAW files are decoded by the `rawler` crate (pinned 0.8) and demosaiced by the in-repo AHD in `colorbalance-core`. The adapter accepts a 2x2 RGB Bayer CFA or three-component LinearRaw at full frame; other layouts, crops and float samples fail closed. The only camera files checked so far are synthetic DNGs written by `dng_writer.rs` and, in October 2026, a Samsung Galaxy S25 LinearRaw DNG before the switch to rawler; no real camera RAW fixtures are in the repo. `research/samsung_reference_decode.py` can independently decode a local SOF3 strip with `imagecodecs`, `numpy`, and `tifffile`; it is an independent reference, not a production dependency. AHD is tested with analytic cases in `ahd.rs`, not Python fixtures. Profiles recorded with the old `colorbalance-dng` decoder no longer match and must be re-derived.
 
 ## Workspace layout
 
 | Crate | Role | wasm32 |
 | --- | --- | --- |
-| `colorbalance-core` | Decode contract, chart datasets, sampling, chart detection, color math, profiles, batch scheduler, TIFF encoding, CLF and `.cube` export. No LibRaw, Tauri, CLI, or UI dependencies. `unsafe` forbidden. | yes |
-| `colorbalance-raw` | Built-in DNG decoder, JPEG/PNG loading, decoder identity, contract-to-LibRaw-parameter mapping. `unsafe` only inside a future FFI module. | no |
+| `colorbalance-core` | Decode contract, chart datasets, sampling, chart detection, color math, profiles, batch scheduler, TIFF encoding, CLF and `.cube` export. No rawler, Tauri, CLI, or UI dependencies. `unsafe` forbidden. | yes |
+| `colorbalance-raw` | rawler adapter (`rawler_decode.rs`), JPEG/PNG loading, decoder identity, test-only DNG writer. `unsafe` denied. | no |
 | `colorbalance-cli` | `clap` command-line interface over the core operations. `unsafe` forbidden. | no |
 | `colorbalance-fixtures` | Shared test fixtures. | no |
 
@@ -97,9 +97,9 @@ Commands such as `load_reference` and `detect_chart` can be called the same way 
 
 `cargo test -p colorbalance-core detection` runs the synthetic cases: offset chart, rotated and perspective chart, chart merged with a dark scene, blank image, and two charts (must return `Ambiguous`). On 2026-10-07 the detector also found the chart in the repo sample `20261003_183314.jpg`; patch colors sampled at the returned corners followed ColorChecker order (dark skin first, white to black along the bottom row). Timings are in `docs/ARCHITECTURE.md`. The CLI does not call the detector.
 
-## LibRaw notes
+## Decoder notes
 
-`colorbalance-raw` pins the decoder identity (`libraw`) and version (`PINNED_LIBRAW_VERSION`). The FFI bindings, vendored LibRaw build, and deterministic decode implementation are milestone 1 issue 3. When that issue lands, this document must describe how LibRaw is vendored and built per platform, and the build or tests must fail when the linked version differs from the pin.
+`colorbalance-raw` pins the decoder identity `rawler-ahd` and the rawler version in `rawler_decode.rs` (`DECODER_NAME`, `DECODER_VERSION`). Raise `DECODER_VERSION` together with the `rawler` entry in `crates/colorbalance-raw/Cargo.toml`; profiles record both. A version-only difference between profile and run is a warning; a name or settings difference blocks apply unless `--force` is given. rawler is LGPL-2.1 (D18). rawler can panic on unknown file layouts; the adapter catches the panic and reports an unsupported format.
 
 ## CI
 

@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use colorbalance_fixtures::{render_chart_dng, ChartScene, SceneDefect};
-use colorbalance_raw::decode_dng;
+use colorbalance_raw::decode_raw;
 
 fn temp_path(name: &str) -> PathBuf {
     let nonce = SystemTime::now()
@@ -63,7 +63,7 @@ fn clean_white_patch_is_in_band_without_clipping() {
     let path = temp_path("clean");
     let scene = ChartScene::default();
     render_chart_dng(&path, &scene).unwrap();
-    let image = decode_dng(&path).unwrap();
+    let image = decode_raw(&path).unwrap();
     fs::remove_file(path).unwrap();
     let samples = patch_samples(&image, &scene, 18);
     let mut means = [0.0_f64; 3];
@@ -91,7 +91,7 @@ fn glare_patch_exceeds_cv_gate_without_clipping() {
         ..ChartScene::default()
     };
     render_chart_dng(&path, &scene).unwrap();
-    let image = decode_dng(&path).unwrap();
+    let image = decode_raw(&path).unwrap();
     fs::remove_file(path).unwrap();
     let samples = patch_samples(&image, &scene, 11);
     let cv = coefficient_of_variation(&samples);

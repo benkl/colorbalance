@@ -33,7 +33,7 @@ The milestone text below is the original plan and its acceptance criteria. This 
 
 | Milestone | Issues | State |
 | --- | --- | --- |
-| 1. Measured calibration core | 1 to 7 | Closed. Decoding is the built-in pure-Rust DNG decoder, not LibRaw (D10, D12). Chart detection is pure Rust (D16) |
+| 1. Measured calibration core | 1 to 7 | Closed. Decoding uses the `rawler` crate plus an in-repo AHD demosaic, not LibRaw (D18, which supersedes D10). Chart detection is pure Rust (D16) |
 | 2. Safe batch workflow | 8 to 12 | Closed |
 | 3. Interchange and independent validation | 13 to 16 | Closed. See `docs/model-selection-and-tolerances.md` |
 | 4. Desktop release | 17 to 20 | Closed. Tauri 2 app builds and runs; release gate report in `docs/release-gate-1.0.md`. No installer has been published |
@@ -41,7 +41,7 @@ The milestone text below is the original plan and its acceptance criteria. This 
 
 Differences from the plan text that readers keep tripping over:
 
-- LibRaw is not linked. Only DNG files (uncompressed 16-bit CFA, 12-bit LinearRaw in SOF3 lossless JPEG) decode as RAW. `colorbalance-raw` holds the contract-to-LibRaw parameter mapping for the future FFI layer.
+- LibRaw is not used. `rawler` decodes RAW files (D18); the AHD demosaic is in `colorbalance-core`. Only synthetic DNGs are verified so far (uncompressed 16-bit CFA, 12-bit LinearRaw in SOF3 lossless JPEG). Other camera formats are rawler's claim, not tested here.
 - JPEG and PNG references work through `--quick-and-dirty` (CLI) or automatic detection of a rendered file (desktop). The profile and report flag the result as approximate.
 - The CLI does not run the chart detector. Without `--quad` it samples an 8% inset rectangle. The desktop app runs the detector automatically through 12 MP and on request above that.
 - `colorbalance derive --chart` takes `classic-before-nov-2014` or `classic-from-nov-2014`. The CLI defaults to `classic-from-nov-2014`; the desktop app requires an explicit choice before deriving.
@@ -59,7 +59,7 @@ Target 64-bit Windows, macOS, and Linux. Windows is the first packaged target. B
 | Concern | Library or tool | Reason |
 | --- | --- | --- |
 | Color engine and fitting | Rust with `nalgebra` | One core for native, WebAssembly, and server; least-squares fitting without a hand-rolled solver |
-| RAW decode | LibRaw through a Rust FFI layer | Broad camera support, documented black and saturation levels, controllable white balance and demosaic |
+| RAW decode | `rawler` crate, then AHD demosaic in `colorbalance-core` | Maintained multi-format decoder instead of a hand-written one; no C library or FFI. LGPL-2.1 (see D18) |
 | Chart detection | Pure Rust in `colorbalance-core`, using a bounded thumbnail | Avoids OpenCV and bounds the search after thumbnail sampling; uncertain results require manual corners |
 | Parallelism | `rayon` | Native per-image and per-tile CPU parallelism |
 | TIFF output and metadata | `tiff` crate or libtiff binding, Exiv2 or `kamadak-exif` | 16-bit output, embedded ICC, reviewed EXIF copying |
@@ -80,7 +80,7 @@ Do not ship the first release as a browser-only application. Browser RAW decodin
 
 ### 1. Decode deterministically
 
-Decode the chart and every batch image with the same settings. Require LibRaw raw colorimetry with `output_color` set to raw, `gamm` linear, unity `user_mul`, `use_camera_wb` and `use_auto_wb` disabled, `no_auto_bright` set, a fixed demosaic method, a fixed highlight policy, fixed scaling behavior, and `output_bps` of 16. Subtract recorded per-channel black levels, normalize against recorded per-channel saturation levels, and preserve the as-shot orientation. Record the LibRaw version, camera make and model, every decoder setting, white and black levels, and channel layout in the profile.
+Decode the chart and every batch image with the same settings. The contract fixes raw colorimetry (`output_color` raw), linear gamma, unity `user_mul`, no camera or auto white balance, no auto brightening, the AHD demosaic, clipped highlights, no auto scaling, 16-bit depth, and as-shot orientation. Subtract recorded per-channel black levels, normalize against recorded per-channel saturation levels, and preserve the as-shot orientation. Record the decoder name (`rawler-ahd`), the rawler version, camera make and model, every decoder setting, white and black levels, and channel layout in the profile. Apply stops when the decoder name or the settings differ from the profile; `--force` overrides and the override is recorded. A version-only difference is a warning.
 
 The decoder must also return per-channel photosite saturation masks before demosaicing. The implementation must prove how each supported camera maps RAW channels and masks into the three-channel working array. Unsupported four-color or unusual sensor layouts must fail explicitly in the first release.
 
@@ -152,7 +152,7 @@ CLF does not reproduce RAW decoding. This export accepts only normalized linear 
 ```text
 crates/
   colorbalance-core/      # color math, chart sampling and detection, fitting, profiles, quality gates
-  colorbalance-raw/       # built-in DNG decoder, JPEG/PNG loading; LibRaw FFI planned (native only)
+  colorbalance-raw/       # rawler adapter, JPEG/PNG loading, test-only DNG writer (native only)
   colorbalance-cli/       # clap CLI (native only)
   colorbalance-fixtures/  # shared test fixtures
 apps/
@@ -163,7 +163,7 @@ tests/                    # cross-crate integration tests and fixtures
 docs/                     # implementation plan, architecture, decision log
 ```
 
-`colorbalance-core` exposes operations such as `inspect_reference`, `derive_profile`, `apply_profile`, `export_clf`, and `export_cube`, and accepts a decoder implementation as a trait. It must compile for native and `wasm32` targets and must not depend on LibRaw, Tauri, or the CLI. The native CLI and desktop app inject the LibRaw decoder. Tests inject synthetic and fixture decoders. No color calculation lives in TypeScript.
+`colorbalance-core` exposes operations such as `inspect_reference`, `derive_profile`, `apply_profile`, `export_clf`, and `export_cube`, and accepts a decoder implementation as a trait. It must compile for native and `wasm32` targets and must not depend on rawler, Tauri, or the CLI. The native CLI and desktop app inject the rawler decoder. Tests inject synthetic and fixture decoders. No color calculation lives in TypeScript.
 
 ## Command-line contract
 
@@ -185,7 +185,7 @@ Exit criterion: a repeatable command derives a validated profile from a supporte
 
 1. **Bootstrap the Rust workspace and CI**
    - Add the Cargo workspace with `colorbalance-core`, `colorbalance-raw`, and `colorbalance-cli`, a `clap` CLI entry point, rustfmt, clippy, and Windows/macOS/Linux CI.
-   - Document the LibRaw build and supported Rust toolchain versions.
+   - Document the supported Rust toolchain version.
    - Acceptance: clean checkout builds; CLI help runs; `colorbalance-core` compiles for native and `wasm32`; CI executes one behavioral smoke command on all three operating systems.
 
 2. **Define licensed reference fixtures and numerical baselines**
@@ -194,7 +194,7 @@ Exit criterion: a repeatable command derives a validated profile from a supporte
    - Acceptance: tests obtain fixtures reproducibly; an unspecified or unsupported chart revision fails; fixed target RGB and Lab values match an independent calculation rather than values generated by the implementation under test.
 
 3. **Implement deterministic RAW decoding**
-   - Wrap LibRaw with raw colorimetry, linear gamma, unity white balance multipliers, disabled auto brightening, fixed demosaic, highlight, scaling, and 16-bit settings behind a decoder trait.
+   - Decode through the `rawler` crate and the in-repo AHD demosaic with raw colorimetry, linear gamma, unity white balance multipliers, disabled auto brightening, fixed demosaic, highlight, scaling, and 16-bit settings behind a decoder trait. Decision D18 replaced the original LibRaw wrapper.
    - Return normalized linear camera RGB, camera identity, orientation, black and saturation levels, channel layout, complete decode parameters, and pre-demosaic per-channel saturation masks.
    - Acceptance: fixed RAW samples yield expected numeric channel values and masks; repeated decode is identical; sparse source clipping remains flagged after mask mapping; unsupported sensor layouts return a specific error.
 
@@ -290,8 +290,8 @@ Exit criterion: the browser and hosted execution modes are measured against the 
     - Build `colorbalance-core` for `wasm32` with wasm-bindgen, run it in a Web Worker, and compare fitting, Delta E, profile application, and export results against native output on the fixture corpus.
     - Acceptance: native and WebAssembly results agree within the stated tolerance for every fixture; SIMD and scalar variants both pass; the core path requires no WebAssembly threads.
 
-22. **Run a LibRaw WebAssembly feasibility spike**
-    - Compile LibRaw to WebAssembly, decode the RAW fixtures in a worker, and compare pixels and saturation masks against native decoding while measuring bundle size, memory use, and decode time.
+22. **Run a browser RAW decode feasibility spike**
+    - Build `rawler` (or the chosen decode path) for WebAssembly, decode the RAW fixtures in a worker, and compare pixels and saturation masks against native decoding while measuring bundle size, memory use, and decode time. The original plan named LibRaw; D18 moved decoding to rawler, which has not been built for `wasm32` here.
     - Acceptance: a written go or no-go record for browser RAW processing with numbers for every fixture camera; the decision is added to the architecture decision log.
 
 23. **Implement browser file handling and job state**
@@ -331,6 +331,6 @@ Each deferred item needs measurements or a user workflow that justifies its cost
 - Colour correction API and supported fitting methods: https://colour.readthedocs.io/en/develop/generated/colour.colour_correction.html
 - rawpy post-processing controls, used while the Python research stack verified decode settings: https://letmaik.github.io/rawpy/api/rawpy.Params.html
 - Adobe DNG 1.7.1 specification: https://helpx.adobe.com/content/dam/help/en/camera-raw/digital-negative/jcr_content/root/content/flex/items/position/position-par/download_section_733958301/download-1/DNG_Spec_1_7_1_0.pdf
-- LibRaw documentation and supported cameras: https://www.libraw.org/docs
+- LibRaw documentation and supported cameras (the original decoder choice, replaced by rawler in D18): https://www.libraw.org/docs
 - Tauri 2 architecture: https://v2.tauri.app/
 - WebAssembly and browser capability references: https://developer.mozilla.org/en-US/docs/WebAssembly and https://developer.mozilla.org/en-US/docs/Web/API/FileSystemFileHandle

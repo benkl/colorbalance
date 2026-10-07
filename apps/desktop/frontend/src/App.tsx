@@ -953,6 +953,25 @@ export const App: React.FC = () => {
                     </div>
                   )}
 
+                  {batchSummary.warnings.length > 0 && (
+                    <div
+                      className="p-2.5 bg-[var(--bb-panel)] border border-[var(--bb-orange)] space-y-1"
+                      data-testid="batch-warnings"
+                    >
+                      <div className="text-[10px] font-bold text-[var(--bb-orange)] tracking-wider">
+                        WARNINGS ({batchSummary.warnings.length})
+                      </div>
+                      <ul className="space-y-1 text-[9px] text-[var(--bb-sand)] max-h-40 overflow-y-auto">
+                        {batchSummary.warnings.map((item, i) => (
+                          <li key={`${item.file}-${i}`}>
+                            <span className="text-[var(--bb-gold)] break-all">{item.file}</span>
+                            <div className="text-[var(--bb-orange)]">⚠ {item.warning}</div>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
                   {/* Export Options */}
                   <div className="p-2.5 bg-[var(--bb-vacuum)] border border-[var(--bb-border)] space-y-1.5">
                     <span className="text-[9px] font-bold text-[var(--bb-smoke)] tracking-wider">EXPORT INTERCHANGE</span>

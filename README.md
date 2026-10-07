@@ -17,8 +17,7 @@ Milestones 1 to 4 are done and their GitHub issues are closed. Milestone 5 (brow
 | CLF and `.cube` export | Done |
 | Desktop app (Tauri 2, React) with light table, editable corners, before and after | Done |
 | Automatic chart finding in the desktop app | Done, pure Rust, no OpenCV |
-| Built-in DNG decoder: uncompressed 16-bit CFA, 12-bit LinearRaw (SOF3 lossless JPEG) | Done |
-| LibRaw FFI for other camera RAW formats (CR3, NEF, ARW and so on) | Not started. The crate only pins the decode contract mapping |
+| RAW decode through the `rawler` crate, then this project's AHD demosaic | Done, verified on synthetic DNGs only (uncompressed CFA, 12-bit LinearRaw). Other camera formats are rawler's, untested here |
 | `colorbalance-core` compiles for `wasm32-unknown-unknown` | Builds, checked in CI. No wasm-bindgen glue, worker, or parity tests yet (issue 21) |
 | Browser app, hosted mode, benchmark harness | Not started (issues 22 to 25) |
 | Chart auto-detection in the CLI | Not wired. The CLI uses a manual `--quad` or an 8% inset rectangle |
@@ -38,7 +37,7 @@ Apply never estimates brightness or white balance from the scene. It uses the st
 
 ## Quick start
 
-Needs Rust 1.85 or newer. The desktop app also needs Node.js 20 or newer and, on Windows, the WebView2 runtime.
+Needs Rust 1.89 or newer (the `rawler` dependency requires it). The desktop app also needs Node.js 20 or newer and, on Windows, the WebView2 runtime.
 
 ### CLI
 
@@ -72,7 +71,7 @@ Drop a reference image on the window or click the light table to pick one. Packa
 | Document | Contents |
 | --- | --- |
 | [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md) | Product contract: color pipeline, quality gates, interchange rules, milestones, per-issue acceptance criteria |
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Platform and performance decisions, detection cost and limits, decision log D1 to D16 |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Platform and performance decisions, detection cost and limits, decision log D1 to D18 |
 | [docs/USAGE.md](docs/USAGE.md) | Capture guide, chart revision, finding the chart, input contract for exports, CLI examples |
 | [docs/development.md](docs/development.md) | Toolchain, build and test commands, smoke tests, desktop and frontend workflow |
 | [docs/CONTRACTS.md](docs/CONTRACTS.md) | Module interface contracts used during the first implementation |
@@ -87,7 +86,7 @@ Drop a reference image on the window or click the light table to pick one. Packa
 crates/
   colorbalance-core/      color math, chart sampling and detection, fitting, profiles,
                           batch scheduling, CLF/cube export. Native and wasm32. No unsafe.
-  colorbalance-raw/       DNG decoding, rendered-image loading, decode-contract mapping
+  colorbalance-raw/       rawler decode adapter, rendered-image loading, test-only DNG writer
   colorbalance-cli/       clap CLI: decode-contract, inspect, derive, apply, export
   colorbalance-fixtures/  shared test fixtures
 apps/desktop/
@@ -109,9 +108,9 @@ Work is tracked as GitHub issues grouped by milestone. An issue counts as done w
 | [2. Safe batch workflow](https://github.com/benkl/colorbalance/milestone/2) | Closed |
 | [3. Interchange and independent validation](https://github.com/benkl/colorbalance/milestone/3) | Closed |
 | [4. Desktop release](https://github.com/benkl/colorbalance/milestone/4) | Closed |
-| [5. Web-capable platform](https://github.com/benkl/colorbalance/milestone/5) | Open: WebAssembly parity (#21), LibRaw WASM spike (#22), browser file handling (#23), hosted prototype (#24), benchmark harness (#25). The delivery decision (#26) is closed |
+| [5. Web-capable platform](https://github.com/benkl/colorbalance/milestone/5) | Open: WebAssembly parity (#21), browser decode spike (#22, now about rawler, see D18), browser file handling (#23), hosted prototype (#24), benchmark harness (#25). The delivery decision (#26) is closed |
 
-Known gaps outside milestone 5: LibRaw FFI for non-DNG cameras, CLI chart detection, DNG Camera Profile export (deferred on purpose, see `docs/USAGE.md`).
+Known gaps outside milestone 5: CLI chart detection, DNG Camera Profile export (deferred on purpose, see `docs/USAGE.md`), real camera RAW fixtures.
 
 ## For AI agents
 
@@ -128,4 +127,4 @@ Short version of the rules:
 
 ## License
 
-Not chosen yet. Decide before the first public release.
+Not chosen yet. Decide before the first public release. Note that `rawler` is LGPL-2.1, which constrains how the binaries can be distributed (see decision D18 in `docs/ARCHITECTURE.md`).

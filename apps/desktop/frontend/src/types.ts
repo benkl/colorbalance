@@ -86,9 +86,16 @@ export interface CorrectResult {
   warnings: string[];
 }
 
+/** Non-fatal per-file notice from a batch run (e.g. decoder version drift against the profile). */
+export interface BatchWarning {
+  file: string;
+  warning: string;
+}
+
 export interface BatchSummary {
   succeeded: string[];
   skipped: string[];
   failed: Array<{ file: string; error: string }>;
+  warnings: BatchWarning[];
   total: number;
 }

@@ -39,6 +39,11 @@ pub struct GateConfig {
     pub min_patch_pixels: usize,
     /// Maximum permitted per-channel coefficient of variation.
     pub max_cv: f64,
+    /// Floor for the mean in the coefficient of variation, in normalized camera RGB.
+    ///
+    /// Out-of-gamut or near-black channels sit at about zero, where sd/mean is
+    /// dominated by quantization noise, so the denominator is `max(mean, floor)`.
+    pub cv_mean_floor: f64,
     /// Whether to check the final row for neutral ordering and chroma.
     pub require_neutral_row: bool,
 }
@@ -48,6 +53,7 @@ impl Default for GateConfig {
         Self {
             min_patch_pixels: 64,
             max_cv: 0.05,
+            cv_mean_floor: 0.01,
             require_neutral_row: true,
         }
     }
@@ -59,6 +65,7 @@ impl GateConfig {
         Self {
             min_patch_pixels: 16,
             max_cv: 0.25,
+            cv_mean_floor: 0.01,
             require_neutral_row: false,
         }
     }
@@ -326,7 +333,8 @@ pub fn evaluate_quality(samples: &[PatchSample], cfg: &GateConfig) -> Result<(),
             });
         }
         for channel in 0..3 {
-            let cv = sample.variance[channel].sqrt() / sample.mean_rgb[channel].max(1e-6);
+            let cv =
+                sample.variance[channel].sqrt() / sample.mean_rgb[channel].max(cfg.cv_mean_floor);
             if cv > cfg.max_cv {
                 failures.push(GateFailure {
                     patch: Some(sample.patch),
@@ -379,7 +387,7 @@ pub fn evaluate_quality(samples: &[PatchSample], cfg: &GateConfig) -> Result<(),
 fn median(mut values: Vec<f64>) -> f64 {
     values.sort_by(f64::total_cmp);
     let middle = values.len() / 2;
-    if values.len() % 2 == 0 {
+    if values.len().is_multiple_of(2) {
         (values[middle - 1] + values[middle]) / 2.0
     } else {
         values[middle]

@@ -8,16 +8,16 @@ ColorBalance derives a measured color transform from one ColorChecker Classic re
 
 ## Current state
 
-Milestones 1 to 4 are implemented and their issues are closed. Milestone 5 (issues 21 to 25: WebAssembly parity, LibRaw WASM spike, browser file handling, hosted prototype, benchmark harness) is open and has no implementation beyond a CI check that `colorbalance-core` builds for `wasm32-unknown-unknown`.
+Milestones 1 to 4 are implemented and their issues are closed. Milestone 5 (issues 21 to 25: WebAssembly parity, browser decode spike, browser file handling, hosted prototype, benchmark harness) is open and has no implementation beyond a CI check that `colorbalance-core` builds for `wasm32-unknown-unknown`.
 
 What exists:
 
 - `colorbalance-core`: decode contract, chart datasets, patch sampling, quality gates, matrix fit, profiles, 16-bit TIFF encoding, bounded batch scheduler, CLF and `.cube` export, and `detection.rs`, the chart locator.
-- `colorbalance-raw`: built-in pure-Rust DNG decoder (uncompressed 16-bit CFA and 3-component 12-bit LinearRaw in SOF3 lossless JPEG), JPEG/PNG loading for the quick-and-dirty approximation, and the decode-contract-to-LibRaw parameter mapping. There is no LibRaw FFI yet. Other camera RAW formats are unsupported.
+- `colorbalance-raw`: RAW decoding through the `rawler` crate (`rawler_decode.rs`), JPEG/PNG loading for the quick-and-dirty approximation, and `dng_writer.rs`, a DNG writer used only by test fixtures. rawler returns undemosaiced photosites. The AHD demosaic is in `colorbalance-core/src/ahd.rs`. Decoder identity is `rawler-ahd` plus the pinned rawler version. Verified only on synthetic DNGs; there are no real camera RAW fixtures yet.
 - `colorbalance-cli`: `decode-contract`, `inspect`, `derive`, `apply`, `export`. The CLI does not call the detector. Without `--quad` it samples an 8% inset rectangle.
 - `apps/desktop`: Tauri 2 shell (`src-tauri`) and React UI (`frontend`). Commands: `load_reference`, `detect_chart`, `inspect_reference`, `derive_profile`, `correct_image`, `apply_batch`, `cancel_batch`, `export_profile`, and three native pickers. One decoded reference is cached by path, length, and mtime.
 
-Not done: LibRaw FFI, CLI auto-detection, DCP export, signed installers, any browser or hosted mode. Do not describe these as working.
+Not done: CLI auto-detection, DCP export, signed installers, any browser or hosted mode, real camera RAW fixtures. Do not describe these as working.
 
 ## Required reading before working
 
@@ -44,8 +44,8 @@ These exist because violating them silently produces wrong color or destroys use
 ## Repository map
 
 ```text
-crates/colorbalance-core/    native + wasm32. No LibRaw, Tauri, CLI, or UI dependencies. unsafe forbidden.
-crates/colorbalance-raw/     decoders and image loading (native only)
+crates/colorbalance-core/    native + wasm32. No rawler, Tauri, CLI, or UI dependencies. unsafe forbidden.
+crates/colorbalance-raw/     rawler adapter and image loading (native only). unsafe denied.
 crates/colorbalance-cli/     clap CLI
 crates/colorbalance-fixtures/ shared test fixtures
 apps/desktop/src-tauri/      Tauri 2 shell. Excluded from the workspace: build it from its own directory.
@@ -73,13 +73,13 @@ Desktop UI flow lives in `frontend/src/App.tsx`, the corner overlay in `componen
 - One GitHub issue per unit of work, grouped by milestone 1 through 5.
 - An issue is complete only when its acceptance criteria are observable. Tests alone are not proof; run the changed path and report what you saw.
 - Dependencies between issues are stated in the issue body. Do not start an issue whose dependency is open unless the issue says otherwise.
-- Quality gates and thresholds from milestone 3 issue 13 have fixed numbers in `docs/model-selection-and-tolerances.md`. Do not change them without a decision record.
+- Quality gates and thresholds from milestone 3 issue 13 have fixed numbers in `docs/model-selection-and-tolerances.md`. Do not change them without a decision record (D18 records the CV mean floor).
 - When behavior changes, update the affected docs and issues in the same commit.
 
 ## Conventions
 
-- Rust: `cargo fmt`, `cargo clippy`, and `cargo test` must pass. No `unsafe` outside a future LibRaw FFI layer.
-- `colorbalance-core` compiles for native and `wasm32` and must not depend on LibRaw, Tauri, CLI, or UI crates.
+- Rust 1.89 or newer (rawler requires it). `cargo fmt`, `cargo clippy`, and `cargo test` must pass. No `unsafe` in the workspace crates; `colorbalance-core` forbids it and `colorbalance-raw` denies it.
+- `colorbalance-core` compiles for native and `wasm32` and must not depend on rawler, Tauri, CLI, or UI crates.
 - TypeScript: strict mode, no color math, no full-resolution pixel buffers across the UI boundary.
 - Desktop commands never run image work on the main thread (D13).
 - Python lives only under `research/` and exists to generate independent numerical fixtures and verify formulas.
@@ -118,7 +118,7 @@ Windows notes: stop a running desktop exe before `cargo build` or `cargo test` i
 
 - Profile: a `*.cbprofile.json` file storing transform stages, decode contract, chart dataset, camera identity, and validation results.
 - Decode contract: the exact decoder settings and camera identity a profile is valid for.
-- Saturation mask: per-channel flags marking photosites at or above the RAW clipping threshold, taken before demosaicing.
+- Saturation mask: per-channel flags marking photosites at or above the RAW clipping threshold, taken before demosaicing. After AHD each flag covers the 11x11 neighbourhood around a clipped photosite (support radius 5).
 - CLF: Academy Common LUT Format, the interchange export for the transform stages.
 - DCP: DNG Camera Profile, the deferred format for RAW-editor interoperability.
 - Decode contract digest: hash identifying the decoder and settings recorded in a profile.

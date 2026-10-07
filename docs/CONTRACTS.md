@@ -5,7 +5,7 @@ Binding interface specification for parallel implementation. Every agent impleme
 Shared rules:
 
 - No new dependencies without listing them in the report. Approved shared deps: `serde`, `serde_json`, `thiserror`, `sha2`, `clap`.
-- `unsafe` is forbidden in `colorbalance-core` and `colorbalance-cli`, denied outside the future LibRaw FFI module.
+- `unsafe` is forbidden in `colorbalance-core` and `colorbalance-cli`, denied in `colorbalance-raw` (no `unsafe` code is present there).
 - Every public function gets doc comments. Tests load expected values from committed JSON; the code under test never generates its own expected values.
 - Keep files formatted with `cargo fmt` and clippy-clean with `-D warnings`.
 
@@ -74,27 +74,29 @@ pub enum DecodeError {
 }
 ```
 
-Normalization rule (decoders must follow exactly): `v_norm = max(0, (raw - black_c) / (white_c - black_c))` computed in f64 from each RAW-domain sample, then stored as f32. Values above white are NOT clamped; the source sample is flagged in `clipped`. For CFA, `c` is the CFA position; the demosaiced pixel channel is flagged when ANY contributing photosite in its support window had `raw >= white_c`. For LinearRaw, `c` is the RGB component and each pixel's channel flag comes from that component before orientation or preview rendering. `sensor_layout` distinguishes CFA, LinearRaw, and rendered inputs; the CFA pattern is not meaningful for LinearRaw.
+Normalization rule (decoders must follow exactly): `v_norm = max(0, (raw - black_c) / (white_c - black_c))` computed in f64 from each RAW-domain sample, then stored as f32. Values above white are NOT clamped; the source sample is flagged in `clipped`. For CFA, `c` is the CFA position; a photosite is saturated when `raw >= white_c`. The AHD demosaic flags a pixel's channel when a saturated photosite of that channel lies within a (2r+1)x(2r+1) window around it, with support radius r = 5. For LinearRaw, `c` is the RGB component and each pixel's channel flag comes from that component before orientation or preview rendering. `sensor_layout` distinguishes CFA, LinearRaw, and rendered inputs; the CFA pattern is not meaningful for LinearRaw.
 
-## Module `colorbalance-raw::dng` (file `crates/colorbalance-raw/src/dng.rs`)
-
-Owner: agent DngCodec. Depends on colorbalance-core.
+## Module `colorbalance-raw::rawler_decode` (file `crates/colorbalance-raw/src/rawler_decode.rs`)
 
 ```rust
-pub const DECODER_NAME: &str = "colorbalance-dng";
-pub const DECODER_VERSION: &str = env!("CARGO_PKG_VERSION");
-pub struct DngDecoder;
-impl colorbalance_core::decode::RawDecoder for DngDecoder { ... }
-pub fn decode_dng(path: &std::path::Path)
-    -> Result<colorbalance_core::decode::DecodedImage, DngError>;
-#[derive(Debug, thiserror::Error)] pub enum DngError { /* map underlying causes, From<DecodeError> */ }
+pub const DECODER_NAME: &str = "rawler-ahd";
+pub const DECODER_VERSION: &str = "0.8.0"; // must match the pinned rawler dependency
+pub struct RawlerDecoder;
+impl colorbalance_core::decode::RawDecoder for RawlerDecoder { ... }
+pub fn decode_raw(path: &std::path::Path)
+    -> Result<colorbalance_core::decode::DecodedImage, colorbalance_core::decode::DecodeError>;
 ```
 
-Reader requirements:
+Adapter requirements:
 
-- The existing CFA path reads classic little- or big-endian TIFF DNGs with 16-bit uncompressed single-sample CFA, a 2×2 CFA pattern, and scalar or 2×2 black and white levels. It computes a deterministic 3×3 lattice-mean demosaic and maps pre-demosaic source clipping to output channels. Multi-strip uncompressed CFA is supported.
-- The LinearRaw path reads three-component, 12-bit, chunky DNGs with compression 7 (SOF3 lossless JPEG) in one full-height strip. It decodes Huffman-coded differences with byte stuffing and row-aligned restart intervals; mid-row restart intervals are rejected. Components must be RGB in order. Channel-wise black and white levels normalize the decoded samples directly—there is no CFA demosaic or scene-inferred white balance. Saturation is flagged for each component before orientation. This path does not treat the embedded JPEG preview as calibration input.
-- Full-frame DefaultCropOrigin (50719), DefaultCropSize (50720), and ActiveArea (50829) are accepted. Non-full-frame crops, tiles, linearization tables, unsupported opcode effects, and alternate sensor layouts fail closed rather than silently changing the image. Tag 50721 is ColorMatrix1, not a crop tag. Orientations 1, 3, 6, and 8 produce upright pixels.
+- rawler (`get_decoder`, `raw_image` with default parameters) reads the file. Panics inside rawler, such as `todo!()` on an unknown PhotometricInterpretation, are caught and reported as an unsupported format.
+- Only a 2x2 RGB Bayer CFA (one sample per pixel) or three-component LinearRaw is accepted. Float samples, other CFA layouts, and unsupported black-level grids fail closed.
+- Only full-frame images are accepted. A crop area or active area smaller than the image fails closed with the rectangles in the message.
+- Black and white levels come from rawler's reading of the file. `white <= black` is rejected.
+- CFA data is normalized with the rule above, then demosaiced by `colorbalance_core::ahd::demosaic_ahd`. LinearRaw samples are normalized per component with no demosaic and no scene-inferred white balance.
+- All eight rawler orientations are applied to pixels and flags.
+- `display_neutral` is `1 / wb_coeffs[..3]` when all three are finite and positive, otherwise absent.
+- The decoder does not apply opcodes, gain maps, or linearization beyond what rawler does. For DNG, rawler 0.8.0 reads black and white levels from the file (read from its source: the camera catalog supplies only clean names, hints and params); if the WhiteLevel tag is absent it falls back to the bit depth. For non-DNG formats the levels come from rawler's camera catalog, which is not checked against real camera files here.
 
 Writer (fixture support, same file or `dng_writer.rs` in this crate, exported for the fixtures crate):
 
@@ -138,7 +140,7 @@ Rendering model (deterministic):
 - `Glare`: patch `i` gets a radial gradient added to all channels peaking at +40% center, no clipping (must trip the within-patch variation gate, not the clipping gate).
 - Outside the quad: flat 18% gray with the same camera transform applied to XYZ of sRGB 0.18 gray (use linear 0.18 → XYZ via color module), so the surround is neutral.
 - Choose `width=480, height=320`, quad = chart rectangle inset ~40 px with a slight perspective (TR 6 px up) so perspective mapping is exercised. Default exposure 1.0 uses the dataset's own scale; verify the white patch lands between 0.5 and 0.95 of white level for the Clean scene (test asserts this from decoded values).
-- Include a test: decode the Clean fixture through `DngDecoder`, sample patches with the calibration module's quad grid (integration test may live in the fixtures crate or tests/; coordinate via lead if calibration is not integrated yet — then assert only patch means approximately match the analytic camera rgb to 1e-3).
+- Include a test: decode the Clean fixture through `RawlerDecoder`, sample patches with the calibration module's quad grid (integration test may live in the fixtures crate or tests/; coordinate via lead if calibration is not integrated yet — then assert only patch means approximately match the analytic camera rgb to 1e-3).
 
 ## Module `colorbalance-core::dataset` (file `src/dataset.rs`)
 
@@ -171,6 +173,7 @@ pub struct PatchSample { pub patch: ChartPatch,
     pub clipped_mask: u8, pub sample_pixels: usize }
 pub struct GateConfig { pub min_patch_pixels: usize,      // default 64
     pub max_cv: f64,                                       // default 0.05
+    pub cv_mean_floor: f64,                                // default 0.01; denominator floor in normalized camera RGB
     pub require_neutral_row: bool }                        // default true
 pub struct GateFailure { pub patch: Option<ChartPatch>, pub reason: String,
     pub measured: String }
@@ -195,7 +198,7 @@ Definitions:
 
 - Grid mapping: bilinear interpolation of the quad. Cell `(col, row)` with `col∈[0,6)`, `row∈[0,4)`: corners at `u=(col)/6…(col+1)/6`, `v=row/4…`. Sampling region: central 60% of each cell (20% margin each side) to avoid patch borders and demosaic blending. `sample_pixels` is the pixel count of that region; require ≥ `min_patch_pixels` measured per patch.
 - `mean_rgb` is the mean of `f64::from(pixel)` over the region per channel; `variance` is population variance per channel; `clipped_mask` ORs the decode masks in the region.
-- Gates: any `clipped_mask != 0` (reason names the channel bits); `sqrt(variance)/max(mean, 1e-6) > max_cv` per channel (reason names patch, channel, measured cv); patch pixel count; neutral row monotonicity: the luminance `Y = 0.2126R+0.7152G+0.0722B` of the six neutral patches must be strictly increasing in reading order White→Black (reversed order means the quad is upside down: report "neutral row reversed; rotate corners"); `require_neutral_row` also checks the last row chroma `max(|a*|,|b*|)`… use simple chroma proxy `max-min channel / mean` of last-row patches < 0.12 while rows 0-2 contain patches exceeding it (else "last row is not the neutral row; check corner order").
+- Gates: any `clipped_mask != 0` (reason names the channel bits); `sqrt(variance)/max(mean, cv_mean_floor) > max_cv` per channel (reason names patch, channel, measured cv); patch pixel count; neutral row monotonicity: the luminance `Y = 0.2126R+0.7152G+0.0722B` of the six neutral patches must be strictly increasing in reading order White→Black (reversed order means the quad is upside down: report "neutral row reversed; rotate corners"); `require_neutral_row` also checks the last row chroma `max(|a*|,|b*|)`… use simple chroma proxy `max-min channel / mean` of last-row patches < 0.12 while rows 0-2 contain patches exceeding it (else "last row is not the neutral row; check corner order").
 - Fit steps: `y_k` = target luminance of neutral patch `k` (from `dataset` `linear_srgb_d65` Y). `e = median_k(meanY_k / y_k)`. `c_j = median_k(mean_kj / (e · y_k))`. Normalized source `n_ij = m_ij / (e · c_j)`. Least squares per output channel `j`: solve `A^T A x = A^T b_j` with `A` the 24×3 matrix of `n_i`, `b_j` the target `t_ij`; 3×3 solve via Gaussian elimination with partial pivoting (write it in this module; no external linear algebra dep). `matrix` is the row-vector convention `corrected = n · M`.
 - Validation: `corrected = n · M`; ΔE00 in Lab (D65) between corrected and target per patch; mean, median, p95 (linear interpolation between order statistics at 0.95·23), max; neutral subset max (patches White..Black); skin subset max (DarkSkin, LightSkin); condition number = `‖M‖_∞ · ‖M⁻¹‖_∞` (3×3 inverse analytically; if singular → CalibrationError::SingularMatrix).
 - Errors: `#[error("chart sampling failed: {0}")] Sampling(String)`, `SingularMatrix`, `InsufficientPatches`.
