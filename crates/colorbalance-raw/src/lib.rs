@@ -15,8 +15,8 @@ pub mod rendered;
 pub use dng::{decode_dng, DngDecoder, DngError, DECODER_NAME, DECODER_VERSION};
 pub use dng_writer::{write_dng, DngWriteSpec};
 pub use rendered::{
-    decode_rendered_image, decode_upright, render_preview_png, RenderedImageDecoder,
-    JPEG_DECODER_NAME, JPEG_DECODER_VERSION,
+    decode_rendered_image, decode_upright, render_preview_png, render_preview_rgb,
+    RenderedImageDecoder, JPEG_DECODER_NAME, JPEG_DECODER_VERSION,
 };
 
 use std::io::Read;

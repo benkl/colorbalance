@@ -48,39 +48,98 @@ pub fn decode_upright(path: &Path) -> Result<DynamicImage, DecodeError> {
 
 /// Render a display preview of a decoded image as PNG bytes.
 ///
-/// The image is sRGB-encoded and downscaled so its longest side is at most
-/// `max_dim` (never upscaled). PNG is used because every webview decodes it;
+/// The image is downscaled so its longest side is at most `max_dim` (never
+/// upscaled), then sRGB-encoded. PNG is used because every webview decodes it;
 /// the preview keeps the decoded image's aspect ratio and orientation, so
 /// chart coordinates stay in full-resolution pixel space.
+///
+/// Downscaling is a box average in linear light, done before the transfer
+/// function: every source pixel is read once and only the small output pays
+/// for the sRGB encode.
 pub fn render_preview_png(image: &DecodedImage, max_dim: u32) -> Result<Vec<u8>, DecodeError> {
+    render_preview_rgb(
+        &image.rgb,
+        image.width,
+        image.height,
+        image.display_neutral,
+        max_dim,
+    )
+}
+
+/// [`render_preview_png`] for a bare buffer of `width * height * 3` linear
+/// samples, so a corrected copy can be previewed without a second
+/// `DecodedImage`. `display_neutral` is the optional display-only gain.
+pub fn render_preview_rgb(
+    rgb: &[f32],
+    image_width: u32,
+    image_height: u32,
+    display_neutral: Option<[f32; 3]>,
+    max_dim: u32,
+) -> Result<Vec<u8>, DecodeError> {
+    let (width, height) = (image_width as usize, image_height as usize);
+    if width == 0 || height == 0 || rgb.len() != width * height * 3 {
+        return Err(DecodeError::CorruptFile(
+            "pixel buffer does not match dimensions".to_owned(),
+        ));
+    }
     // Camera RGB has no white balance under the decode contract, so a raw
     // preview is strongly tinted. Divide by the camera's recorded neutral for
     // display only; the buffer and every measurement stay untouched.
-    let gain = image
-        .display_neutral
+    let gain = display_neutral
         .filter(|n| n.iter().all(|v| v.is_finite() && *v > 0.0))
-        .map_or([1.0_f64; 3], |n| n.map(|v| 1.0 / f64::from(v)));
-    let mut bytes = Vec::with_capacity(image.rgb.len());
-    for pixel in image.rgb.chunks_exact(3) {
-        for (channel, &value) in pixel.iter().enumerate() {
-            let encoded = colorbalance_core::color::srgb_encode(
-                (f64::from(value) * gain[channel]).clamp(0.0, 1.0),
-            );
-            bytes.push((encoded * 255.0).round().clamp(0.0, 255.0) as u8);
+        .map_or([1.0_f32; 3], |n| n.map(|v| 1.0 / v));
+
+    let longest = image_width.max(image_height);
+    let (out_w, out_h) = if longest > max_dim {
+        let scale = f64::from(max_dim) / f64::from(longest);
+        (
+            ((f64::from(image_width) * scale).round() as usize).max(1),
+            ((f64::from(image_height) * scale).round() as usize).max(1),
+        )
+    } else {
+        (width, height)
+    };
+
+    // Source span [start, end) of every output column and row; never empty.
+    let spans = |source: usize, target: usize| -> Vec<(usize, usize)> {
+        (0..target)
+            .map(|i| {
+                let start = i * source / target;
+                let end = ((i + 1) * source / target).max(start + 1).min(source);
+                (start, end)
+            })
+            .collect()
+    };
+    let columns = spans(width, out_w);
+    let rows = spans(height, out_h);
+
+    let mut bytes = Vec::with_capacity(out_w * out_h * 3);
+    let mut sums = vec![0.0_f32; out_w * 3];
+    for &(row_start, row_end) in &rows {
+        sums.fill(0.0);
+        for y in row_start..row_end {
+            let line = &rgb[y * width * 3..(y + 1) * width * 3];
+            for (&(col_start, col_end), sum) in columns.iter().zip(sums.chunks_exact_mut(3)) {
+                for pixel in line[col_start * 3..col_end * 3].chunks_exact(3) {
+                    sum[0] += (pixel[0] * gain[0]).clamp(0.0, 1.0);
+                    sum[1] += (pixel[1] * gain[1]).clamp(0.0, 1.0);
+                    sum[2] += (pixel[2] * gain[2]).clamp(0.0, 1.0);
+                }
+            }
+        }
+        let rows_in_span = (row_end - row_start) as f32;
+        for (&(col_start, col_end), sum) in columns.iter().zip(sums.chunks_exact(3)) {
+            let count = rows_in_span * (col_end - col_start) as f32;
+            for &total in sum {
+                let encoded = colorbalance_core::color::srgb_encode(f64::from(total / count));
+                bytes.push((encoded * 255.0).round().clamp(0.0, 255.0) as u8);
+            }
         }
     }
-    let full = image::RgbImage::from_raw(image.width, image.height, bytes).ok_or_else(|| {
-        DecodeError::CorruptFile("pixel buffer does not match dimensions".to_owned())
-    })?;
-    let longest = image.width.max(image.height);
-    let preview = if longest > max_dim {
-        let scale = f64::from(max_dim) / f64::from(longest);
-        let width = ((f64::from(image.width) * scale).round() as u32).max(1);
-        let height = ((f64::from(image.height) * scale).round() as u32).max(1);
-        image::imageops::resize(&full, width, height, image::imageops::FilterType::Triangle)
-    } else {
-        full
-    };
+    let preview =
+        image::RgbImage::from_raw(out_w as u32, out_h as u32, bytes).ok_or_else(|| {
+            DecodeError::CorruptFile("pixel buffer does not match dimensions".to_owned())
+        })?;
     let mut out = Vec::new();
     image::DynamicImage::ImageRgb8(preview)
         .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
@@ -264,5 +323,44 @@ mod tests {
             r < g && b < r,
             "unbalanced RGB must stay tinted, got {r},{g},{b}"
         );
+    }
+
+    fn decoded_png(png: &[u8]) -> image::RgbImage {
+        image::load_from_memory(png).unwrap().to_rgb8()
+    }
+
+    #[test]
+    fn preview_is_downscaled_to_the_longest_side_and_never_upscaled() {
+        let rgb = vec![0.5_f32; 300 * 100 * 3];
+        let big = decoded_png(&render_preview_rgb(&rgb, 300, 100, None, 120).unwrap());
+        assert_eq!((big.width(), big.height()), (120, 40));
+
+        let small = decoded_png(&render_preview_rgb(&rgb, 300, 100, None, 1000).unwrap());
+        assert_eq!((small.width(), small.height()), (300, 100));
+    }
+
+    #[test]
+    fn preview_downscale_averages_in_linear_light() {
+        // A black/white checkerboard averages to 0.5 linear, which is sRGB 188;
+        // averaging the encoded values would give 128.
+        let (w, h) = (8usize, 8usize);
+        let mut rgb = Vec::new();
+        for y in 0..h {
+            for x in 0..w {
+                let v = if (x + y) % 2 == 0 { 1.0 } else { 0.0 };
+                rgb.extend_from_slice(&[v, v, v]);
+            }
+        }
+        let png = render_preview_rgb(&rgb, 8, 8, None, 2).unwrap();
+        let out = decoded_png(&png);
+        assert_eq!((out.width(), out.height()), (2, 2));
+        for pixel in out.pixels() {
+            assert_eq!(pixel.0, [188, 188, 188]);
+        }
+    }
+
+    #[test]
+    fn preview_rejects_a_buffer_that_does_not_match_its_dimensions() {
+        assert!(render_preview_rgb(&[0.0; 5], 2, 1, None, 16).is_err());
     }
 }

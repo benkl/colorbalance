@@ -272,3 +272,79 @@ fn decode_hook_runs_only_on_a_miss() {
     assert_eq!(started.get(), 1);
     let _ = std::fs::remove_dir_all(work);
 }
+
+#[test]
+fn correct_after_load_reuses_the_decode_and_leaves_the_cached_image_untouched() {
+    use colorbalance_desktop::commands::{correct_image_cached, derive_profile};
+
+    let work = temp_dir("correct");
+    let scene = scene(480, 320);
+    let path = work.join("ref.dng");
+    render_chart_dng(&path, &scene).unwrap();
+    let path_str = path.to_string_lossy().into_owned();
+    let profile = work.join("p.cbprofile.json");
+    derive_profile(
+        path_str.clone(),
+        "classic-before-nov-2014".to_owned(),
+        profile.to_string_lossy().into_owned(),
+        None,
+        Some(serde_json::from_value(serde_json::json!({ "corners": scene.quad })).unwrap()),
+        &no_progress,
+    )
+    .unwrap();
+
+    let cache = ReferenceCache::default();
+    load_reference_cached(&cache, path_str.clone(), &no_progress).unwrap();
+    let before = cache.get_or_decode(&path, || {}, decode).unwrap().image;
+    let pixels_before = before.rgb.clone();
+
+    let run = |output: Option<String>| {
+        stages(|r| {
+            correct_image_cached(
+                &cache,
+                profile.to_string_lossy().into_owned(),
+                path_str.clone(),
+                output,
+                false,
+                r,
+            )
+            .unwrap()
+        })
+    };
+    let (first, first_stages) = run(None);
+    assert_eq!(first_stages[0], "Using cached image");
+    assert_eq!(first_stages[1], "Using cached preview");
+    assert!(!first_stages.iter().any(|s| s == "Decoding image"));
+
+    let output = work.join("out.tiff");
+    let (saved, saved_stages) = run(Some(output.to_string_lossy().into_owned()));
+    assert_eq!(saved_stages[0], "Using cached image");
+    assert!(output.exists(), "save writes the TIFF");
+
+    // The same file gives the same result with or without the cache.
+    let (uncached, _) = stages(|r| {
+        correct_image_cached(
+            &ReferenceCache::disabled(),
+            profile.to_string_lossy().into_owned(),
+            path_str.clone(),
+            None,
+            false,
+            r,
+        )
+        .unwrap()
+    });
+    let json = |v: &_| serde_json::to_value(v).unwrap();
+    assert_eq!(
+        json(&first)["afterDataUrl"],
+        json(&uncached)["afterDataUrl"]
+    );
+    assert_eq!(json(&first)["beforeDataUrl"], json(&saved)["beforeDataUrl"]);
+
+    let after = cache.get_or_decode(&path, || {}, decode).unwrap();
+    assert!(after.hit && Arc::ptr_eq(&after.image, &before));
+    assert_eq!(
+        after.image.rgb, pixels_before,
+        "correction must not mutate the cache"
+    );
+    let _ = std::fs::remove_dir_all(work);
+}

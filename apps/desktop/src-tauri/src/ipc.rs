@@ -126,13 +126,16 @@ pub async fn derive_profile(
 #[tauri::command]
 pub async fn correct_image(
     window: Window,
+    state: State<'_, AppState>,
     profile_path: String,
     input_path: String,
     output_path: Option<String>,
     overwrite: bool,
 ) -> Result<CorrectResponse, BackendError> {
+    let cache = state.reference.clone();
     background(move || {
-        commands::correct_image(
+        commands::correct_image_cached(
+            &cache,
             profile_path,
             input_path,
             output_path,

@@ -173,12 +173,16 @@ pub struct LoadedReference {
     pub preview_data_url: String,
 }
 
-fn preview_data_url(image: &DecodedImage) -> Result<String, BackendError> {
+fn encode_png_data_url(png: &[u8]) -> String {
     use base64::engine::general_purpose::STANDARD;
     use base64::Engine;
+    format!("data:image/png;base64,{}", STANDARD.encode(png))
+}
+
+fn preview_data_url(image: &DecodedImage) -> Result<String, BackendError> {
     let png = colorbalance_raw::render_preview_png(image, PREVIEW_MAX_DIM)
         .map_err(|error| BackendError::Message(error.to_string()))?;
-    Ok(format!("data:image/png;base64,{}", STANDARD.encode(png)))
+    Ok(encode_png_data_url(&png))
 }
 
 /// Decode a reference image and return a displayable preview with its true
@@ -609,9 +613,17 @@ fn check_camera(profile: &Profile, image: &DecodedImage) -> Result<(), String> {
 /// `image.rgb` is overwritten with the corrected linear sRGB values so the same
 /// buffer can feed the preview renderer; no second full-size copy is made.
 fn correct_in_place(profile: &Profile, image: &mut DecodedImage) -> (Vec<u16>, f64) {
-    let mut pixels = Vec::with_capacity(image.rgb.len());
+    let result = correct_buffer(profile, &mut image.rgb);
+    // The buffer is corrected sRGB now; the camera neutral no longer applies.
+    image.display_neutral = None;
+    result
+}
+
+/// [`correct_in_place`] on a bare linear RGB buffer.
+fn correct_buffer(profile: &Profile, rgb_buffer: &mut [f32]) -> (Vec<u16>, f64) {
+    let mut pixels = Vec::with_capacity(rgb_buffer.len());
     let mut out_of_gamut = 0usize;
-    for rgb in image.rgb.as_chunks_mut::<3>().0 {
+    for rgb in rgb_buffer.as_chunks_mut::<3>().0 {
         let (corrected, flags) = apply_transform(
             profile,
             [f64::from(rgb[0]), f64::from(rgb[1]), f64::from(rgb[2])],
@@ -629,9 +641,7 @@ fn correct_in_place(profile: &Profile, image: &mut DecodedImage) -> (Vec<u16>, f
         ];
         pixels.extend_from_slice(&encode_srgb_u16(encoded));
     }
-    // The buffer is corrected sRGB now; the camera neutral no longer applies.
-    image.display_neutral = None;
-    let total = (image.rgb.len() / 3).max(1);
+    let total = (rgb_buffer.len() / 3).max(1);
     (pixels, out_of_gamut as f64 / total as f64)
 }
 
@@ -691,6 +701,28 @@ pub fn correct_image(
     overwrite: bool,
     report: Report,
 ) -> Result<CorrectResponse, BackendError> {
+    correct_image_cached(
+        &ReferenceCache::disabled(),
+        profile_path,
+        input_path,
+        output_path,
+        overwrite,
+        report,
+    )
+}
+
+/// [`correct_image`] that reuses the cache's decode and "before" preview when
+/// `input_path` is the cached reference. The cached image is shared and
+/// immutable: the transform runs on a copy of its pixels (or on the pixels
+/// themselves when nothing else holds the image, as with a disabled cache).
+pub fn correct_image_cached(
+    cache: &ReferenceCache,
+    profile_path: String,
+    input_path: String,
+    output_path: Option<String>,
+    overwrite: bool,
+    report: Report,
+) -> Result<CorrectResponse, BackendError> {
     let steps = if output_path.is_some() { 5 } else { 4 };
     let profile = profile::from_json(&fs::read_to_string(&profile_path)?)
         .map_err(|error| BackendError::Message(error.to_string()))?;
@@ -701,18 +733,25 @@ pub fn correct_image(
             )));
         }
     }
-    report("Decoding image", 1, steps);
-    let mut image = decode_auto(Path::new(&input_path))?;
+    let image = decode_cached(cache, &input_path, report, steps)?;
     check_camera(&profile, &image).map_err(BackendError::Message)?;
-    report("Rendering original preview", 2, steps);
-    let before_data_url = preview_data_url(&image)?;
+    let before_data_url = preview_cached(cache, &image, report, 2, steps)?;
     report("Applying the transform", 3, steps);
-    let (pixels, out_of_gamut) = correct_in_place(&profile, &mut image);
+    let (width, height) = (image.width, image.height);
+    let mut rgb = match std::sync::Arc::try_unwrap(image) {
+        Ok(owned) => owned.rgb,
+        Err(shared) => shared.rgb.clone(),
+    };
+    let (pixels, out_of_gamut) = correct_buffer(&profile, &mut rgb);
     report("Rendering corrected preview", 4, steps);
-    let after_data_url = preview_data_url(&image)?;
+    let after_data_url =
+        colorbalance_raw::render_preview_rgb(&rgb, width, height, None, PREVIEW_MAX_DIM)
+            .map(|png| encode_png_data_url(&png))
+            .map_err(|error| BackendError::Message(error.to_string()))?;
+    drop(rgb);
     if let Some(output) = &output_path {
         report("Writing 16-bit TIFF", 5, steps);
-        let data = encode_tiff_rgb_u16(image.width, image.height, &pixels);
+        let data = encode_tiff_rgb_u16(width, height, &pixels);
         write_atomically(Path::new(output), &data)?;
     }
 
