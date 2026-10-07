@@ -26,3 +26,8 @@ tauri = { version = "=2.12.1", features = ["test"] }
 
 [lints.rust]
 unsafe_code = "forbid"
+
+# `tauri dev` builds dependencies unoptimized, which makes RAW decode and preview
+# rendering about ten times slower and keeps every core busy for seconds.
+[profile.dev.package."*"]
+opt-level = 3
