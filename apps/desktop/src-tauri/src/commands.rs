@@ -12,6 +12,8 @@ use colorbalance_core::profile::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::reference_cache::ReferenceCache;
+
 /// Stage reporter for long commands: `(label, step, steps)`, called as each
 /// stage starts. `step` is 1-based. The IPC layer turns these into events;
 /// tests and other callers pass [`no_progress`].
@@ -182,15 +184,60 @@ fn preview_data_url(image: &DecodedImage) -> Result<String, BackendError> {
 /// Decode a reference image and return a displayable preview with its true
 /// dimensions, so the light-table can show it before any calibration step.
 pub fn load_reference(path: String, report: Report) -> Result<LoadedReference, BackendError> {
-    report("Decoding image", 1, 2);
-    let image = decode_auto(Path::new(&path))?;
+    load_reference_cached(&ReferenceCache::disabled(), path, report)
+}
+
+/// Decode `path` through `cache`, reporting step 1 as a decode only when one
+/// actually runs.
+fn decode_cached(
+    cache: &ReferenceCache,
+    path: &str,
+    report: Report,
+    steps: usize,
+) -> Result<std::sync::Arc<DecodedImage>, BackendError> {
+    let cached = cache.get_or_decode(
+        Path::new(path),
+        || report("Decoding image", 1, steps),
+        decode_auto,
+    )?;
+    if cached.hit {
+        report("Using cached image", 1, steps);
+    }
+    Ok(cached.image)
+}
+
+/// Render the preview for `image` through `cache`, reporting the stage as a
+/// render or a cache hit.
+fn preview_cached(
+    cache: &ReferenceCache,
+    image: &std::sync::Arc<DecodedImage>,
+    report: Report,
+    step: usize,
+    steps: usize,
+) -> Result<String, BackendError> {
+    let (preview, hit) = cache.preview(image, |image| {
+        report("Rendering preview", step, steps);
+        preview_data_url(image)
+    })?;
+    if hit {
+        report("Using cached preview", step, steps);
+    }
+    Ok(preview)
+}
+
+/// [`load_reference`] that reuses the cache's decode and preview.
+pub fn load_reference_cached(
+    cache: &ReferenceCache,
+    path: String,
+    report: Report,
+) -> Result<LoadedReference, BackendError> {
+    let image = decode_cached(cache, &path, report, 2)?;
     let quad = quad_from_payload(None, image.width, image.height);
-    report("Rendering preview", 2, 2);
     Ok(LoadedReference {
         image_width: image.width,
         image_height: image.height,
         quad: quad.corners,
-        preview_data_url: preview_data_url(&image)?,
+        preview_data_url: preview_cached(cache, &image, report, 2, 2)?,
     })
 }
 
@@ -200,8 +247,24 @@ pub fn inspect_reference(
     quad: Option<QuadPayload>,
     report: Report,
 ) -> Result<InspectResponse, BackendError> {
-    report("Decoding image", 1, 4);
-    let image = decode_auto(Path::new(&path))?;
+    inspect_reference_cached(
+        &ReferenceCache::disabled(),
+        path,
+        chart_revision,
+        quad,
+        report,
+    )
+}
+
+/// [`inspect_reference`] that reuses the cache's decode and preview.
+pub fn inspect_reference_cached(
+    cache: &ReferenceCache,
+    path: String,
+    chart_revision: String,
+    quad: Option<QuadPayload>,
+    report: Report,
+) -> Result<InspectResponse, BackendError> {
+    let image = decode_cached(cache, &path, report, 4)?;
     let revision = parse_revision(&chart_revision)?;
     let chart_quad = quad_from_payload(quad, image.width, image.height);
     report("Sampling chart patches", 2, 4);
@@ -212,10 +275,9 @@ pub fn inspect_reference(
     let failures = calibration::evaluate_quality(&samples, &gate_config)
         .err()
         .unwrap_or_default();
-    report("Rendering preview", 4, 4);
-    let preview = Some(preview_data_url(&image)?);
+    let preview = Some(preview_cached(cache, &image, report, 4, 4)?);
     Ok(InspectResponse {
-        camera: image.camera,
+        camera: image.camera.clone(),
         image_width: image.width,
         image_height: image.height,
         chart_revision: revision,
@@ -306,18 +368,39 @@ pub fn derive_profile(
     quad: Option<QuadPayload>,
     report: Report,
 ) -> Result<DeriveResponse, BackendError> {
+    derive_profile_cached(
+        &ReferenceCache::disabled(),
+        path,
+        chart_revision,
+        profile_path,
+        report_path,
+        quad,
+        report,
+    )
+}
+
+/// [`derive_profile`] that reuses the cache's decode of the reference.
+pub fn derive_profile_cached(
+    cache: &ReferenceCache,
+    path: String,
+    chart_revision: String,
+    profile_path: String,
+    report_path: Option<String>,
+    quad: Option<QuadPayload>,
+    report: Report,
+) -> Result<DeriveResponse, BackendError> {
     let steps = if report_path.is_some() { 5 } else { 4 };
-    report("Decoding image", 1, steps);
-    let image = decode_auto(Path::new(&path))?;
+    let image = decode_cached(cache, &path, report, steps)?;
+    let image = &*image;
     let revision = parse_revision(&chart_revision)?;
     let chart_quad = quad_from_payload(quad, image.width, image.height);
     let dataset = colorbalance_core::dataset::load(revision)
         .map_err(|error| BackendError::Message(error.to_string()))?;
     report("Sampling chart patches", 2, steps);
-    let samples = calibration::sample_patches(&image, &chart_quad)
+    let samples = calibration::sample_patches(image, &chart_quad)
         .map_err(|error| BackendError::Message(error.to_string()))?;
-    let rendered = is_rendered_source(&image);
-    let gate_config = gate_config_for(&image);
+    let rendered = is_rendered_source(image);
+    let gate_config = gate_config_for(image);
     let failures = calibration::evaluate_quality(&samples, &gate_config)
         .err()
         .unwrap_or_default();
@@ -336,7 +419,7 @@ pub fn derive_profile(
     let initial = Profile {
         schema_version: profile::SCHEMA_VERSION.to_owned(),
         decode_contract: contract,
-        camera: image.camera,
+        camera: image.camera.clone(),
         chart_revision: revision,
         dataset_digest: colorbalance_core::dataset::dataset_digest(),
         reference_digest,
@@ -461,13 +544,15 @@ pub fn apply_batch(
     let started = {
         let on_progress = on_progress.clone();
         let finished = finished.clone();
-        std::sync::Arc::new(move |input: &std::path::Path, _index: usize, total: usize| {
-            on_progress(
-                finished.load(std::sync::atomic::Ordering::Relaxed),
-                total,
-                Some(input),
-            );
-        })
+        std::sync::Arc::new(
+            move |input: &std::path::Path, _index: usize, total: usize| {
+                on_progress(
+                    finished.load(std::sync::atomic::Ordering::Relaxed),
+                    total,
+                    Some(input),
+                );
+            },
+        )
     };
     let process = {
         let on_progress = on_progress.clone();

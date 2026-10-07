@@ -7,12 +7,15 @@ use tauri_plugin_dialog::{DialogExt, FilePath};
 
 pub struct AppState {
     pub cancellation: colorbalance_core::CancelFlag,
+    /// Most recent decoded reference, shared by load, inspect and derive.
+    pub reference: std::sync::Arc<reference_cache::ReferenceCache>,
 }
 
 impl Default for AppState {
     fn default() -> Self {
         Self {
             cancellation: std::sync::Arc::new(AtomicBool::new(false)),
+            reference: std::sync::Arc::default(),
         }
     }
 }
@@ -130,6 +133,7 @@ async fn choose_save_path(
 
 pub mod commands;
 pub mod ipc;
+pub mod reference_cache;
 
 #[cfg(test)]
 mod tests {

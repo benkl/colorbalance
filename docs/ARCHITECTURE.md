@@ -83,6 +83,7 @@ Rules that apply to every UI host:
 - Previews are encoded low-resolution images produced by the engine, not raw arrays serialized through JSON IPC.
 - Long operations report progress and remain cancellable. Cancellation stops scheduling new files and finishes or removes active temporary files.
 - Tauri commands that decode or process images are `async` and run their work on the blocking thread pool (`spawn_blocking`); native dialog commands are `async` too. Synchronous commands run on the main thread and freeze the window. Stage progress arrives as the `operation-progress` event (`{operation, stage, step, steps}`) and batch progress as `batch-progress` (`{completed, total, file}`). The frontend listens through `core:event:default`, which `capabilities/default.json` must grant: without it `listen` is rejected and the progress strip never updates.
+- The desktop backend keeps the most recent decoded reference (and its preview) in `AppState`, so `load_reference`, `inspect_reference` and `derive_profile` on the same file share one decode. An entry is valid only for the same canonical path, byte length and modification time; failures and entries over 1 GiB are never cached; the image is shared as an `Arc` with no pixel copy. Batch and `correct_image` never use it. Stage labels read "Using cached image" / "Using cached preview" on a hit.
 
 ## Performance design
 
@@ -152,6 +153,7 @@ Rules:
 | D11 | Web delivery mode: Tauri 2 desktop is the primary delivery vehicle. Standalone browser preview is supported with local client-side evaluation and simulated demo fixtures. Direct browser-local RAW decode is gated behind WebAssembly memory constraints. Native desktop has unrestricted local filesystem access and multi-threaded parallel batch execution. | Accepted | 2026-10-04 |
 | D12 | The built-in DNG decoder also accepts 3-component, 12-bit LinearRaw compressed with lossless JPEG SOF3, when metadata and opcodes preserve unbalanced linear camera RGB. CFA and LinearRaw remain distinct sensor layouts; clipping is flagged from source samples before orientation or preview. Full-frame crop and identity gain maps are allowed, other pixel-changing operations fail closed. LibRaw remains planned for other formats. | Accepted | 2026-10-06 |
 | D13 | Desktop commands never run RAW or image work on the main thread: async commands plus `spawn_blocking`, with progress events for UI feedback | Accepted | 2026-10-07 |
+| D14 | Desktop caches one decoded reference keyed on path, length and mtime, for load, inspect and derive only. Colour results are unchanged: a hit returns the identical decode, and any file change is a miss | Accepted | 2026-10-07 |
 
 ## Platform and Browser Support Matrix
 

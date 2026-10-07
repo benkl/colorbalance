@@ -63,9 +63,14 @@ fn emit_stage(window: &Window, operation: &str, stage: &str, step: usize, steps:
 }
 
 #[tauri::command]
-pub async fn load_reference(window: Window, path: String) -> Result<LoadedReference, BackendError> {
+pub async fn load_reference(
+    window: Window,
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<LoadedReference, BackendError> {
+    let cache = state.reference.clone();
     background(move || {
-        commands::load_reference(path, &|stage, step, steps| {
+        commands::load_reference_cached(&cache, path, &|stage, step, steps| {
             emit_stage(&window, "load", stage, step, steps)
         })
     })
@@ -75,14 +80,20 @@ pub async fn load_reference(window: Window, path: String) -> Result<LoadedRefere
 #[tauri::command]
 pub async fn inspect_reference(
     window: Window,
+    state: State<'_, AppState>,
     path: String,
     chart_revision: String,
     quad: Option<QuadPayload>,
 ) -> Result<InspectResponse, BackendError> {
+    let cache = state.reference.clone();
     background(move || {
-        commands::inspect_reference(path, chart_revision, quad, &|stage, step, steps| {
-            emit_stage(&window, "inspect", stage, step, steps)
-        })
+        commands::inspect_reference_cached(
+            &cache,
+            path,
+            chart_revision,
+            quad,
+            &|stage, step, steps| emit_stage(&window, "inspect", stage, step, steps),
+        )
     })
     .await
 }
@@ -90,14 +101,17 @@ pub async fn inspect_reference(
 #[tauri::command]
 pub async fn derive_profile(
     window: Window,
+    state: State<'_, AppState>,
     path: String,
     chart_revision: String,
     profile_path: String,
     report_path: Option<String>,
     quad: Option<QuadPayload>,
 ) -> Result<DeriveResponse, BackendError> {
+    let cache = state.reference.clone();
     background(move || {
-        commands::derive_profile(
+        commands::derive_profile_cached(
+            &cache,
             path,
             chart_revision,
             profile_path,
@@ -140,8 +154,8 @@ pub async fn apply_batch(
 ) -> Result<BatchResponse, BackendError> {
     let cancellation = state.cancellation.clone();
     background(move || {
-        let on_progress = std::sync::Arc::new(
-            move |completed: usize, total: usize, file: Option<&Path>| {
+        let on_progress =
+            std::sync::Arc::new(move |completed: usize, total: usize, file: Option<&Path>| {
                 let _ = window.emit(
                     "batch-progress",
                     BatchProgress {
@@ -150,8 +164,7 @@ pub async fn apply_batch(
                         file: file.map(|path| path.display().to_string()),
                     },
                 );
-            },
-        );
+            });
         commands::apply_batch(
             profile_path,
             input_path,

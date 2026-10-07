@@ -2,9 +2,7 @@
 //! the real command and pin that JSON shape, so a Rust-side rename or a missing
 //! field fails here instead of surfacing as `undefined.toFixed` in the window.
 
-use colorbalance_desktop::commands::{
-    correct_image, derive_profile, load_reference, no_progress,
-};
+use colorbalance_desktop::commands::{correct_image, derive_profile, load_reference, no_progress};
 use colorbalance_fixtures::{render_chart_dng, ChartScene};
 
 fn temp_dir(name: &str) -> std::path::PathBuf {
@@ -85,8 +83,8 @@ fn load_reference_returns_a_png_with_the_true_size() {
     let reference = work.join("reference.dng");
     render_chart_dng(&reference, &scene).unwrap();
 
-    let loaded = load_reference(reference.to_string_lossy().into_owned(), &no_progress)
-        .expect("loads");
+    let loaded =
+        load_reference(reference.to_string_lossy().into_owned(), &no_progress).expect("loads");
     let json = serde_json::to_value(&loaded).unwrap();
     let _ = std::fs::remove_dir_all(work);
 
@@ -197,12 +195,17 @@ fn correct_image_returns_previews_writes_a_tiff_and_protects_existing_output() {
             .unwrap()
             .starts_with("data:image/png;base64,"));
     }
-    assert_ne!(json["beforeDataUrl"], json["afterDataUrl"], "the transform changed pixels");
+    assert_ne!(
+        json["beforeDataUrl"], json["afterDataUrl"],
+        "the transform changed pixels"
+    );
     let first = std::fs::read(&output).unwrap();
     assert_eq!(&first[..2], b"II");
 
     // A second run without overwrite must fail and leave the first output intact.
-    let error = call(false).expect_err("existing output is refused").to_string();
+    let error = call(false)
+        .expect_err("existing output is refused")
+        .to_string();
     assert!(error.contains("already exists"), "{error}");
     assert_eq!(std::fs::read(&output).unwrap(), first);
     assert_eq!(leftover_temp_files(&work), 0);
@@ -259,13 +262,13 @@ fn derive_and_correct_report_their_stages_in_order() {
         reference.to_string_lossy().into_owned(),
         "classic-before-nov-2014".to_owned(),
         profile_path.to_string_lossy().into_owned(),
-        Some(
-            work.join("report.html")
-                .to_string_lossy()
-                .into_owned(),
-        ),
+        Some(work.join("report.html").to_string_lossy().into_owned()),
         Some(serde_json::from_value(quad_payload(&scene)).unwrap()),
-        &|stage, step, steps| derive_stages.borrow_mut().push((stage.to_owned(), step, steps)),
+        &|stage, step, steps| {
+            derive_stages
+                .borrow_mut()
+                .push((stage.to_owned(), step, steps))
+        },
     )
     .unwrap();
 
@@ -275,7 +278,11 @@ fn derive_and_correct_report_their_stages_in_order() {
         reference.to_string_lossy().into_owned(),
         Some(work.join("out.tiff").to_string_lossy().into_owned()),
         false,
-        &|stage, step, steps| correct_stages.borrow_mut().push((stage.to_owned(), step, steps)),
+        &|stage, step, steps| {
+            correct_stages
+                .borrow_mut()
+                .push((stage.to_owned(), step, steps))
+        },
     )
     .unwrap();
     let _ = std::fs::remove_dir_all(work);
@@ -332,7 +339,11 @@ fn batch_progress_counts_finished_files_and_reaches_the_total() {
     assert_eq!(serde_json::to_value(&response).unwrap()["total"], 3);
     assert_eq!(temps, 0);
     assert_eq!(events[0], (0, 3, false), "starts at zero finished");
-    assert_eq!(events.last().unwrap(), &(3, 3, false), "ends fully finished");
+    assert_eq!(
+        events.last().unwrap(),
+        &(3, 3, false),
+        "ends fully finished"
+    );
     let finished: Vec<usize> = events
         .iter()
         .filter(|(_, _, started)| !started)
