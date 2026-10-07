@@ -21,6 +21,7 @@ pub mod decode;
 pub mod detection;
 pub mod interchange;
 pub mod output;
+pub mod par;
 pub mod profile;
 
 pub use batch::{

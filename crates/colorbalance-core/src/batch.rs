@@ -8,7 +8,7 @@
 //! (`docs/ARCHITECTURE.md`).
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
@@ -155,6 +155,9 @@ pub fn unique_output_path(output_dir: &Path, input: &Path, seen: &mut Vec<String
 
 /// Run `process` over `inputs` with at most `options.workers` in flight.
 ///
+/// Workers claim the next unprocessed input as they become free, so a slow
+/// file delays only its own worker.
+///
 /// Cancellation: when `cancel` is set, no further file is scheduled; already
 /// running files finish. The summary is always sorted by input path, so it is
 /// deterministic regardless of completion order.
@@ -178,24 +181,31 @@ where
     let seen = Arc::new(Mutex::new(Vec::new()));
     let process = Arc::new(process);
 
+    let inputs = Arc::new(inputs);
+    // Next unclaimed input. Workers claim indices as they become free, so a
+    // slow file delays only its own worker instead of a fixed slice.
+    let next = Arc::new(AtomicUsize::new(0));
     let mut handles = Vec::with_capacity(workers);
-    for worker in 0..workers {
+    for _ in 0..workers {
         let tx = tx.clone();
-        let inputs = Arc::new(inputs.clone());
+        let inputs = Arc::clone(&inputs);
+        let next = Arc::clone(&next);
         let cancel = cancel.clone();
         let seen = Arc::clone(&seen);
         let options = options.clone();
         let progress = progress.clone();
         let process = Arc::clone(&process);
         handles.push(std::thread::spawn(move || {
-            for (index, input) in inputs.iter().enumerate() {
-                // Worker stride: each worker owns one slice, in input order.
-                if index % workers != worker {
-                    continue;
-                }
+            loop {
+                // Check cancellation before claiming so a cancelled run
+                // leaves the remaining inputs unclaimed.
                 if cancel.load(Ordering::Relaxed) {
                     return;
                 }
+                let index = next.fetch_add(1, Ordering::Relaxed);
+                let Some(input) = inputs.get(index) else {
+                    return;
+                };
                 let output = {
                     let mut lock = seen.lock().expect("output name lock poisoned");
                     unique_output_path(&options.output, input, &mut lock)
@@ -394,6 +404,53 @@ mod tests {
         let summary = run_batch(inputs, &options, None, cancel, process).unwrap();
         assert!(matches!(summary.cancel, CancelState::Cancelled(_)));
         assert!(summary.succeeded.len() < 16);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_slow_file_does_not_hold_back_files_behind_it() {
+        // Under a fixed stride, with two workers, f00 would own f02 and f04
+        // and they could not start until f00 returned. Here f00 only returns
+        // once every other file has finished, so the run completes only if
+        // the idle worker takes over the rest.
+        let root = temp_dir("steal");
+        let out = root.join("out");
+        for i in 0..5 {
+            write(&root.join(format!("f{i:02}.dng")), &[i as u8]);
+        }
+        let options = BatchOptions {
+            output: out,
+            workers: 2,
+            ..Default::default()
+        };
+        let inputs = collect_inputs(&root, &options.extensions).unwrap();
+        let others_done = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&others_done);
+        let process = move |input: &Path, output: PathBuf| -> Result<Option<PathBuf>, String> {
+            let slow = input.file_name().is_some_and(|n| n == "f00.dng");
+            if slow {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                while counter.load(Ordering::Relaxed) < 4 {
+                    if std::time::Instant::now() > deadline {
+                        return Err("other files were stuck behind the slow one".to_string());
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            } else {
+                counter.fetch_add(1, Ordering::Relaxed);
+            }
+            fs::write(&output, b"ok").unwrap();
+            Ok(Some(output))
+        };
+        let summary = run_batch(
+            inputs,
+            &options,
+            None,
+            Arc::new(AtomicBool::new(false)),
+            process,
+        )
+        .unwrap();
+        assert_eq!(summary.succeeded.len(), 5, "{:?}", summary.failed);
         let _ = fs::remove_dir_all(&root);
     }
 

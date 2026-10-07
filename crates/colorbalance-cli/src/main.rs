@@ -12,9 +12,7 @@ use colorbalance_core::dataset;
 use colorbalance_core::decode::{CameraIdentity, DecodedImage};
 use colorbalance_core::interchange::{profile_to_clf, profile_to_cube};
 use colorbalance_core::output::encode_tiff_rgb_u16;
-use colorbalance_core::profile::{
-    self, apply_transform, encode_srgb_u16, Profile, ValidationSummary,
-};
+use colorbalance_core::profile::{self, Profile, ValidationSummary};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
@@ -591,7 +589,7 @@ fn execute_apply(args: ApplyArgs) -> Result<(), String> {
             return Ok(None);
         }
 
-        let decoded = decode_auto(input).map_err(|e| format!("decode failed: {e}"))?;
+        let mut decoded = decode_auto(input).map_err(|e| format!("decode failed: {e}"))?;
 
         if (decoded.camera.make != prof.camera.make || decoded.camera.model != prof.camera.model)
             && !force
@@ -630,24 +628,8 @@ fn execute_apply(args: ApplyArgs) -> Result<(), String> {
             Err(error) => return Err(error.to_string()),
         };
 
-        let pixel_count = (decoded.width as usize) * (decoded.height as usize);
-        let mut out_u16 = Vec::with_capacity(pixel_count * 3);
-        for i in 0..pixel_count {
-            let rgb_f64 = [
-                f64::from(decoded.rgb[i * 3]),
-                f64::from(decoded.rgb[i * 3 + 1]),
-                f64::from(decoded.rgb[i * 3 + 2]),
-            ];
-            let (linear_srgb, _clips) = apply_transform(&prof, rgb_f64);
-            let srgb_encoded = [
-                colorbalance_core::color::srgb_encode(linear_srgb[0]),
-                colorbalance_core::color::srgb_encode(linear_srgb[1]),
-                colorbalance_core::color::srgb_encode(linear_srgb[2]),
-            ];
-            let u16_triplet = encode_srgb_u16(srgb_encoded);
-            out_u16.extend_from_slice(&u16_triplet);
-        }
-
+        let (out_u16, _clipped) =
+            colorbalance_core::profile::correct_to_u16(&prof, &mut decoded.rgb);
         let tiff_bytes = encode_tiff_rgb_u16(decoded.width, decoded.height, &out_u16);
         let tmp_path = output
             .parent()

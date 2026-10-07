@@ -239,6 +239,64 @@ pub fn encode_srgb_u16(rgb: [f64; 3]) -> [u16; 3] {
     out
 }
 
+/// Pixels per parallel work item in [`correct_to_u16`].
+const CORRECT_CHUNK_PIXELS: usize = 8192;
+
+/// Apply the profile to every pixel of an interleaved linear RGB buffer.
+///
+/// `rgb` is overwritten with the corrected linear sRGB values. The return
+/// value holds the sRGB-encoded 16-bit samples and the number of pixels where
+/// the transform clipped any channel. Pixels are independent, so the result is
+/// identical with and without the `parallel` feature.
+///
+/// # Panics
+///
+/// Panics if `rgb.len()` is not a multiple of three.
+pub fn correct_to_u16(p: &Profile, rgb: &mut [f32]) -> (Vec<u16>, usize) {
+    assert!(
+        rgb.len().is_multiple_of(3),
+        "RGB buffer length must be a multiple of 3"
+    );
+    let mut encoded = vec![0_u16; rgb.len()];
+    let clipped = crate::par::zip_chunks_mut_sum(
+        rgb,
+        CORRECT_CHUNK_PIXELS * 3,
+        &mut encoded,
+        CORRECT_CHUNK_PIXELS * 3,
+        |_, input, output| {
+            let mut clipped = 0;
+            for (pixel, out) in input
+                .as_chunks_mut::<3>()
+                .0
+                .iter_mut()
+                .zip(output.as_chunks_mut::<3>().0.iter_mut())
+            {
+                let (corrected, flags) = apply_transform(
+                    p,
+                    [
+                        f64::from(pixel[0]),
+                        f64::from(pixel[1]),
+                        f64::from(pixel[2]),
+                    ],
+                );
+                if flags != 0 {
+                    clipped += 1;
+                }
+                for (slot, value) in pixel.iter_mut().zip(corrected) {
+                    *slot = value as f32;
+                }
+                out.copy_from_slice(&encode_srgb_u16([
+                    crate::color::srgb_encode(corrected[0]),
+                    crate::color::srgb_encode(corrected[1]),
+                    crate::color::srgb_encode(corrected[2]),
+                ]));
+            }
+            clipped
+        },
+    );
+    (encoded, clipped)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

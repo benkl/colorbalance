@@ -15,6 +15,7 @@ rust-version = "1.89"
 repository = "https://github.com/benkl/colorbalance"
 
 [workspace.dependencies]
+rayon = "1.10"
 colorbalance-core = { path = "crates/colorbalance-core" }
 colorbalance-raw = { path = "crates/colorbalance-raw" }
 clap = { version = "4", features = ["derive"] }

@@ -11,7 +11,7 @@ name = "colorbalance"
 path = "src/main.rs"
 
 [dependencies]
-colorbalance-core = { workspace = true }
+colorbalance-core = { workspace = true, features = ["parallel"] }
 colorbalance-raw = { path = "../colorbalance-raw" }
 clap = { workspace = true }
 serde = { workspace = true }

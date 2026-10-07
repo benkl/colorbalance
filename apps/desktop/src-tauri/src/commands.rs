@@ -8,9 +8,7 @@ use colorbalance_core::decode::DecodedImage;
 use colorbalance_core::detection::{detect_chart, Detection};
 use colorbalance_core::interchange::{profile_to_clf, profile_to_cube};
 use colorbalance_core::output::encode_tiff_rgb_u16;
-use colorbalance_core::profile::{
-    self, apply_transform, encode_srgb_u16, Profile, ValidationSummary,
-};
+use colorbalance_core::profile::{self, Profile, ValidationSummary};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -702,26 +700,7 @@ fn correct_in_place(profile: &Profile, image: &mut DecodedImage) -> (Vec<u16>, f
 
 /// [`correct_in_place`] on a bare linear RGB buffer.
 fn correct_buffer(profile: &Profile, rgb_buffer: &mut [f32]) -> (Vec<u16>, f64) {
-    let mut pixels = Vec::with_capacity(rgb_buffer.len());
-    let mut out_of_gamut = 0usize;
-    for rgb in rgb_buffer.as_chunks_mut::<3>().0 {
-        let (corrected, flags) = apply_transform(
-            profile,
-            [f64::from(rgb[0]), f64::from(rgb[1]), f64::from(rgb[2])],
-        );
-        if flags != 0 {
-            out_of_gamut += 1;
-        }
-        for (slot, value) in rgb.iter_mut().zip(corrected) {
-            *slot = value as f32;
-        }
-        let encoded = [
-            colorbalance_core::color::srgb_encode(corrected[0]),
-            colorbalance_core::color::srgb_encode(corrected[1]),
-            colorbalance_core::color::srgb_encode(corrected[2]),
-        ];
-        pixels.extend_from_slice(&encode_srgb_u16(encoded));
-    }
+    let (pixels, out_of_gamut) = colorbalance_core::profile::correct_to_u16(profile, rgb_buffer);
     let total = (rgb_buffer.len() / 3).max(1);
     (pixels, out_of_gamut as f64 / total as f64)
 }

@@ -9,7 +9,7 @@ description = "ColorBalance Light-Table desktop application"
 tauri-build = { version = "=2.7.1", features = [] }
 
 [dependencies]
-colorbalance-core = { path = "../../../crates/colorbalance-core" }
+colorbalance-core = { path = "../../../crates/colorbalance-core", features = ["parallel"] }
 colorbalance-raw = { path = "../../../crates/colorbalance-raw" }
 base64 = "0.22"
 serde = { version = "1", features = ["derive"] }

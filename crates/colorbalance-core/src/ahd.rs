@@ -1,5 +1,7 @@
 //! Adaptive homogeneity-directed demosaicing of a normalized Bayer mosaic.
 
+use crate::par;
+
 const RED: u8 = b'R';
 const GREEN: u8 = b'G';
 const BLUE: u8 = b'B';
@@ -188,11 +190,13 @@ pub fn demosaic_ahd(
     );
     let len = pixels.checked_mul(3).expect("RGB buffer length overflow");
     let mut rgb = [vec![0.0_f32; len], vec![0.0_f32; len]];
-    for y in 0..height {
-        for x in 0..width {
-            let p = (y * width + x) * 3;
-            let site = color(cfa, x, y);
-            for (direction, plane) in rgb.iter_mut().enumerate() {
+    // Every pass below writes disjoint rows and reads shared immutable data,
+    // so rows may run in any order without changing a single output bit.
+    for (direction, plane) in rgb.iter_mut().enumerate() {
+        par::chunks_mut(plane, width * 3, |y, row| {
+            for x in 0..width {
+                let p = x * 3;
+                let site = color(cfa, x, y);
                 let green = if site == GREEN {
                     normalized[y * width + x]
                 } else {
@@ -205,19 +209,28 @@ pub fn demosaic_ahd(
                             - neighbor(normalized, width, height, cfa, x, y, -2 * dx, -2 * dy))
                             * 0.25
                 };
-                plane[p + 1] = green;
+                row[p + 1] = green;
                 if site != GREEN {
-                    plane[p + if site == RED { 0 } else { 2 }] = normalized[y * width + x];
+                    row[p + if site == RED { 0 } else { 2 }] = normalized[y * width + x];
                 }
             }
-        }
+        });
     }
     // Interpolate (color - green), rather than interpolating color directly.
     // Green at every supporting site belongs to the same directional candidate.
+    // Greens are final after the pass above; reading them from a separate
+    // plane lets rows of the color planes be written concurrently.
+    let mut greens = vec![0.0_f32; pixels];
     for plane in &mut rgb {
-        for y in 0..height {
+        let source = plane.as_chunks::<3>().0;
+        par::chunks_mut(&mut greens, width, |y, row| {
+            for (x, green) in row.iter_mut().enumerate() {
+                *green = source[y * width + x][1];
+            }
+        });
+        par::chunks_mut(plane, width * 3, |y, row| {
             for x in 0..width {
-                let p = (y * width + x) * 3;
+                let p = x * 3;
                 let site = color(cfa, x, y);
                 for (channel, wanted) in [(0, RED), (2, BLUE)] {
                     if site == wanted {
@@ -235,30 +248,25 @@ pub fn demosaic_ahd(
                     let mut sum = 0.0;
                     for &(dx, dy) in offsets {
                         let support = neighbor_index(width, height, cfa, x, y, dx, dy);
-                        sum += normalized[support] - plane[support * 3 + 1];
+                        sum += normalized[support] - greens[support];
                     }
-                    plane[p + channel] = plane[p + 1] + sum / offsets.len() as f32;
+                    row[p + channel] = row[p + 1] + sum / offsets.len() as f32;
                 }
             }
-        }
+        });
     }
-    let labs = [
-        rgb[0]
-            .as_chunks::<3>()
-            .0
-            .iter()
-            .map(lab)
-            .collect::<Vec<_>>(),
-        rgb[1]
-            .as_chunks::<3>()
-            .0
-            .iter()
-            .map(lab)
-            .collect::<Vec<_>>(),
-    ];
-    let mut votes = [vec![0_u8; pixels], vec![0_u8; pixels]];
-    for y in 0..height {
-        for x in 0..width {
+    let mut labs = [vec![[0.0_f32; 3]; pixels], vec![[0.0_f32; 3]; pixels]];
+    for (lab_plane, plane) in labs.iter_mut().zip(&rgb) {
+        let source = plane.as_chunks::<3>().0;
+        par::chunks_mut(lab_plane, width, |y, row| {
+            for (x, value) in row.iter_mut().enumerate() {
+                *value = lab(&source[y * width + x]);
+            }
+        });
+    }
+    let mut votes = vec![[0_u8; 2]; pixels];
+    par::chunks_mut(&mut votes, width, |y, row| {
+        for (x, vote) in row.iter_mut().enumerate() {
             let p = y * width + x;
             let adjacent = [
                 (x.saturating_sub(1), y),
@@ -283,36 +291,35 @@ pub fn demosaic_ahd(
                 .max(differences[0][1].1)
                 .min(differences[1][2].1.max(differences[1][3].1));
             for d in 0..2 {
-                votes[d][p] = differences[d]
+                vote[d] = differences[d]
                     .iter()
                     .filter(|&&(l, ab)| l <= threshold_l && ab <= threshold_ab)
                     .count() as u8;
             }
         }
-    }
+    });
     let mut out = vec![0.0_f32; len];
-    let clipped = clipping(width, height, cfa, saturated);
-    for y in 0..height {
+    par::chunks_mut(&mut out, width * 3, |y, row| {
         for x in 0..width {
-            let p = y * width + x;
             let mut scores = [0_u16; 2];
             for ny in y.saturating_sub(1)..=y.saturating_add(1).min(height - 1) {
                 for nx in x.saturating_sub(1)..=x.saturating_add(1).min(width - 1) {
                     for d in 0..2 {
-                        scores[d] += u16::from(votes[d][ny * width + nx]);
+                        scores[d] += u16::from(votes[ny * width + nx][d]);
                     }
                 }
             }
             for channel in 0..3 {
-                let i = p * 3 + channel;
-                out[i] = match scores[0].cmp(&scores[1]) {
+                let i = (y * width + x) * 3 + channel;
+                row[x * 3 + channel] = match scores[0].cmp(&scores[1]) {
                     std::cmp::Ordering::Greater => rgb[0][i],
                     std::cmp::Ordering::Less => rgb[1][i],
                     std::cmp::Ordering::Equal => (rgb[0][i] + rgb[1][i]) * 0.5,
                 };
             }
         }
-    }
+    });
+    let clipped = clipping(width, height, cfa, saturated);
     (out, clipped)
 }
 

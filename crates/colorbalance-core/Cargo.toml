@@ -6,7 +6,12 @@ rust-version.workspace = true
 repository.workspace = true
 description = "ColorBalance color engine: decode contract, chart model, profiles"
 
+[features]
+# Row-parallel demosaic and apply loops on rayon. Off for wasm32 builds.
+parallel = ["dep:rayon"]
+
 [dependencies]
+rayon = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
