@@ -119,11 +119,14 @@ The CLI is unchanged. `derive` still refuses a failing chart unless you pass `--
 
 ### Correcting single images and comparing before and after
 
-Once a profile is derived, step 2 of the desktop app offers three actions:
+The desktop app has three tabs: **REFERENCE**, **VALIDATE**, and **EXPORT**. The viewport follows the active tab. REFERENCE shows the light table with the chart corners. VALIDATE and EXPORT show the before and after comparison of the reference, which loads after a profile is derived. Everything that writes a file lives on EXPORT:
 
-- **Before / after** corrects the reference image and opens the comparison viewer over the viewport.
-- **Save reference** does the same and also writes the corrected reference as a 16-bit sRGB TIFF.
+- **Save reference** corrects the reference image and writes it as a 16-bit sRGB TIFF.
 - **Correct single image** picks any image, corrects it with the profile, shows before and after, and writes a TIFF.
+- **.CLF** and **.CUBE** export the transform for other tools.
+- **Batch** corrects a folder into a destination folder, with an overwrite switch and a stop button. The result counts, failed files, and warnings appear below the controls.
+
+The **BEFORE / AFTER** button on VALIDATE reloads the comparison without saving anything.
 
 Both previews are rendered in Rust and downscaled to 1600 px on the long side. The TIFF is full resolution. The writer uses a temporary file in the destination folder, flushes it, then renames it, so a failed write leaves no partial output. The save dialog confirms replacing an existing file. The camera must match the profile. A mismatch fails with both camera names and writes nothing, so a profile derived from a rendered JPEG cannot correct a RAW file.
 
@@ -143,7 +146,7 @@ A toolbar above the image controls what the viewport shows. Both images always s
 | Hold: Before | Shows the original while held. | Space |
 | Backdrop | Dark, mid-gray, or light surround for judging color. | |
 | Reset | Fit zoom, no pan, split at 50%. | `0` |
-| Close | Back to the chart view. | Esc |
+| Close | Back to the REFERENCE tab and the chart view. | Esc |
 
 ### Why a raw preview looks green
 

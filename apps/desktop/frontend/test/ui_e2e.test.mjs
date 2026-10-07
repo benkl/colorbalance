@@ -95,7 +95,7 @@ test('UI end-to-end: native file drop loads image, enables derive, and completes
     referencePath: pickedPath,
     batchInputPath: '',
     batchOutputPath: '',
-    step: 1,
+    tab: 'reference',
     errorMessage: '',
   };
   assert.equal(interaction.canDerive(uiState), true);

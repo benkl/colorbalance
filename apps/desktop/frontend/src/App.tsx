@@ -15,7 +15,6 @@ import {
   FolderOpen,
   Play,
   Cpu,
-  CheckCircle2,
   AlertCircle,
   Flame,
   Upload,
@@ -24,8 +23,16 @@ import {
   Save,
 } from 'lucide-react';
 
+type Tab = 'reference' | 'validate' | 'export';
+
+const TABS: { id: Tab; label: string; icon: typeof Layers }[] = [
+  { id: 'reference', label: 'REFERENCE', icon: Layers },
+  { id: 'validate', label: 'VALIDATE', icon: Sparkles },
+  { id: 'export', label: 'EXPORT', icon: Save },
+];
+
 export const App: React.FC = () => {
-  const [step, setStep] = useState<1 | 2 | 3 | 4>(1);
+  const [tab, setTab] = useState<Tab>('reference');
 
   // Workflow State
   const [referencePath, setReferencePath] = useState<string>('');
@@ -79,7 +86,7 @@ export const App: React.FC = () => {
       }
       logger.info('UI', `HTML drop received: ${file.name}`);
       showBrowserFile(file);
-      setStep(1);
+      setTab('reference');
     };
     window.addEventListener('dragover', preventDefault);
     window.addEventListener('drop', handleDrop);
@@ -98,7 +105,7 @@ export const App: React.FC = () => {
       if (supported) {
         logger.success('UI', `Selected reference from native drop: ${supported}`);
         void showReference(supported);
-        setStep(1);
+        setTab('reference');
       } else {
         logger.warn('UI', 'Native drop ignored: no supported RAW/JPEG/PNG found');
       }
@@ -380,12 +387,14 @@ export const App: React.FC = () => {
           quad,
         );
         setDeriveResult(result);
-        setStep(2);
+        setCompare(null);
+        previewAttempt.current = '';
+        setTab('validate');
       } catch (error: unknown) {
         if (typeof window !== 'undefined' && !('__TAURI__' in window)) {
           logger.warn('UI', 'Browser preview: loaded synthetic demo calibration');
           loadSyntheticDemo();
-          setStep(2);
+          setTab('validate');
         } else {
           setErrorMessage(error instanceof Error ? error.message : String(error));
         }
@@ -433,6 +442,17 @@ export const App: React.FC = () => {
     }
   };
 
+  // The viewport follows the tab: VALIDATE and EXPORT show the before/after of the
+  // loaded reference. Load it once per profile and reference, so a failure cannot loop.
+  const previewAttempt = useRef('');
+  useEffect(() => {
+    if (tab === 'reference' || compare || isProcessing || !deriveResult?.profilePath || !referencePath) return;
+    const key = `${deriveResult.profilePath}|${deriveResult.digest}|${referencePath}`;
+    if (previewAttempt.current === key) return;
+    previewAttempt.current = key;
+    void runCorrect(referencePath, false);
+  });
+
   const handleRunBatch = () => {
     if (!batchInputPath || !batchOutputPath || !deriveResult?.profilePath) {
       setErrorMessage('Select source and destination folders after deriving a profile.');
@@ -449,7 +469,6 @@ export const App: React.FC = () => {
           overwriteOutputs,
         );
         setBatchSummary(result);
-        setStep(4);
       } catch (error: unknown) {
         setErrorMessage(error instanceof Error ? error.message : String(error));
       } finally {
@@ -474,21 +493,16 @@ export const App: React.FC = () => {
           </span>
         </div>
 
-        {/* 4-Step Navigation Tabs */}
+        {/* Workspace tabs */}
         <nav className="flex items-center gap-1">
-          {[
-            { id: 1, label: '01.REFERENCE', icon: Layers },
-            { id: 2, label: '02.VALIDATE', icon: Sparkles },
-            { id: 3, label: '03.BATCH', icon: FolderOpen },
-            { id: 4, label: '04.PROCESS', icon: Cpu },
-          ].map((item) => {
+          {TABS.map((item) => {
             const Icon = item.icon;
-            const isActive = step === item.id;
+            const isActive = tab === item.id;
             return (
               <button
                 key={item.id}
                 type="button"
-                onClick={() => setStep(item.id as 1 | 2 | 3 | 4)}
+                onClick={() => setTab(item.id)}
                 className={`h-7 px-2.5 flex items-center gap-1.5 text-[10px] font-bold tracking-wider border cursor-pointer transition-all ${
                   isActive
                     ? 'bg-[var(--bb-surface)] text-[var(--bb-gold)] border-[var(--bb-gold)] shadow-[0_0_8px_rgba(245,185,49,0.2)]'
@@ -576,12 +590,12 @@ export const App: React.FC = () => {
 
         {/* Left Side: Fully Contained Light-Table Viewport */}
         <div className="flex-1 min-w-0 h-full border-r border-[var(--bb-border)] flex flex-col bg-[var(--bb-vacuum)] overflow-hidden">
-          {compare ? (
+          {tab !== 'reference' && compare ? (
             <BeforeAfter
               key={compare.source}
               beforeSrc={compare.beforeDataUrl}
               afterSrc={compare.afterDataUrl}
-              onClose={() => setCompare(null)}
+              onClose={() => { setCompare(null); setTab('reference'); }}
             />
           ) : (
             <LightTableOverlay
@@ -599,7 +613,7 @@ export const App: React.FC = () => {
 
         {/* Right Side: Fixed Inspector HUD */}
         <aside className="w-[380px] shrink-0 h-full bg-[var(--bb-surface)] p-3.5 flex flex-col justify-between overflow-y-auto border-l border-[var(--bb-border)]">
-          {step === 1 && (
+          {tab === 'reference' && (
             <div className="space-y-3.5">
               <div className="border-b border-[var(--bb-border)] pb-2">
                 <h2 className="text-[11px] font-bold text-[var(--bb-gold)] tracking-wider flex items-center gap-1.5">
@@ -713,7 +727,7 @@ export const App: React.FC = () => {
             </div>
           )}
 
-          {step === 2 && (
+          {tab === 'validate' && (
             <div className="space-y-3.5">
               <div className="border-b border-[var(--bb-border)] pb-2">
                 <h2 className="text-[11px] font-bold text-[var(--bb-gold)] tracking-wider">
@@ -732,29 +746,56 @@ export const App: React.FC = () => {
                 gateFailures={deriveResult?.gateFailures}
               />
 
-              {/* Correct images with the derived profile */}
-              <div className="space-y-1.5 p-2.5 bg-[var(--bb-panel)] border border-[var(--bb-border)]" data-testid="correct-panel">
-                <div className="text-[9px] text-[var(--bb-smoke)] font-bold tracking-wider">CORRECT AN IMAGE</div>
-                <div className="grid grid-cols-2 gap-1.5">
-                  <button
-                    type="button"
-                    onClick={() => runCorrect(referencePath, false)}
-                    disabled={isProcessing || !deriveResult || !referencePath}
-                    className="ui-btn ui-btn-secondary"
-                    data-testid="compare-reference"
-                  >
-                    <SearchCheck className="w-3 h-3" /> BEFORE / AFTER
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => runCorrect(referencePath, true)}
-                    disabled={isProcessing || !deriveResult || !referencePath}
-                    className="ui-btn ui-btn-secondary"
-                    data-testid="save-reference"
-                  >
-                    <Save className="w-3 h-3" /> SAVE REFERENCE
-                  </button>
+              <div className="pt-2 flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setTab('export')}
+                  disabled={!deriveResult}
+                  className="ui-btn ui-btn-primary flex-1 h-9"
+                >
+                  CONTINUE TO EXPORT →
+                </button>
+              </div>
+            </div>
+          )}
+
+          {tab === 'export' && (
+            <div className="space-y-3.5">
+              <div className="border-b border-[var(--bb-border)] pb-2">
+                <h2 className="text-[11px] font-bold text-[var(--bb-gold)] tracking-wider flex items-center gap-1.5">
+                  <Save className="w-3.5 h-3.5 text-[var(--bb-amber)]" />
+                  EXPORT
+                </h2>
+                <p className="text-[10px] text-[var(--bb-smoke)]">
+                  Save corrected images, interchange files, and run batches with the derived profile.
+                </p>
+              </div>
+
+              {!deriveResult && (
+                <div className="p-2.5 bg-[var(--bb-panel)] border border-[var(--bb-border)] text-[10px] text-[var(--bb-smoke)]">
+                  Derive a profile on the REFERENCE tab to enable exports.
                 </div>
+              )}
+
+              {deriveResult && (
+                <div className="p-2.5 bg-[var(--bb-panel)] border border-[var(--bb-border)] space-y-0.5 text-[10px]" data-testid="profile-files">
+                  <div className="text-[9px] text-[var(--bb-smoke)] font-bold tracking-wider">PROFILE FILES</div>
+                  <div className="text-[var(--bb-gold)] break-all">{deriveResult.profilePath}</div>
+                  <div className="text-[var(--bb-gold)] break-all">{deriveResult.reportPath}</div>
+                </div>
+              )}
+
+              <div className="space-y-1.5 p-2.5 bg-[var(--bb-panel)] border border-[var(--bb-border)]" data-testid="correct-panel">
+                <div className="text-[9px] text-[var(--bb-smoke)] font-bold tracking-wider">CORRECTED IMAGES (16-BIT TIFF)</div>
+                <button
+                  type="button"
+                  onClick={() => runCorrect(referencePath, true)}
+                  disabled={isProcessing || !deriveResult || !referencePath}
+                  className="ui-btn ui-btn-secondary w-full"
+                  data-testid="save-reference"
+                >
+                  <Save className="w-3 h-3" /> SAVE REFERENCE
+                </button>
                 <button
                   type="button"
                   onClick={handleCorrectSingle}
@@ -774,233 +815,205 @@ export const App: React.FC = () => {
                 )}
               </div>
 
-              <div className="pt-2 flex gap-2">
-                <button
-                  type="button"
-                  onClick={() => setStep(3)}
-                  disabled={!deriveResult}
-                  className="ui-btn ui-btn-primary flex-1 h-9"
-                >
-                  CONTINUE TO BATCH QUEUE →
-                </button>
-              </div>
-            </div>
-          )}
-
-          {step === 3 && (
-            <div className="space-y-3.5">
-              <div className="border-b border-[var(--bb-border)] pb-2">
-                <h2 className="text-[11px] font-bold text-[var(--bb-gold)] tracking-wider flex items-center gap-1.5">
-                  <FolderOpen className="w-3.5 h-3.5 text-[var(--bb-amber)]" />
-                  BATCH PROCESSING DIRECTORY
-                </h2>
-                <p className="text-[10px] text-[var(--bb-smoke)]">
-                  Select matching image folders for batch calibration and 16-bit TIFF export.
-                </p>
-              </div>
-
-              <div className="space-y-1">
-                <label className="text-[9px] text-[var(--bb-smoke)] font-bold tracking-wider">SOURCE FOLDER</label>
-                <div className="flex gap-1.5">
-                  <input
-                    type="text"
-                    value={batchInputPath}
-                    onChange={(e) => setBatchInputPath(e.target.value)}
-                    placeholder="SOURCE DIRECTORY…"
-                    className="flex-1 bg-[var(--bb-vacuum)] border border-[var(--bb-border)] px-2.5 py-1 text-[11px] text-[var(--bb-sand)] focus:border-[var(--bb-gold)] outline-none min-w-0"
-                  />
-                  <button
-                    type="button"
-                    className="ui-btn ui-btn-secondary shrink-0"
-                    onClick={async () => {
-                      try {
-                        const path = await chooseDirectory();
-                        if (path) setBatchInputPath(path);
-                      } catch {
-                        setErrorMessage('Directory picker requires the desktop application.');
-                      }
-                    }}
-                  >
-                    <FolderOpen className="w-3 h-3" /> CHOOSE
-                  </button>
-                </div>
-              </div>
-
-              <div className="space-y-1">
-                <label className="text-[9px] text-[var(--bb-smoke)] font-bold tracking-wider">DESTINATION FOLDER</label>
-                <div className="flex gap-1.5">
-                  <input
-                    type="text"
-                    value={batchOutputPath}
-                    onChange={(e) => setBatchOutputPath(e.target.value)}
-                    placeholder="OUTPUT DIRECTORY…"
-                    className="flex-1 bg-[var(--bb-vacuum)] border border-[var(--bb-border)] px-2.5 py-1 text-[11px] text-[var(--bb-sand)] focus:border-[var(--bb-gold)] outline-none min-w-0"
-                  />
-                  <button
-                    type="button"
-                    className="ui-btn ui-btn-secondary shrink-0"
-                    onClick={async () => {
-                      try {
-                        const path = await chooseDirectory();
-                        if (path) setBatchOutputPath(path);
-                      } catch {
-                        setErrorMessage('Directory picker requires the desktop application.');
-                      }
-                    }}
-                  >
-                    <FolderOpen className="w-3 h-3" /> CHOOSE
-                  </button>
-                </div>
-              </div>
-
-              {/* Overwrite Safety Policy */}
-              <div className="p-2.5 bg-[var(--bb-panel)] border border-[var(--bb-border)]">
-                <label className="flex items-center gap-2 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={overwriteOutputs}
-                    onChange={(e) => setOverwriteOutputs(e.target.checked)}
-                    className="accent-[var(--bb-amber)]"
-                  />
-                  <span className="text-[11px] font-bold text-[var(--bb-sand)]">
-                    OVERWRITE EXISTING OUTPUTS
-                  </span>
-                </label>
-                <p className="text-[9px] text-[var(--bb-smoke)] mt-0.5">
-                  Default: Skips existing files to prevent unintended data loss.
-                </p>
-              </div>
-
-              <div className="grid grid-cols-4 gap-1.5">
-                <button
-                  type="button"
-                  onClick={handleRunBatch}
-                  disabled={isProcessing || !batchInputPath || !batchOutputPath || !deriveResult}
-                  className="ui-btn ui-btn-primary col-span-3 h-9"
-                >
-                  <Cpu className="w-3.5 h-3.5" />
-                  {isProcessing ? 'PROCESSING…' : 'START BATCH'}
-                </button>
-                <button
-                  type="button"
-                  disabled={!isProcessing || !batchProgress}
-                  onClick={async () => {
-                    try {
-                      await backend.cancelBatch();
-                    } catch (error: unknown) {
-                      setErrorMessage(error instanceof Error ? error.message : String(error));
-                    }
-                  }}
-                  className="ui-btn ui-btn-ghost h-9"
-                >
-                  <X className="w-3 h-3" /> STOP
-                </button>
-              </div>
-            </div>
-          )}
-
-          {step === 4 && (
-            <div className="space-y-3.5">
-              <div className="border-b border-[var(--bb-border)] pb-2">
-                <h2 className="text-[11px] font-bold text-[var(--bb-gold)] tracking-wider flex items-center gap-1.5">
-                  <CheckCircle2 className="w-3.5 h-3.5 text-[var(--bb-gold)]" />
-                  BATCH PROCESSING COMPLETE
-                </h2>
-                <p className="text-[10px] text-[var(--bb-smoke)]">
-                  Summary of transformed 16-bit linear sRGB TIFF outputs.
-                </p>
-              </div>
-
-              {batchSummary && (
-                <div className="space-y-2.5">
-                  <div className="grid grid-cols-3 gap-1.5 text-center">
-                    <div className="p-1.5 bg-[var(--bb-panel)] border border-[var(--bb-border)]">
-                      <div className="text-[9px] text-[var(--bb-smoke)] font-bold">SUCCEEDED</div>
-                      <div className="text-sm font-bold text-[var(--bb-gold)]">
-                        {batchSummary.succeeded.length}
-                      </div>
-                    </div>
-                    <div className="p-1.5 bg-[var(--bb-panel)] border border-[var(--bb-border)]">
-                      <div className="text-[9px] text-[var(--bb-smoke)] font-bold">SKIPPED</div>
-                      <div className="text-sm font-bold text-[var(--bb-amber)]">
-                        {batchSummary.skipped.length}
-                      </div>
-                    </div>
-                    <div className="p-1.5 bg-[var(--bb-panel)] border border-[var(--bb-border)]">
-                      <div className="text-[9px] text-[var(--bb-smoke)] font-bold">FAILED</div>
-                      <div className="text-sm font-bold text-[var(--bb-crimson)]">
-                        {batchSummary.failed.length}
-                      </div>
-                    </div>
-                  </div>
-
-                  {batchSummary.failed.length > 0 && (
-                    <div
-                      className="p-2.5 bg-[var(--bb-ember-dark)]/40 border border-[var(--bb-crimson)] space-y-1"
-                      data-testid="batch-failures"
-                    >
-                      <div className="text-[10px] font-bold text-[var(--bb-orange)] tracking-wider">
-                        FAILED FILES
-                      </div>
-                      <ul className="space-y-1 text-[9px] text-[var(--bb-sand)] max-h-40 overflow-y-auto">
-                        {batchSummary.failed.map((item) => (
-                          <li key={item.file}>
-                            <span className="text-[var(--bb-gold)] break-all">{item.file}</span>
-                            <div className="text-[var(--bb-orange)]">{item.error}</div>
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-
-                  {batchSummary.warnings.length > 0 && (
-                    <div
-                      className="p-2.5 bg-[var(--bb-panel)] border border-[var(--bb-orange)] space-y-1"
-                      data-testid="batch-warnings"
-                    >
-                      <div className="text-[10px] font-bold text-[var(--bb-orange)] tracking-wider">
-                        WARNINGS ({batchSummary.warnings.length})
-                      </div>
-                      <ul className="space-y-1 text-[9px] text-[var(--bb-sand)] max-h-40 overflow-y-auto">
-                        {batchSummary.warnings.map((item, i) => (
-                          <li key={`${item.file}-${i}`}>
-                            <span className="text-[var(--bb-gold)] break-all">{item.file}</span>
-                            <div className="text-[var(--bb-orange)]">⚠ {item.warning}</div>
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-
-                  {/* Export Options */}
-                  <div className="p-2.5 bg-[var(--bb-vacuum)] border border-[var(--bb-border)] space-y-1.5">
-                    <span className="text-[9px] font-bold text-[var(--bb-smoke)] tracking-wider">EXPORT INTERCHANGE</span>
-                    <div className="grid grid-cols-2 gap-1.5">
-                      {(['clf', 'cube'] as const).map((format) => (
-                        <button
-                          key={format}
-                          type="button"
-                          className="ui-btn ui-btn-secondary"
-                          onClick={async () => {
-                            if (!deriveResult?.profilePath) {
-                              setErrorMessage('Derive a profile before exporting.');
-                              return;
-                            }
-                            try {
-                              const output = await chooseSavePath(`colorbalance.${format}`, format);
-                              if (output) await backend.exportProfile(deriveResult.profilePath, format, output, 33);
-                            } catch (error: unknown) {
-                              setErrorMessage(error instanceof Error ? error.message : String(error));
-                            }
-                          }}
-                        >
-                          <Save className="w-3 h-3" /> .{format.toUpperCase()}
-                        </button>
-                      ))}
-                    </div>
+                <div className="p-2.5 bg-[var(--bb-vacuum)] border border-[var(--bb-border)] space-y-1.5">
+                  <span className="text-[9px] font-bold text-[var(--bb-smoke)] tracking-wider">EXPORT INTERCHANGE</span>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    {(['clf', 'cube'] as const).map((format) => (
+                      <button
+                        key={format}
+                        type="button"
+                        className="ui-btn ui-btn-secondary"
+                        onClick={async () => {
+                          if (!deriveResult?.profilePath) {
+                            setErrorMessage('Derive a profile before exporting.');
+                            return;
+                          }
+                          try {
+                            const output = await chooseSavePath(`colorbalance.${format}`, format);
+                            if (output) await backend.exportProfile(deriveResult.profilePath, format, output, 33);
+                          } catch (error: unknown) {
+                            setErrorMessage(error instanceof Error ? error.message : String(error));
+                          }
+                        }}
+                      >
+                        <Save className="w-3 h-3" /> .{format.toUpperCase()}
+                      </button>
+                    ))}
                   </div>
                 </div>
-              )}
+
+              <div className="border-t border-[var(--bb-border)] pt-3 space-y-3.5">
+                <div>
+                  <h3 className="text-[11px] font-bold text-[var(--bb-gold)] tracking-wider flex items-center gap-1.5">
+                    <FolderOpen className="w-3.5 h-3.5 text-[var(--bb-amber)]" />
+                    BATCH
+                  </h3>
+                  <p className="text-[10px] text-[var(--bb-smoke)]">
+                    Select matching image folders for batch correction and 16-bit TIFF export.
+                  </p>
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-[9px] text-[var(--bb-smoke)] font-bold tracking-wider">SOURCE FOLDER</label>
+                  <div className="flex gap-1.5">
+                    <input
+                      type="text"
+                      value={batchInputPath}
+                      onChange={(e) => setBatchInputPath(e.target.value)}
+                      placeholder="SOURCE DIRECTORY…"
+                      className="flex-1 bg-[var(--bb-vacuum)] border border-[var(--bb-border)] px-2.5 py-1 text-[11px] text-[var(--bb-sand)] focus:border-[var(--bb-gold)] outline-none min-w-0"
+                    />
+                    <button
+                      type="button"
+                      className="ui-btn ui-btn-secondary shrink-0"
+                      onClick={async () => {
+                        try {
+                          const path = await chooseDirectory();
+                          if (path) setBatchInputPath(path);
+                        } catch {
+                          setErrorMessage('Directory picker requires the desktop application.');
+                        }
+                      }}
+                    >
+                      <FolderOpen className="w-3 h-3" /> CHOOSE
+                    </button>
+                  </div>
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-[9px] text-[var(--bb-smoke)] font-bold tracking-wider">DESTINATION FOLDER</label>
+                  <div className="flex gap-1.5">
+                    <input
+                      type="text"
+                      value={batchOutputPath}
+                      onChange={(e) => setBatchOutputPath(e.target.value)}
+                      placeholder="OUTPUT DIRECTORY…"
+                      className="flex-1 bg-[var(--bb-vacuum)] border border-[var(--bb-border)] px-2.5 py-1 text-[11px] text-[var(--bb-sand)] focus:border-[var(--bb-gold)] outline-none min-w-0"
+                    />
+                    <button
+                      type="button"
+                      className="ui-btn ui-btn-secondary shrink-0"
+                      onClick={async () => {
+                        try {
+                          const path = await chooseDirectory();
+                          if (path) setBatchOutputPath(path);
+                        } catch {
+                          setErrorMessage('Directory picker requires the desktop application.');
+                        }
+                      }}
+                    >
+                      <FolderOpen className="w-3 h-3" /> CHOOSE
+                    </button>
+                  </div>
+                </div>
+
+                {/* Overwrite Safety Policy */}
+                <div className="p-2.5 bg-[var(--bb-panel)] border border-[var(--bb-border)]">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={overwriteOutputs}
+                      onChange={(e) => setOverwriteOutputs(e.target.checked)}
+                      className="accent-[var(--bb-amber)]"
+                    />
+                    <span className="text-[11px] font-bold text-[var(--bb-sand)]">
+                      OVERWRITE EXISTING OUTPUTS
+                    </span>
+                  </label>
+                  <p className="text-[9px] text-[var(--bb-smoke)] mt-0.5">
+                    Default: Skips existing files to prevent unintended data loss.
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-4 gap-1.5">
+                  <button
+                    type="button"
+                    onClick={handleRunBatch}
+                    disabled={isProcessing || !batchInputPath || !batchOutputPath || !deriveResult}
+                    className="ui-btn ui-btn-primary col-span-3 h-9"
+                  >
+                    <Cpu className="w-3.5 h-3.5" />
+                    {isProcessing ? 'PROCESSING…' : 'START BATCH'}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!isProcessing || !batchProgress}
+                    onClick={async () => {
+                      try {
+                        await backend.cancelBatch();
+                      } catch (error: unknown) {
+                        setErrorMessage(error instanceof Error ? error.message : String(error));
+                      }
+                    }}
+                    className="ui-btn ui-btn-ghost h-9"
+                  >
+                    <X className="w-3 h-3" /> STOP
+                  </button>
+                </div>
+
+                {batchSummary && (
+                  <div className="space-y-2.5">
+                    <div className="grid grid-cols-3 gap-1.5 text-center">
+                      <div className="p-1.5 bg-[var(--bb-panel)] border border-[var(--bb-border)]">
+                        <div className="text-[9px] text-[var(--bb-smoke)] font-bold">SUCCEEDED</div>
+                        <div className="text-sm font-bold text-[var(--bb-gold)]">
+                          {batchSummary.succeeded.length}
+                        </div>
+                      </div>
+                      <div className="p-1.5 bg-[var(--bb-panel)] border border-[var(--bb-border)]">
+                        <div className="text-[9px] text-[var(--bb-smoke)] font-bold">SKIPPED</div>
+                        <div className="text-sm font-bold text-[var(--bb-amber)]">
+                          {batchSummary.skipped.length}
+                        </div>
+                      </div>
+                      <div className="p-1.5 bg-[var(--bb-panel)] border border-[var(--bb-border)]">
+                        <div className="text-[9px] text-[var(--bb-smoke)] font-bold">FAILED</div>
+                        <div className="text-sm font-bold text-[var(--bb-crimson)]">
+                          {batchSummary.failed.length}
+                        </div>
+                      </div>
+                    </div>
+
+                    {batchSummary.failed.length > 0 && (
+                      <div
+                        className="p-2.5 bg-[var(--bb-ember-dark)]/40 border border-[var(--bb-crimson)] space-y-1"
+                        data-testid="batch-failures"
+                      >
+                        <div className="text-[10px] font-bold text-[var(--bb-orange)] tracking-wider">
+                          FAILED FILES
+                        </div>
+                        <ul className="space-y-1 text-[9px] text-[var(--bb-sand)] max-h-40 overflow-y-auto">
+                          {batchSummary.failed.map((item) => (
+                            <li key={item.file}>
+                              <span className="text-[var(--bb-gold)] break-all">{item.file}</span>
+                              <div className="text-[var(--bb-orange)]">{item.error}</div>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+
+                    {batchSummary.warnings.length > 0 && (
+                      <div
+                        className="p-2.5 bg-[var(--bb-panel)] border border-[var(--bb-orange)] space-y-1"
+                        data-testid="batch-warnings"
+                      >
+                        <div className="text-[10px] font-bold text-[var(--bb-orange)] tracking-wider">
+                          WARNINGS ({batchSummary.warnings.length})
+                        </div>
+                        <ul className="space-y-1 text-[9px] text-[var(--bb-sand)] max-h-40 overflow-y-auto">
+                          {batchSummary.warnings.map((item, i) => (
+                            <li key={`${item.file}-${i}`}>
+                              <span className="text-[var(--bb-gold)] break-all">{item.file}</span>
+                              <div className="text-[var(--bb-orange)]">⚠ {item.warning}</div>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
             </div>
           )}
 

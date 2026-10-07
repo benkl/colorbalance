@@ -7,18 +7,18 @@ const initial = {
   referencePath: '',
   batchInputPath: '',
   batchOutputPath: '',
-  step: 2,
+  tab: 'validate',
   errorMessage: '',
 };
 
-test('native drag-drop selects the first supported image and returns to reference step', () => {
+test('native drag-drop selects the first supported image and returns to the reference tab', () => {
   const next = interaction.applyDroppedReference(initial, [
     'C:/incoming/readme.txt',
     'C:/incoming/reference.dng',
     'C:/incoming/second.jpg',
   ]);
   assert.equal(next.referencePath, 'C:/incoming/reference.dng');
-  assert.equal(next.step, 1);
+  assert.equal(next.tab, 'reference');
   assert.equal(next.errorMessage, '');
   assert.equal(interaction.canDerive(next), true);
 });

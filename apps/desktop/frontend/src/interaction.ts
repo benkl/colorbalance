@@ -2,7 +2,7 @@ export interface InteractionState {
   referencePath: string;
   batchInputPath: string;
   batchOutputPath: string;
-  step: 1 | 2 | 3 | 4;
+  tab: 'reference' | 'validate' | 'export';
   errorMessage: string;
 }
 
@@ -21,7 +21,7 @@ export function applyDroppedReference(state: InteractionState, paths: string[]):
   return {
     ...state,
     referencePath,
-    step: 1,
+    tab: 'reference',
     errorMessage: '',
   };
 }
@@ -33,7 +33,7 @@ export function applyDialogSelection(
 ): InteractionState {
   if (!path) return state;
   if (target === 'reference') {
-    return { ...state, referencePath: path, step: 1, errorMessage: '' };
+    return { ...state, referencePath: path, tab: 'reference', errorMessage: '' };
   }
   if (target === 'batch-input') {
     return { ...state, batchInputPath: path, errorMessage: '' };
