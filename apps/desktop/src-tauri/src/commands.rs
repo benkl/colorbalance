@@ -75,6 +75,8 @@ pub struct ValidationResponse {
 }
 
 /// One chart patch, source vs. corrected vs. target, for the validation table.
+/// `*_srgb` are the same colors encoded to clamped display sRGB (0..1) by core,
+/// so the UI paints swatches without doing color math.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PatchResponse {
@@ -82,7 +84,14 @@ pub struct PatchResponse {
     source_rgb: [f64; 3],
     corrected_rgb: [f64; 3],
     target_rgb: [f64; 3],
+    corrected_srgb: [f64; 3],
+    target_srgb: [f64; 3],
     delta_e: f64,
+}
+
+/// Linear sRGB to clamped, display-encoded sRGB.
+fn display_srgb(linear: [f64; 3]) -> [f64; 3] {
+    linear.map(|v| colorbalance_core::color::srgb_encode(v.clamp(0.0, 1.0)))
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -536,6 +545,8 @@ pub fn derive_profile_cached(
             source_rgb: row.source_rgb,
             corrected_rgb: row.corrected_rgb,
             target_rgb: row.target_rgb,
+            corrected_srgb: display_srgb(row.corrected_rgb),
+            target_srgb: display_srgb(row.target_rgb),
             delta_e: row.delta_e,
         })
         .collect();

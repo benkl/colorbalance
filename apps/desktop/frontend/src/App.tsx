@@ -10,6 +10,8 @@ import { LightTableOverlay } from './components/LightTableOverlay';
 import { ValidationPanel } from './components/ValidationPanel';
 import { QualityFailures } from './components/QualityFailures';
 import { BeforeAfter } from './components/BeforeAfter';
+import { PatchGrid } from './components/PatchGrid';
+import { BatchResults } from './components/BatchResults';
 import { DiagnosticConsole } from './components/DiagnosticConsole';
 import { logger } from './logger';
 import {
@@ -59,6 +61,10 @@ export const App: React.FC = () => {
   const [imageSize, setImageSize] = useState<{ width: number; height: number }>({ width: 480, height: 320 });
   const [chartRevision, setChartRevision] = useState<ChartRevision | ''>('');
   const [compare, setCompare] = useState<(CorrectResult & { source: string }) | null>(null);
+  const [selectedPatch, setSelectedPatch] = useState<string | null>(null);
+  const [validateView, setValidateView] = useState<'patches' | 'image'>('patches');
+  /** Which Export result the viewport shows: the last single image written or the last batch run. */
+  const [lastExport, setLastExport] = useState<'single' | 'batch' | null>(null);
   const retainedPreviews = useRef(new Set<string>());
   const visiblePreviews = useRef(new Set<string>());
   useEffect(() => {
@@ -268,6 +274,8 @@ export const App: React.FC = () => {
     loadedReferencePath.current = null;
     setLoadedPath(null);
     setCompare(null);
+    setSelectedPatch(null);
+    setValidateView('patches');
     setDetectionStatus('idle');
     setDetectionError('');
     setDeriveResult(null);
@@ -446,13 +454,13 @@ export const App: React.FC = () => {
         patchCount: 24,
       },
       patches: [
-        { patch: 'DarkSkin', sourceRgb: [0.17, 0.08, 0.05], correctedRgb: [0.174, 0.079, 0.053], targetRgb: [0.174, 0.079, 0.053], deltaE: 0.42 },
-        { patch: 'LightSkin', sourceRgb: [0.38, 0.25, 0.22], correctedRgb: [0.382, 0.248, 0.219], targetRgb: [0.385, 0.247, 0.218], deltaE: 0.68 },
-        { patch: 'BlueSky', sourceRgb: [0.11, 0.18, 0.32], correctedRgb: [0.112, 0.179, 0.318], targetRgb: [0.114, 0.181, 0.315], deltaE: 0.81 },
-        { patch: 'Foliage', sourceRgb: [0.13, 0.21, 0.09], correctedRgb: [0.131, 0.209, 0.089], targetRgb: [0.133, 0.208, 0.091], deltaE: 0.74 },
-        { patch: 'White', sourceRgb: [0.88, 0.88, 0.83], correctedRgb: [0.879, 0.885, 0.834], targetRgb: [0.879, 0.885, 0.834], deltaE: 0.15 },
-        { patch: 'Neutral8', sourceRgb: [0.58, 0.58, 0.56], correctedRgb: [0.582, 0.584, 0.562], targetRgb: [0.583, 0.584, 0.561], deltaE: 0.22 },
-        { patch: 'Black', sourceRgb: [0.03, 0.03, 0.03], correctedRgb: [0.031, 0.031, 0.032], targetRgb: [0.031, 0.031, 0.032], deltaE: 0.09 },
+        { patch: 'DarkSkin', sourceRgb: [0.17, 0.08, 0.05], correctedRgb: [0.174, 0.079, 0.053], targetRgb: [0.174, 0.079, 0.053], correctedSrgb: [0.454, 0.311, 0.255], targetSrgb: [0.454, 0.311, 0.255], deltaE: 0.42 },
+        { patch: 'LightSkin', sourceRgb: [0.38, 0.25, 0.22], correctedRgb: [0.382, 0.248, 0.219], targetRgb: [0.385, 0.247, 0.218], correctedSrgb: [0.652, 0.535, 0.505], targetSrgb: [0.654, 0.534, 0.504], deltaE: 0.68 },
+        { patch: 'BlueSky', sourceRgb: [0.11, 0.18, 0.32], correctedRgb: [0.112, 0.179, 0.318], targetRgb: [0.114, 0.181, 0.315], correctedSrgb: [0.369, 0.46, 0.6], targetSrgb: [0.372, 0.463, 0.597], deltaE: 0.81 },
+        { patch: 'Foliage', sourceRgb: [0.13, 0.21, 0.09], correctedRgb: [0.131, 0.209, 0.089], targetRgb: [0.133, 0.208, 0.091], correctedSrgb: [0.397, 0.495, 0.33], targetSrgb: [0.4, 0.493, 0.334], deltaE: 0.74 },
+        { patch: 'White', sourceRgb: [0.88, 0.88, 0.83], correctedRgb: [0.879, 0.885, 0.834], targetRgb: [0.879, 0.885, 0.834], correctedSrgb: [0.945, 0.948, 0.923], targetSrgb: [0.945, 0.948, 0.923], deltaE: 0.15 },
+        { patch: 'Neutral8', sourceRgb: [0.58, 0.58, 0.56], correctedRgb: [0.582, 0.584, 0.562], targetRgb: [0.583, 0.584, 0.561], correctedSrgb: [0.787, 0.788, 0.775], targetSrgb: [0.788, 0.788, 0.774], deltaE: 0.22 },
+        { patch: 'Black', sourceRgb: [0.03, 0.03, 0.03], correctedRgb: [0.031, 0.031, 0.032], targetRgb: [0.031, 0.031, 0.032], correctedSrgb: [0.193, 0.193, 0.196], targetSrgb: [0.193, 0.193, 0.196], deltaE: 0.09 },
       ],
       qualityOverride: false,
       gateFailures: [],
@@ -481,6 +489,8 @@ export const App: React.FC = () => {
         );
         setDeriveResult(result);
         setCompare(null);
+        setSelectedPatch(null);
+        setValidateView('patches');
         previewAttempt.current = '';
         setTab('validate');
       } catch (error: unknown) {
@@ -526,6 +536,7 @@ export const App: React.FC = () => {
       retainedPreviews.current.add(result.beforeUrl);
       retainedPreviews.current.add(result.afterUrl);
       setCompare({ ...result, source: input });
+      if (save) setLastExport('single');
     } catch (error: unknown) {
       setErrorMessage(error instanceof Error ? error.message : String(error));
     } finally {
@@ -554,12 +565,78 @@ export const App: React.FC = () => {
 
   const loadedCamera = inspectResult ? { make: inspectResult.camera.make, model: inspectResult.camera.model } : null;
 
+  const viewportMessage = (title: string, body: string) => (
+    <div className="flex-1 flex items-center justify-center p-8 text-center" data-testid="viewport-message">
+      <div className="max-w-sm space-y-1.5">
+        <div className="text-xs font-bold text-[var(--bb-sand)]">{title}</div>
+        <p className="text-[11px] text-[var(--bb-smoke)]">{body}</p>
+      </div>
+    </div>
+  );
+  const comparison = compare && (
+    <div className="flex-1 min-h-0 flex flex-col">
+      <div className="shrink-0 px-3 py-1.5 border-b border-[var(--bb-border)] text-[10px] text-[var(--bb-smoke)] truncate" data-testid="compare-caption" title={compare.outputPath ?? compare.source}>
+        <span className="text-[var(--bb-sand)]">{compare.source.split(/[\\/]/).pop()}</span>
+        {' · '}
+        {compare.outputPath ? `saved to ${compare.outputPath}` : 'preview only, nothing written'}
+      </div>
+      <div className="flex-1 min-h-0 relative">
+        <BeforeAfter key={compare.source} beforeSrc={compare.beforeUrl} afterSrc={compare.afterUrl} />
+      </div>
+    </div>
+  );
+  const validateViewport = deriveResult ? (
+    <div className="flex-1 min-h-0 flex flex-col">
+      <div className="shrink-0 flex gap-2 px-3 py-2 border-b border-[var(--bb-border)]">
+        {(['patches', 'image'] as const).map((view) => (
+          <button
+            key={view}
+            type="button"
+            onClick={() => setValidateView(view)}
+            aria-pressed={validateView === view}
+            data-testid={`validate-view-${view}`}
+            className={`px-2 py-0.5 border text-[10px] ${
+              validateView === view
+                ? 'border-[var(--bb-gold)] text-[var(--bb-gold)]'
+                : 'border-[var(--bb-border)] text-[var(--bb-smoke)] hover:text-[var(--bb-sand)]'
+            }`}
+          >
+            {view === 'patches' ? 'PATCHES' : 'IMAGE'}
+          </button>
+        ))}
+      </div>
+      {validateView === 'patches' ? (
+        <div className="flex-1 min-h-0">
+          <PatchGrid patches={deriveResult.patches} selected={selectedPatch} onSelect={setSelectedPatch} />
+        </div>
+      ) : (
+        comparison ??
+        viewportMessage('No preview yet', isProcessing ? 'Rendering the corrected reference…' : 'The corrected reference appears here once it is rendered.')
+      )}
+    </div>
+  ) : (
+    viewportMessage('No fit to show', 'Derive a profile in Reference to see how each chart patch matched.')
+  );
+  const showBatch = lastExport === 'batch' && (isProcessing || batchSummary !== null);
+  const exportViewport = showBatch ? (
+    <BatchResults summary={batchSummary} progress={batchProgress} running={isProcessing} />
+  ) : (
+    comparison ??
+    (!exportProfile
+      ? viewportMessage('No active profile', 'Derive a profile in Reference, or choose one in Library.')
+      : activeLibrary
+        ? viewportMessage('No preview for a Library profile', 'The reference image may come from another camera. Apply the profile to an image or folder to see a result.')
+        : viewportMessage('No preview yet', isProcessing ? 'Rendering the corrected reference…' : 'The corrected reference appears here once it is rendered.'))
+  );
+
   const handleRunBatch = () => {
     if (!batchInputPath || !batchOutputPath || !exportProfile) {
       setErrorMessage('Select source and destination folders, and derive a profile or choose a library entry.');
       return;
     }
     setErrorMessage('');
+    setBatchSummary(null);
+    setLastExport('batch');
     beginWork();
     void (async () => {
       try {
@@ -789,13 +866,10 @@ export const App: React.FC = () => {
               activeId={activeLibrary?.id ?? null}
               onSelect={setLibrarySelectedId}
             />
-          ) : tab !== 'reference' && compare ? (
-            <BeforeAfter
-              key={compare.source}
-              beforeSrc={compare.beforeUrl}
-              afterSrc={compare.afterUrl}
-              onClose={() => { setCompare(null); setTab('reference'); }}
-            />
+          ) : tab === 'validate' ? (
+            validateViewport
+          ) : tab === 'export' ? (
+            exportViewport
           ) : (
             <LightTableOverlay
               imageSrc={referencePreview}
@@ -948,6 +1022,8 @@ export const App: React.FC = () => {
                 warnings={deriveResult?.warnings}
                 qualityPassed={deriveResult?.qualityPassed}
                 gateFailures={deriveResult?.gateFailures}
+                selectedPatch={selectedPatch}
+                onSelectPatch={setSelectedPatch}
               />
 
               <div className="space-y-1.5 border-t border-[var(--bb-border)] pt-3" data-testid="save-library-panel">

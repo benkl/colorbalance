@@ -72,8 +72,23 @@ fn derive_profile_returns_every_field_the_ui_reads() {
     for row in patches {
         assert!(row["patch"].is_string());
         assert!(row["deltaE"].is_number());
-        for key in ["sourceRgb", "correctedRgb", "targetRgb"] {
+        for key in [
+            "sourceRgb",
+            "correctedRgb",
+            "targetRgb",
+            "correctedSrgb",
+            "targetSrgb",
+        ] {
             assert_eq!(row[key].as_array().map(Vec::len), Some(3), "row.{key}");
+        }
+        for key in ["correctedSrgb", "targetSrgb"] {
+            for channel in row[key].as_array().unwrap() {
+                let v = channel.as_f64().expect("number");
+                assert!(
+                    (0.0..=1.0).contains(&v),
+                    "row.{key} channel {v} outside 0..1"
+                );
+            }
         }
     }
 

@@ -150,6 +150,11 @@ export function chooseBatchProfile(
   return null;
 }
 
+/** CSS `rgb()` from core's display-encoded sRGB (0..1). Rounds to 8 bits; no color conversion happens here. */
+export function cssColor(srgb: readonly [number, number, number]): string {
+  return `rgb(${srgb.map((channel) => Math.round(channel * 255)).join(', ')})`;
+}
+
 const LIBRARY_PATH_KEY = 'colorbalance.libraryPath';
 
 /** The remembered library folder. Empty when none is stored or storage is unavailable (tests, locked-down webview). */

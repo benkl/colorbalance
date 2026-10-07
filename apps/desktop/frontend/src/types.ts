@@ -96,6 +96,10 @@ export interface PatchValidation {
   sourceRgb: [number, number, number];
   correctedRgb: [number, number, number];
   targetRgb: [number, number, number];
+  /** Display-encoded sRGB (0..1) of the corrected color, computed by core. */
+  correctedSrgb: [number, number, number];
+  /** Display-encoded sRGB (0..1) of the dataset target, computed by core. */
+  targetSrgb: [number, number, number];
   deltaE: number;
 }
 

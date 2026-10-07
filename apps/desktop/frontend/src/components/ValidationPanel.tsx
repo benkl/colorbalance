@@ -1,6 +1,7 @@
 import React from 'react';
 import type { InspectGateFailure, PatchValidation, ValidationSummary } from '../types';
 import { QualityFailures } from './QualityFailures';
+import { cssColor } from '../interaction';
 
 interface Props {
   validation?: ValidationSummary;
@@ -8,6 +9,9 @@ interface Props {
   warnings?: string[];
   qualityPassed?: boolean;
   gateFailures?: InspectGateFailure[];
+  /** Patch highlighted in the table; shared with the patch grid in the viewport. */
+  selectedPatch?: string | null;
+  onSelectPatch?: (patch: string | null) => void;
 }
 
 export const ValidationPanel: React.FC<Props> = ({
@@ -16,6 +20,8 @@ export const ValidationPanel: React.FC<Props> = ({
   warnings = [],
   qualityPassed = true,
   gateFailures = [],
+  selectedPatch = null,
+  onSelectPatch,
 }) => {
   if (!validation) {
     return (
@@ -129,25 +135,27 @@ export const ValidationPanel: React.FC<Props> = ({
                 </tr>
               </thead>
               <tbody className="divide-y divide-[var(--bb-border)]">
-                {patches.map((p, idx) => {
-                  const cRgb = `rgb(${Math.round(Math.min(1, Math.max(0, p.correctedRgb[0])) * 255)}, ${Math.round(Math.min(1, Math.max(0, p.correctedRgb[1])) * 255)}, ${Math.round(Math.min(1, Math.max(0, p.correctedRgb[2])) * 255)})`;
-                  const tRgb = `rgb(${Math.round(Math.min(1, Math.max(0, p.targetRgb[0])) * 255)}, ${Math.round(Math.min(1, Math.max(0, p.targetRgb[1])) * 255)}, ${Math.round(Math.min(1, Math.max(0, p.targetRgb[2])) * 255)})`;
-                  return (
-                    <tr key={idx} className="hover:bg-[var(--bb-surface)]">
-                      <td className="p-1 text-[var(--bb-ash)]">{idx + 1}</td>
-                      <td className="p-1 text-[var(--bb-sand)] truncate max-w-[100px]">{p.patch}</td>
-                      <td className="p-1">
-                        <span className="inline-block w-4 h-3 border border-[var(--bb-border)]" style={{ backgroundColor: cRgb }} />
-                      </td>
-                      <td className="p-1">
-                        <span className="inline-block w-4 h-3 border border-[var(--bb-border)]" style={{ backgroundColor: tRgb }} />
-                      </td>
-                      <td className="p-1 text-right font-bold text-[var(--bb-gold)]">
-                        {p.deltaE.toFixed(2)}
-                      </td>
-                    </tr>
-                  );
-                })}
+                {patches.map((p, idx) => (
+                  <tr
+                    key={idx}
+                    onClick={() => onSelectPatch?.(selectedPatch === p.patch ? null : p.patch)}
+                    aria-selected={selectedPatch === p.patch}
+                    data-testid={`patch-row-${p.patch}`}
+                    className={`cursor-pointer hover:bg-[var(--bb-surface)] ${selectedPatch === p.patch ? 'bg-[var(--bb-surface)] outline outline-1 -outline-offset-1 outline-[var(--bb-gold)]' : ''}`}
+                  >
+                    <td className="p-1 text-[var(--bb-ash)]">{idx + 1}</td>
+                    <td className="p-1 text-[var(--bb-sand)] truncate max-w-[100px]">{p.patch}</td>
+                    <td className="p-1">
+                      <span className="inline-block w-4 h-3 border border-[var(--bb-border)]" style={{ backgroundColor: cssColor(p.correctedSrgb) }} />
+                    </td>
+                    <td className="p-1">
+                      <span className="inline-block w-4 h-3 border border-[var(--bb-border)]" style={{ backgroundColor: cssColor(p.targetSrgb) }} />
+                    </td>
+                    <td className="p-1 text-right font-bold text-[var(--bb-gold)]">
+                      {p.deltaE.toFixed(2)}
+                    </td>
+                  </tr>
+                ))}
               </tbody>
             </table>
           </div>

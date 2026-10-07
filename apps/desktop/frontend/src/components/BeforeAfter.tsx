@@ -1,13 +1,12 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { TransformComponent, TransformWrapper, type ReactZoomPanPinchContentRef } from 'react-zoom-pan-pinch';
-import { Minus, Plus, X } from 'lucide-react';
+import { Minus, Plus } from 'lucide-react';
 
 interface Props {
   /** Backend preview URL for the decoded image. */
   beforeSrc: string;
   /** Backend preview URL for the corrected image. */
   afterSrc: string;
-  onClose: () => void;
 }
 
 type Mode = 'split' | 'side' | 'before' | 'after';
@@ -44,7 +43,7 @@ const chip = (active: boolean) =>
  * both images so the same pixels stay aligned. Display only: no pixel values
  * are read or changed here.
  */
-export const BeforeAfter: React.FC<Props> = ({ beforeSrc, afterSrc, onClose }) => {
+export const BeforeAfter: React.FC<Props> = ({ beforeSrc, afterSrc }) => {
   const [mode, setMode] = useState<Mode>('split');
   const [orientation, setOrientation] = useState<Orientation>('vertical');
   const [split, setSplit] = useState(50);
@@ -190,8 +189,6 @@ export const BeforeAfter: React.FC<Props> = ({ beforeSrc, afterSrc, onClose }) =
     } else if (mode === 'split' && stepKey.includes(event.key)) {
       event.preventDefault();
       setSplit((value) => clamp(value + (event.key === stepKey[0] ? -2 : 2), 0, 100));
-    } else if (event.key === 'Escape') {
-      onClose();
     }
   };
 
@@ -409,17 +406,6 @@ export const BeforeAfter: React.FC<Props> = ({ beforeSrc, afterSrc, onClose }) =
 
         <button type="button" tabIndex={-1} title="Reset zoom, pan, and split (0)" onClick={resetView} className={chip(false)} data-testid="view-reset">
           RESET
-        </button>
-
-        <button
-          type="button"
-          tabIndex={-1}
-          title="Close the comparison (Esc)"
-          onClick={onClose}
-          className={`${chip(false)} ml-auto flex items-center gap-1`}
-          data-testid="close-compare"
-        >
-          <X className="w-3 h-3" /> CLOSE
         </button>
       </div>
 
