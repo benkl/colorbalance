@@ -5,7 +5,7 @@ import { backend, releasePreviewUrls, chooseDirectory, chooseImage, chooseSavePa
 import type { BatchProgress, OperationProgress } from './tauri';
 import { chooseBatchProfile, parseTags, readStoredLibraryPath, referenceFromDrop, storeLibraryPath } from './interaction';
 import type { Tab } from './interaction';
-import { CameraMismatchNotice, LibraryGallery, LibraryPanel } from './components/Library';
+import { ActiveProfile, CameraMismatchNotice, LibraryGallery, LibraryPanel } from './components/Library';
 import { LightTableOverlay } from './components/LightTableOverlay';
 import { ValidationPanel } from './components/ValidationPanel';
 import { QualityFailures } from './components/QualityFailures';
@@ -625,7 +625,7 @@ export const App: React.FC = () => {
     (!exportProfile
       ? viewportMessage('No active profile', 'Derive a profile in Reference, or choose one in Library.')
       : activeLibrary
-        ? viewportMessage('No preview for a Library profile', 'The reference image may come from another camera. Apply the profile to an image or folder to see a result.')
+        ? <ActiveProfile entry={activeLibrary} loadedCamera={loadedCamera} />
         : viewportMessage('No preview yet', isProcessing ? 'Rendering the corrected reference…' : 'The corrected reference appears here once it is rendered.'))
   );
 

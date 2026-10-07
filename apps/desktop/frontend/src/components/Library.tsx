@@ -111,6 +111,60 @@ export const LibraryGallery: React.FC<GalleryProps> = ({ listing, libraryPath, l
   </div>
 );
 
+/** Export viewport for an activated library profile: what the entry holds, since there is no preview to render. */
+export const ActiveProfile: React.FC<{
+  entry: LibraryEntryView;
+  loadedCamera: { make: string; model: string } | null;
+}> = ({ entry, loadedCamera }) => {
+  const card = libraryCardModel(entry);
+  return (
+    <div className="flex-1 min-h-0 overflow-y-auto p-4" data-testid="active-profile">
+      <div className="max-w-3xl mx-auto bg-[var(--bb-panel)] border border-[var(--bb-border)] flex flex-col md:flex-row">
+        <div className="md:w-[260px] shrink-0 min-h-[160px] bg-[var(--bb-vacuum)] flex items-center justify-center overflow-hidden border-b md:border-b-0 md:border-r border-[var(--bb-border)]">
+          {entry.previewUrl ? (
+            <img src={entry.previewUrl} alt={`Reference of ${card.title}`} className="max-w-full max-h-[260px] object-contain" />
+          ) : (
+            <div className="flex flex-col items-center gap-1 text-[var(--bb-smoke)]">
+              <ImageOff className="w-5 h-5" />
+              <span className="text-[9px]">NO PREVIEW</span>
+            </div>
+          )}
+        </div>
+        <div className="flex-1 min-w-0 p-3 space-y-2 text-[10px]">
+          <div className="text-[9px] font-bold tracking-wider text-[var(--bb-amber)]">ACTIVE LIBRARY PROFILE</div>
+          <div className="text-[13px] font-bold text-[var(--bb-gold)] break-words" data-testid="active-profile-label">{card.title}</div>
+          <div className="whitespace-pre-wrap break-words text-[var(--bb-sand)]" data-testid="active-profile-notes">
+            {entry.notes || <span className="text-[var(--bb-smoke)]">No notes.</span>}
+          </div>
+          <TagList tags={card.tags} />
+          <Badges badges={card.badges} />
+          <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-[10px]">
+            <dt className="text-[var(--bb-smoke)]">CAMERA</dt>
+            <dd className="text-[var(--bb-sand)] break-words">{card.camera}</dd>
+            {card.lens && (<><dt className="text-[var(--bb-smoke)]">LENS</dt><dd className="text-[var(--bb-sand)] break-words">{card.lens}</dd></>)}
+            {card.capturedAt && (<><dt className="text-[var(--bb-smoke)]">CAPTURED</dt><dd className="text-[var(--bb-sand)]">{card.capturedAt}</dd></>)}
+            {card.gps && (<><dt className="text-[var(--bb-smoke)]">GPS</dt><dd className="text-[var(--bb-sand)]">{card.gps}</dd></>)}
+            <dt className="text-[var(--bb-smoke)]">FIT</dt>
+            <dd className="text-[var(--bb-sand)]">{card.deltaE} over {entry.patchCount} patches</dd>
+            <dt className="text-[var(--bb-smoke)]">CHART</dt>
+            <dd className="text-[var(--bb-sand)] break-words">{card.chartRevision}</dd>
+            <dt className="text-[var(--bb-smoke)]">DECODER</dt>
+            <dd className="text-[var(--bb-sand)] break-words">{card.decoder}</dd>
+            <dt className="text-[var(--bb-smoke)]">DIGEST</dt>
+            <dd className="text-[var(--bb-sand)] break-all">{entry.digest}</dd>
+            <dt className="text-[var(--bb-smoke)]">PROFILE</dt>
+            <dd className="text-[var(--bb-sand)] break-all">{entry.profilePath}</dd>
+          </dl>
+          <CameraMismatchNotice entry={entry} loadedCamera={loadedCamera} />
+          <p className="text-[var(--bb-smoke)]">
+            No preview is rendered for a Library profile, because its reference may come from another camera. Apply it to an image or folder to see a result here.
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 interface PanelProps {
   listing: LibraryListingView | null;
   libraryPath: string;
