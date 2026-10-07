@@ -139,6 +139,15 @@ pub async fn derive_profile(
     .await
 }
 
+fn parse_output_space(
+    name: &str,
+) -> Result<colorbalance_core::output_space::OutputSpace, BackendError> {
+    name.parse()
+        .map_err(|error: colorbalance_core::output_space::OutputSpaceError| {
+            BackendError::Message(error.to_string())
+        })
+}
+
 #[tauri::command]
 pub async fn correct_image(
     window: Window,
@@ -147,7 +156,16 @@ pub async fn correct_image(
     input_path: String,
     output_path: Option<String>,
     overwrite: bool,
+    output_space: String,
 ) -> Result<CorrectResponse, BackendError> {
+    let export = match output_path {
+        Some(path) => Some(commands::TiffExport {
+            path,
+            overwrite,
+            space: parse_output_space(&output_space)?,
+        }),
+        None => None,
+    };
     let cache = state.reference.clone();
     let previews = state.previews.clone();
     background(move || {
@@ -157,8 +175,7 @@ pub async fn correct_image(
                 &previews,
                 profile_path,
                 input_path,
-                output_path,
-                overwrite,
+                export,
                 &|stage, step, steps| emit_stage(&window, "correct", stage, step, steps),
             )
         })
@@ -184,7 +201,9 @@ pub async fn apply_batch(
     input_path: String,
     output_path: String,
     overwrite: bool,
+    output_space: String,
 ) -> Result<BatchResponse, BackendError> {
+    let output_space = parse_output_space(&output_space)?;
     let cancellation = state.cancellation.clone();
     background(move || {
         let on_progress =
@@ -203,6 +222,7 @@ pub async fn apply_batch(
             input_path,
             output_path,
             overwrite,
+            output_space,
             cancellation,
             on_progress,
         )

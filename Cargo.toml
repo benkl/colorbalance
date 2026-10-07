@@ -24,6 +24,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 thiserror = "2"
+# Pinned exactly: both are young crates and the output-space fixtures were
+# measured against these versions (see docs/ARCHITECTURE.md D24).
+ocio = "=0.1.0"
+moxcms = { version = "=0.9.1", default-features = false }
 
 [profile.release]
 lto = "thin"

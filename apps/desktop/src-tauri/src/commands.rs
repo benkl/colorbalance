@@ -8,6 +8,7 @@ use colorbalance_core::decode::DecodedImage;
 use colorbalance_core::detection::{detect_chart, Detection};
 use colorbalance_core::interchange::{profile_to_clf, profile_to_cube};
 use colorbalance_core::output::encode_tiff_rgb_u16;
+use colorbalance_core::output_space::{OutputConverter, OutputSpace};
 use colorbalance_core::profile::{self, Profile, ValidationSummary};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -555,10 +556,17 @@ pub fn apply_batch(
     input_path: String,
     output_path: String,
     overwrite: bool,
+    output_space: OutputSpace,
     cancellation: colorbalance_core::CancelFlag,
     on_progress: BatchReport,
 ) -> Result<BatchResponse, BackendError> {
     cancellation.store(false, std::sync::atomic::Ordering::Relaxed);
+    // Resolve the space before any file is touched; failure must stop the batch.
+    let converter = OutputConverter::new(output_space)
+        .map_err(|error| BackendError::Message(error.to_string()))?;
+    let icc_profile = converter
+        .icc_profile()
+        .map_err(|error| BackendError::Message(error.to_string()))?;
     let profile_text = fs::read_to_string(&profile_path)?;
     let profile = std::sync::Arc::new(
         profile::from_json(&profile_text)
@@ -612,8 +620,8 @@ pub fn apply_batch(
                 }
                 let mut image = decode_auto(input).map_err(|e| e.to_string())?;
                 let warning = check_camera(&profile, &image)?;
-                let (pixels, _) = correct_in_place(&profile, &mut image);
-                let data = encode_tiff_rgb_u16(image.width, image.height, &pixels);
+                let (pixels, _) = correct_in_place(&converter, &profile, &mut image);
+                let data = encode_tiff_rgb_u16(image.width, image.height, &pixels, &icc_profile);
                 write_atomically(&output, &data).map_err(|e| e.to_string())?;
                 if let Some(warning) = warning {
                     let _ = warning_tx.send(BatchWarning {
@@ -694,16 +702,24 @@ fn check_camera(profile: &Profile, image: &DecodedImage) -> Result<Option<String
 ///
 /// `image.rgb` is overwritten with the corrected linear sRGB values so the same
 /// buffer can feed the preview renderer; no second full-size copy is made.
-fn correct_in_place(profile: &Profile, image: &mut DecodedImage) -> (Vec<u16>, f64) {
-    let result = correct_buffer(profile, &mut image.rgb);
+fn correct_in_place(
+    converter: &OutputConverter,
+    profile: &Profile,
+    image: &mut DecodedImage,
+) -> (Vec<u16>, f64) {
+    let result = correct_buffer(converter, profile, &mut image.rgb);
     // The buffer is corrected sRGB now; the camera neutral no longer applies.
     image.display_neutral = None;
     result
 }
 
 /// [`correct_in_place`] on a bare linear RGB buffer.
-fn correct_buffer(profile: &Profile, rgb_buffer: &mut [f32]) -> (Vec<u16>, f64) {
-    let (pixels, out_of_gamut) = colorbalance_core::profile::correct_to_u16(profile, rgb_buffer);
+fn correct_buffer(
+    converter: &OutputConverter,
+    profile: &Profile,
+    rgb_buffer: &mut [f32],
+) -> (Vec<u16>, f64) {
+    let (pixels, out_of_gamut) = converter.correct_to_u16(profile, rgb_buffer);
     let total = (rgb_buffer.len() / 3).max(1);
     (pixels, out_of_gamut as f64 / total as f64)
 }
@@ -752,17 +768,27 @@ pub struct CorrectResponse {
     warnings: Vec<String>,
 }
 
+/// Where and how [`correct_image`] writes the full-resolution TIFF.
+#[derive(Debug, Clone)]
+pub struct TiffExport {
+    pub path: String,
+    /// Replace an existing file at `path`; otherwise it is an error.
+    pub overwrite: bool,
+    /// Encoded color space of the samples and of the embedded ICC profile.
+    pub space: OutputSpace,
+}
+
 /// Correct one image with a saved profile.
 ///
-/// Always returns before/after previews. When `output_path` is set the full
-/// resolution 16-bit TIFF is also written atomically; an existing file is an
-/// error unless `overwrite` is set. Camera mismatch fails closed.
+/// Always returns before/after previews, which are rendered as sRGB whatever
+/// the export space. When `export` is set the full resolution 16-bit TIFF is
+/// also written atomically; an existing file is an error unless
+/// `export.overwrite` is set. Camera mismatch fails closed.
 pub fn correct_image(
     previews: &PreviewFiles,
     profile_path: String,
     input_path: String,
-    output_path: Option<String>,
-    overwrite: bool,
+    export: Option<TiffExport>,
     report: Report,
 ) -> Result<CorrectResponse, BackendError> {
     correct_image_cached(
@@ -770,8 +796,7 @@ pub fn correct_image(
         previews,
         profile_path,
         input_path,
-        output_path,
-        overwrite,
+        export,
         report,
     )
 }
@@ -785,17 +810,21 @@ pub fn correct_image_cached(
     previews: &PreviewFiles,
     profile_path: String,
     input_path: String,
-    output_path: Option<String>,
-    overwrite: bool,
+    export: Option<TiffExport>,
     report: Report,
 ) -> Result<CorrectResponse, BackendError> {
-    let steps = if output_path.is_some() { 5 } else { 4 };
+    let steps = if export.is_some() { 5 } else { 4 };
+    // A preview-only run writes nothing, so it skips the OCIO conversion.
+    let output_space = export.as_ref().map_or(OutputSpace::Srgb, |e| e.space);
+    let converter = OutputConverter::new(output_space)
+        .map_err(|error| BackendError::Message(error.to_string()))?;
     let profile = profile::from_json(&fs::read_to_string(&profile_path)?)
         .map_err(|error| BackendError::Message(error.to_string()))?;
-    if let Some(output) = &output_path {
-        if Path::new(output).exists() && !overwrite {
+    if let Some(export) = &export {
+        if Path::new(&export.path).exists() && !export.overwrite {
             return Err(BackendError::Message(format!(
-                "output already exists: {output}"
+                "output already exists: {}",
+                export.path
             )));
         }
     }
@@ -809,16 +838,19 @@ pub fn correct_image_cached(
             Ok(owned) => owned.rgb,
             Err(shared) => shared.rgb.clone(),
         };
-        let (pixels, out_of_gamut) = correct_buffer(&profile, &mut rgb);
+        let (pixels, out_of_gamut) = correct_buffer(&converter, &profile, &mut rgb);
         report("Rendering corrected preview", 4, steps);
         let after_png =
             colorbalance_raw::render_preview_rgb(&rgb, width, height, None, PREVIEW_MAX_DIM)
                 .map_err(|error| BackendError::Message(error.to_string()))?;
         drop(rgb);
-        if let Some(output) = &output_path {
+        if let Some(export) = &export {
             report("Writing 16-bit TIFF", 5, steps);
-            let data = encode_tiff_rgb_u16(width, height, &pixels);
-            write_atomically(Path::new(output), &data)?;
+            let icc_profile = converter
+                .icc_profile()
+                .map_err(|error| BackendError::Message(error.to_string()))?;
+            let data = encode_tiff_rgb_u16(width, height, &pixels, &icc_profile);
+            write_atomically(Path::new(&export.path), &data)?;
         }
 
         let mut warnings = Vec::new();
@@ -835,8 +867,9 @@ pub fn correct_image_cached(
         }
         if out_of_gamut > 0.01 {
             warnings.push(format!(
-                "{:.1}% of pixels fall outside sRGB and were clipped.",
-                out_of_gamut * 100.0
+                "{:.1}% of pixels fall outside {} and were clipped.",
+                out_of_gamut * 100.0,
+                output_space.label()
             ));
         }
         let (before_path, after_path) =
@@ -844,7 +877,7 @@ pub fn correct_image_cached(
         Ok(CorrectResponse {
             before_path,
             after_path,
-            output_path,
+            output_path: export.map(|e| e.path),
             warnings,
         })
     })();

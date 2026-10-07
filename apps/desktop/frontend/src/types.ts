@@ -1,3 +1,12 @@
+/** Encoded color space of exported TIFFs; the app previews always render sRGB. */
+export type OutputSpace = "srgb" | "display-p3" | "adobe-rgb";
+
+export const OUTPUT_SPACES: ReadonlyArray<{ id: OutputSpace; label: string }> = [
+  { id: "srgb", label: "sRGB" },
+  { id: "display-p3", label: "Display P3" },
+  { id: "adobe-rgb", label: "Adobe RGB (1998)" },
+];
+
 export type ChartRevision = "classic-before-nov-2014" | "classic-from-nov-2014";
 
 export interface Point {

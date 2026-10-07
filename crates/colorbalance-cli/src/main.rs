@@ -12,6 +12,7 @@ use colorbalance_core::dataset;
 use colorbalance_core::decode::{CameraIdentity, DecodedImage};
 use colorbalance_core::interchange::{profile_to_clf, profile_to_cube};
 use colorbalance_core::output::encode_tiff_rgb_u16;
+use colorbalance_core::output_space::{OutputConverter, OutputSpace, OCIO_CONFIG, OCIO_VERSION};
 use colorbalance_core::profile::{self, Profile, ValidationSummary};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -93,6 +94,11 @@ struct ApplyArgs {
     /// Destination directory for balanced 16-bit TIFF outputs
     #[arg(long, short = 'o')]
     output: PathBuf,
+    /// Encoded color space of the TIFF samples and its embedded ICC profile:
+    /// srgb, display-p3 or adobe-rgb. Non-sRGB targets convert through OCIO
+    /// before clipping.
+    #[arg(long, default_value = "srgb")]
+    output_space: OutputSpace,
     /// Output format (only 'tiff' in this release)
     #[arg(long, default_value = "tiff")]
     format: String,
@@ -214,6 +220,10 @@ struct InspectGateFailure {
 #[derive(Serialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub struct BatchSummary {
+    pub output_space: String,
+    /// OCIO config and `ocio` crate version used for non-sRGB targets.
+    pub ocio_config: Option<String>,
+    pub ocio_version: Option<String>,
     pub succeeded: Vec<String>,
     pub skipped: Vec<String>,
     pub warnings: Vec<BatchWarning>,
@@ -577,6 +587,11 @@ fn execute_apply(args: ApplyArgs) -> Result<(), String> {
         return Err(format!("no files found at {}", args.input.display()));
     }
 
+    // Resolve the output space before touching the destination: a missing
+    // OCIO space or ICC profile must stop the batch, not label pixels wrong.
+    let converter = OutputConverter::new(args.output_space).map_err(|e| e.to_string())?;
+    let icc_profile = converter.icc_profile().map_err(|e| e.to_string())?;
+
     cleanup_stale_temp_files(&args.output);
 
     let (warning_tx, warning_rx) = std::sync::mpsc::channel::<BatchWarning>();
@@ -628,9 +643,8 @@ fn execute_apply(args: ApplyArgs) -> Result<(), String> {
             Err(error) => return Err(error.to_string()),
         };
 
-        let (out_u16, _clipped) =
-            colorbalance_core::profile::correct_to_u16(&prof, &mut decoded.rgb);
-        let tiff_bytes = encode_tiff_rgb_u16(decoded.width, decoded.height, &out_u16);
+        let (out_u16, _clipped) = converter.correct_to_u16(&prof, &mut decoded.rgb);
+        let tiff_bytes = encode_tiff_rgb_u16(decoded.width, decoded.height, &out_u16, &icc_profile);
         let tmp_path = output
             .parent()
             .map(Path::new)
@@ -665,7 +679,11 @@ fn execute_apply(args: ApplyArgs) -> Result<(), String> {
         process,
     )?;
 
+    let uses_ocio = args.output_space.ocio_destination().is_some();
     let summary = BatchSummary {
+        output_space: args.output_space.to_string(),
+        ocio_config: uses_ocio.then(|| OCIO_CONFIG.to_owned()),
+        ocio_version: uses_ocio.then(|| OCIO_VERSION.to_owned()),
         total: core_summary.total,
         succeeded: core_summary
             .succeeded

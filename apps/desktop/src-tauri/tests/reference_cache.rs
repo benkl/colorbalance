@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+use colorbalance_core::output_space::OutputSpace;
+use colorbalance_desktop::commands::TiffExport;
 use colorbalance_desktop::commands::{
     detect_chart_cached, inspect_reference_cached, load_reference, load_reference_cached,
     no_progress, BackendError,
@@ -372,8 +374,11 @@ fn correct_after_load_reuses_the_decode_and_leaves_the_cached_image_untouched() 
                 &previews,
                 profile.to_string_lossy().into_owned(),
                 path_str.clone(),
-                output,
-                false,
+                output.map(|path| TiffExport {
+                    path,
+                    overwrite: false,
+                    space: OutputSpace::Srgb,
+                }),
                 r,
             )
             .unwrap()
@@ -403,7 +408,6 @@ fn correct_after_load_reuses_the_decode_and_leaves_the_cached_image_untouched() 
             profile.to_string_lossy().into_owned(),
             path_str.clone(),
             None,
-            false,
             r,
         )
         .unwrap()

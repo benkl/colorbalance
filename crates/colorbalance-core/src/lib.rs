@@ -21,6 +21,7 @@ pub mod decode;
 pub mod detection;
 pub mod interchange;
 pub mod output;
+pub mod output_space;
 pub mod par;
 pub mod profile;
 

@@ -2,6 +2,8 @@
 //! the real command and pin that JSON shape, so a Rust-side rename or a missing
 //! field fails here instead of surfacing as `undefined.toFixed` in the window.
 
+use colorbalance_core::output_space::OutputSpace;
+use colorbalance_desktop::commands::TiffExport;
 use colorbalance_desktop::commands::{
     correct_image, correct_image_cached, derive_profile, load_reference, load_reference_cached,
     no_progress,
@@ -188,8 +190,11 @@ fn correct_image_returns_previews_writes_a_tiff_and_protects_existing_output() {
             &previews,
             profile_path.to_string_lossy().into_owned(),
             reference.to_string_lossy().into_owned(),
-            Some(output.to_string_lossy().into_owned()),
-            overwrite,
+            Some(TiffExport {
+                path: output.to_string_lossy().into_owned(),
+                overwrite,
+                space: OutputSpace::Srgb,
+            }),
             &no_progress,
         )
     };
@@ -251,8 +256,11 @@ fn correct_image_refuses_a_camera_mismatch_without_writing_anything() {
         &previews,
         profile_path.to_string_lossy().into_owned(),
         reference.to_string_lossy().into_owned(),
-        Some(output.to_string_lossy().into_owned()),
-        true,
+        Some(TiffExport {
+            path: output.to_string_lossy().into_owned(),
+            overwrite: true,
+            space: OutputSpace::Srgb,
+        }),
         &no_progress,
     )
     .expect_err("mismatch fails closed")
@@ -291,8 +299,11 @@ fn failed_correction_removes_its_new_before_preview_and_keeps_a_prior_one() {
             previews,
             profile.clone(),
             input.clone(),
-            Some(bad_output.to_string_lossy().into_owned()),
-            false,
+            Some(TiffExport {
+                path: bad_output.to_string_lossy().into_owned(),
+                overwrite: false,
+                space: OutputSpace::Srgb,
+            }),
             &no_progress,
         )
         .expect_err("the unwritable output fails the correction")
@@ -324,7 +335,6 @@ fn failed_correction_removes_its_new_before_preview_and_keeps_a_prior_one() {
         profile.clone(),
         input.clone(),
         None,
-        false,
         &no_progress,
     )
     .unwrap();
@@ -364,8 +374,11 @@ fn derive_and_correct_report_their_stages_in_order() {
         &previews,
         profile_path.to_string_lossy().into_owned(),
         reference.to_string_lossy().into_owned(),
-        Some(work.join("out.tiff").to_string_lossy().into_owned()),
-        false,
+        Some(TiffExport {
+            path: work.join("out.tiff").to_string_lossy().into_owned(),
+            overwrite: false,
+            space: OutputSpace::Srgb,
+        }),
         &|stage, step, steps| {
             correct_stages
                 .borrow_mut()
@@ -412,6 +425,7 @@ fn batch_progress_counts_finished_files_and_reaches_the_total() {
         input.to_string_lossy().into_owned(),
         output.to_string_lossy().into_owned(),
         false,
+        OutputSpace::Srgb,
         Default::default(),
         Arc::new(move |completed, total, file| {
             sink.lock()
@@ -444,5 +458,57 @@ fn batch_progress_counts_finished_files_and_reaches_the_total() {
         events.iter().filter(|(_, _, started)| *started).count(),
         3,
         "one start event per file"
+    );
+}
+
+#[test]
+fn correct_image_embeds_the_icc_profile_of_the_chosen_output_space() {
+    let work = temp_dir("output-space");
+    let (reference, profile_path) = derive_clean_profile(&work);
+    let previews = PreviewFiles::default();
+    let mut tiffs = Vec::new();
+    for (space, name) in [
+        (OutputSpace::Srgb, "srgb.tiff"),
+        (OutputSpace::DisplayP3, "p3.tiff"),
+    ] {
+        let output = work.join(name);
+        correct_image(
+            &previews,
+            profile_path.to_string_lossy().into_owned(),
+            reference.to_string_lossy().into_owned(),
+            Some(TiffExport {
+                path: output.to_string_lossy().into_owned(),
+                overwrite: false,
+                space,
+            }),
+            &no_progress,
+        )
+        .expect("writes the TIFF");
+        tiffs.push(std::fs::read(output).unwrap());
+    }
+    let _ = std::fs::remove_dir_all(work);
+
+    // Tag 34675 (0x8773) must be present in each file's IFD and point at an
+    // ICC profile whose `acsp` signature sits at byte 36.
+    let icc_of = |tiff: &[u8]| -> Vec<u8> {
+        let ifd = u32::from_le_bytes(tiff[4..8].try_into().unwrap()) as usize;
+        let count = u16::from_le_bytes(tiff[ifd..ifd + 2].try_into().unwrap()) as usize;
+        for i in 0..count {
+            let at = ifd + 2 + i * 12;
+            if u16::from_le_bytes(tiff[at..at + 2].try_into().unwrap()) == 34675 {
+                let len = u32::from_le_bytes(tiff[at + 4..at + 8].try_into().unwrap()) as usize;
+                let off = u32::from_le_bytes(tiff[at + 8..at + 12].try_into().unwrap()) as usize;
+                return tiff[off..off + len].to_vec();
+            }
+        }
+        panic!("no ICC profile tag");
+    };
+    let (srgb_icc, p3_icc) = (icc_of(&tiffs[0]), icc_of(&tiffs[1]));
+    assert_eq!(&srgb_icc[36..40], b"acsp");
+    assert_eq!(&p3_icc[36..40], b"acsp");
+    assert_ne!(srgb_icc, p3_icc);
+    assert_ne!(
+        tiffs[0], tiffs[1],
+        "the pixels were converted, not relabeled"
     );
 }

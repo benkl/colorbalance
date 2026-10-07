@@ -189,16 +189,14 @@ fn schema_major(version: &str) -> &str {
     version.split('.').next().unwrap_or(version)
 }
 
-/// Apply the profile transform to one normalized linear camera RGB value.
+/// Exposure, channel scale and color matrix of the profile, without clamping.
 ///
 /// Stages in order: divide by `exposure_scale`, divide channel `j` by
 /// `channel_scale[j]`, then apply the color matrix in the row-vector
-/// convention `out_j = Σ_r n_r · matrix[r][j]`, then clamp to `[0, 1]`.
-///
-/// The returned `u8` packs the clipping decisions made before clamping:
-/// bits 0..2 are set when R, G, B respectively fell below 0, bits 3..5
-/// when they exceeded 1.
-pub fn apply_transform(p: &Profile, rgb: [f64; 3]) -> ([f64; 3], u8) {
+/// convention `out_j = Σ_r n_r · matrix[r][j]`. The result is linear Rec.709
+/// and can lie outside `[0, 1]`; wide-gamut outputs convert it before
+/// clipping so that colors outside sRGB survive.
+pub fn linear_rec709(p: &Profile, rgb: [f64; 3]) -> [f64; 3] {
     let n = [
         rgb[0] / (p.transform.exposure_scale * p.transform.channel_scale[0]),
         rgb[1] / (p.transform.exposure_scale * p.transform.channel_scale[1]),
@@ -210,6 +208,17 @@ pub fn apply_transform(p: &Profile, rgb: [f64; 3]) -> ([f64; 3], u8) {
             + n[1] * p.transform.matrix[1][j]
             + n[2] * p.transform.matrix[2][j];
     }
+    out
+}
+
+/// Apply the profile transform to one normalized linear camera RGB value:
+/// [`linear_rec709`] followed by a clamp to `[0, 1]`.
+///
+/// The returned `u8` packs the clipping decisions made before clamping:
+/// bits 0..2 are set when R, G, B respectively fell below 0, bits 3..5
+/// when they exceeded 1.
+pub fn apply_transform(p: &Profile, rgb: [f64; 3]) -> ([f64; 3], u8) {
+    let mut out = linear_rec709(p, rgb);
     let mut flags = 0u8;
     for (i, v) in out.iter().enumerate() {
         if *v < 0.0 {

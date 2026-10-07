@@ -120,9 +120,9 @@ Store these validation values:
 
 ### 5. Apply without changing the contract
 
-The apply path verifies camera identity, decoder settings, and capture exposure metadata before processing. Decode, apply the stored exposure scalar and neutral channel scaling unchanged, apply the fitted matrix, clip linear sRGB to `[0, 1]` for integer TIFF, count and report low and high clipped pixels, then encode sRGB. A user may supply an explicit stop offset for intentional exposure differences. The tool must not derive one from scene content. A force flag may override camera or metadata mismatch, but the report records it.
+The apply path verifies camera identity, decoder settings, and capture exposure metadata before processing. Decode, apply the stored exposure scalar and neutral channel scaling unchanged, apply the fitted matrix, then for sRGB clip linear to `[0, 1]`, count and report clipped pixels, and encode sRGB. For Display P3 and Adobe RGB, convert the unclamped linear Rec.709 result with OCIO, clip in the target space, count, and quantize (D24). A user may supply an explicit stop offset for intentional exposure differences. The tool must not derive one from scene content. A force flag may override camera or metadata mismatch, but the report records it.
 
-Default output is 16-bit TIFF in sRGB with an embedded ICC display profile. Preserve capture metadata where the output format supports it, but remove or rewrite tags that would falsely describe transformed pixel data. Never overwrite input files. Existing outputs fail or skip by default. Explicit overwrite writes a unique temporary file in the destination directory, closes and flushes it, then atomically replaces the destination. Never delete the existing destination before rename.
+Default output is 16-bit TIFF in sRGB with an embedded ICC profile; `--output-space` selects Display P3 or Adobe RGB (1998), and the TIFF embeds the matching profile. Preserve capture metadata where the output format supports it, but remove or rewrite tags that would falsely describe transformed pixel data. Never overwrite input files. Existing outputs fail or skip by default. Explicit overwrite writes a unique temporary file in the destination directory, closes and flushes it, then atomically replaces the destination. Never delete the existing destination before rename.
 
 Parallelize by image with a bounded worker count. Keep only active images in memory. Cancellation stops scheduling new files and lets active writes finish or removes their temporary files.
 
@@ -226,11 +226,11 @@ Exit criterion: a profile applies to a directory of matching RAW files and produ
    - Acceptance: round-trip preserves all coefficients and provenance; tampering changes the digest; unsupported major versions fail before decoding images.
 
 9. **Implement profile application and color-space encoding**
-   - Verify the decode contract and exposure metadata, apply the stored scalar and channel scaling without scene analysis, apply the exact transform, clip linear sRGB to `[0, 1]`, count clipped pixels, and encode sRGB output.
+   - Verify the decode contract and exposure metadata, apply the stored scalar and channel scaling without scene analysis, apply the exact transform, convert to the chosen output space (sRGB by default; Display P3 and Adobe RGB through OCIO, D24), clip, count clipped pixels, and encode.
    - Acceptance: known synthetic pixels, including negative and over-range results, reproduce exact expected 16-bit encoded values; camera or exposure mismatch fails unless forced or given an explicit stop offset.
 
 10. **Write 16-bit TIFF output with valid metadata**
-    - Use a same-directory unique temporary file, close and flush before atomic rename, embed sRGB ICC, normalize orientation, and copy only reviewed EXIF fields. Existing outputs fail or skip unless overwrite is explicit. Do not use delete-then-rename.
+    - Use a same-directory unique temporary file, close and flush before atomic rename, embed the ICC profile of the output space, normalize orientation, and copy only reviewed EXIF fields. Existing outputs fail or skip unless overwrite is explicit. Do not use delete-then-rename.
     - Acceptance: an external metadata reader identifies 16-bit TIFF and embedded sRGB; inputs remain byte-identical; cancellation and injected write or commit failures leave no partial final file; an existing output remains byte-identical when replacement fails.
 
 11. **Add bounded parallel batch processing**

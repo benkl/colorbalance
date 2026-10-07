@@ -77,6 +77,9 @@ colorbalance derive reference.dng \
 # Apply the profile to a directory of matching RAW images
 colorbalance apply studio.cbprofile.json ./shoot -o ./balanced --summary summary.json
 
+# Write Display P3 or Adobe RGB (1998) TIFFs instead of sRGB
+colorbalance apply studio.cbprofile.json ./shoot -o ./balanced --output-space display-p3
+
 # Apply with parallel workers and explicit overwrite
 colorbalance apply studio.cbprofile.json ./shoot -o ./balanced \
   --workers 4 --overwrite --summary summary.json
@@ -87,6 +90,18 @@ colorbalance export studio.cbprofile.json --format clf -o studio.clf
 # Export to 3D LUT (.cube) with custom grid size
 colorbalance export studio.cbprofile.json --format cube --size 33 -o studio.cube
 ```
+
+### Output color spaces
+
+`apply` writes sRGB by default. `--output-space display-p3` or `--output-space adobe-rgb` writes the corrected image in that space instead, and the TIFF embeds a matching ICC profile. Every TIFF now carries an ICC profile, sRGB included.
+
+- The fitted transform still produces linear Rec.709. OpenColorIO converts that to the target (`Linear Rec.709 (sRGB)` to `sRGB Encoded P3-D65` or `Gamma 2.2 Encoded AdobeRGB` in config `cg-config-v4.0.0_aces-v2.0_ocio-v2.5`). The color is not clipped to sRGB first, so a saturated color that sRGB would clip can survive in P3 or Adobe RGB. Clipping happens in the target space, and the clipped-pixel count refers to that space.
+- Adobe RGB uses the 2.19921875 exponent from the specification, which is not the same curve as plain gamma 2.2.
+- There are no display or view transforms: no tone mapping, no ACES rendering. This is a gamut and encoding change only.
+- The batch summary records `output-space`. For non-sRGB output it also records `ocio-config` and `ocio-version`. They are `null` for sRGB, which does not use OCIO.
+- An unknown name fails before any file is touched.
+- CLF and `.cube` exports are unaffected. They still take normalized linear camera RGB from this tool's decode contract.
+- In the desktop app, the **TIFF color space** selector on the Export tab applies to saved single images and batches. The on-screen before and after previews are always sRGB.
 
 ### Finding the chart in the desktop app
 
@@ -121,7 +136,7 @@ The CLI is unchanged. `derive` still refuses a failing chart unless you pass `--
 
 The desktop app has three tabs: **REFERENCE**, **VALIDATE**, and **EXPORT**. The viewport follows the active tab. REFERENCE shows the light table with the chart corners. VALIDATE and EXPORT show the before and after comparison of the reference, which loads after a profile is derived. Everything that writes a file lives on EXPORT:
 
-- **Save reference** corrects the reference image and writes it as a 16-bit sRGB TIFF.
+- **Save reference** corrects the reference image and writes it as a 16-bit TIFF in the chosen TIFF color space (sRGB by default).
 - **Correct single image** picks any image, corrects it with the profile, shows before and after, and writes a TIFF.
 - **.CLF** and **.CUBE** export the transform for other tools.
 - **Batch** corrects a folder into a destination folder, with an overwrite switch and a stop button. The result counts, failed files, and warnings appear below the controls.

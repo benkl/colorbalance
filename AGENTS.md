@@ -38,7 +38,7 @@ These exist because violating them silently produces wrong color or destroys use
 4. Named chart dataset. The physical ColorChecker revision is selected explicitly and pinned with its dataset version, illuminant, and observer. The patch layout cannot identify the revision. The chart detector finds corners only. It never selects a revision and never derives a profile.
 5. Fail closed. Camera, decoder-contract, or exposure mismatch stops processing by default. Overrides are recorded in the profile and batch report. A detector miss or ambiguous result leaves the corners untouched for manual placement.
 6. Never modify input files. Output goes to a new path through a unique temporary file in the destination directory, flushed, then atomically renamed. Existing outputs fail or skip unless overwrite is explicit. Never delete-then-rename.
-7. One color implementation. All color math lives in `colorbalance-core` and is shared by CLI, desktop, browser, and server. TypeScript never computes color. Python never runs in production.
+7. One color implementation. All color math lives in `colorbalance-core` and is shared by CLI, desktop, browser, and server. Conversion into output spaces other than sRGB is delegated to OCIO, called only from core; there is no second implementation and no hand-written matrix or curve for those spaces (D24). TypeScript never computes color. Python never runs in production.
 8. Exports are honest. CLF and `.cube` files consume normalized linear camera RGB from this tool's decode contract. Documentation and UI must not imply they decode RAW or accept rendered sRGB.
 
 ## Repository map

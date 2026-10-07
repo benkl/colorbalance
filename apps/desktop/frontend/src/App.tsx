@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
-import type { ChartQuad, ChartRevision, CorrectResult, DeriveResult, BatchSummary, InspectResult } from './types';
+import { OUTPUT_SPACES } from './types';
+import type { ChartQuad, ChartRevision, CorrectResult, DeriveResult, BatchSummary, InspectResult, OutputSpace } from './types';
 import { backend, releasePreviewUrls, chooseDirectory, chooseImage, chooseSavePath, listenForBatchProgress, listenForFileDrop, listenForFileDropHover, listenForOperationProgress } from './tauri';
 import type { BatchProgress, OperationProgress } from './tauri';
 import { referenceFromDrop } from './interaction';
@@ -95,6 +96,7 @@ export const App: React.FC = () => {
   const [batchInputPath, setBatchInputPath] = useState<string>('');
   const [batchOutputPath, setBatchOutputPath] = useState<string>('');
   const [overwriteOutputs, setOverwriteOutputs] = useState<boolean>(false);
+  const [outputSpace, setOutputSpace] = useState<OutputSpace>('srgb');
   const [batchSummary, setBatchSummary] = useState<BatchSummary | null>(null);
   const [batchProgress, setBatchProgress] = useState<BatchProgress | null>(null);
   const [operationProgress, setOperationProgress] = useState<OperationProgress | null>(null);
@@ -477,7 +479,7 @@ export const App: React.FC = () => {
         if (!chosen) return;
         output = chosen;
       }
-      const result = await backend.correctImage(deriveResult.profilePath, input, output, true);
+      const result = await backend.correctImage(deriveResult.profilePath, input, output, true, outputSpace);
       try {
         await Promise.all([decodePreview(result.beforeUrl), decodePreview(result.afterUrl)]);
       } catch (error) {
@@ -529,6 +531,7 @@ export const App: React.FC = () => {
           batchInputPath,
           batchOutputPath,
           overwriteOutputs,
+          outputSpace,
         );
         setBatchSummary(result);
       } catch (error: unknown) {
@@ -846,6 +849,23 @@ export const App: React.FC = () => {
                   <div className="text-[var(--bb-gold)] break-all">{deriveResult.reportPath}</div>
                 </div>
               )}
+
+              <div className="space-y-1 p-2.5 bg-[var(--bb-panel)] border border-[var(--bb-border)]" data-testid="output-space-panel">
+                <label htmlFor="output-space" className="text-[9px] text-[var(--bb-smoke)] font-bold tracking-wider">TIFF COLOR SPACE</label>
+                <select
+                  id="output-space"
+                  value={outputSpace}
+                  onChange={(e) => setOutputSpace(e.target.value as OutputSpace)}
+                  className="w-full bg-[var(--bb-vacuum)] border border-[var(--bb-border)] px-2 py-1 text-[11px] text-[var(--bb-sand)] focus:border-[var(--bb-gold)] outline-none"
+                >
+                  {OUTPUT_SPACES.map((space) => (
+                    <option key={space.id} value={space.id}>{space.label}</option>
+                  ))}
+                </select>
+                <p className="text-[9px] text-[var(--bb-smoke)]">
+                  Applies to saved and batch TIFFs, which embed a matching ICC profile. Previews on screen are always sRGB.
+                </p>
+              </div>
 
               <div className="space-y-1.5 p-2.5 bg-[var(--bb-panel)] border border-[var(--bb-border)]" data-testid="correct-panel">
                 <div className="text-[9px] text-[var(--bb-smoke)] font-bold tracking-wider">CORRECTED IMAGES (16-BIT TIFF)</div>

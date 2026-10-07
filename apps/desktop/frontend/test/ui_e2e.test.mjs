@@ -143,6 +143,7 @@ test('UI end-to-end: native file drop loads image, enables derive, and completes
     uiState.batchInputPath,
     uiState.batchOutputPath,
     false,
+    'display-p3',
   );
   assert.equal(batchSummary.total, 3);
   assert.equal(batchSummary.succeeded.length, 3);
@@ -189,12 +190,13 @@ test('correct image: IPC carries the output path and returns backend-rendered pr
     },
   };
   const tauri = await import('../src/tauri.ts');
-  const saved = await tauri.backend.correctImage('p.cbprofile.json', 'in.dng', 'out.tiff', false);
+  const saved = await tauri.backend.correctImage('p.cbprofile.json', 'in.dng', 'out.tiff', false, 'adobe-rgb');
   assert.deepEqual(calls[0], ['correct_image', {
     profilePath: 'p.cbprofile.json',
     inputPath: 'in.dng',
     outputPath: 'out.tiff',
     overwrite: false,
+    outputSpace: 'adobe-rgb',
   }]);
   assert.equal(saved.outputPath, 'out.tiff');
   const preview = await tauri.backend.correctImage('p.cbprofile.json', 'in.dng');

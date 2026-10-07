@@ -1,23 +1,30 @@
 //! Deterministic RGB TIFF output.
 //!
 //! The encoder writes classic little-endian TIFF with one uncompressed RGB
-//! strip. It has no platform-dependent metadata, timestamps, padding, or
-//! compression, so identical inputs produce identical bytes.
+//! strip and an embedded ICC profile (tag 34675). It has no
+//! platform-dependent metadata, timestamps, or compression, so identical
+//! inputs produce identical bytes.
+
+/// TIFF tag number of the embedded ICC profile.
+const TAG_ICC_PROFILE: u16 = 34675;
 
 /// Encode interleaved RGB `u16` pixels as a baseline little-endian TIFF.
 ///
 /// Pixels are written in row-major order, with each pixel represented by
 /// three little-endian 16-bit samples. The file has one strip,
 /// `PhotometricInterpretation=RGB`, `BitsPerSample=[16,16,16]`,
-/// `SamplesPerPixel=3`, and no extra samples.
+/// `SamplesPerPixel=3`, and no extra samples. `icc_profile` is stored
+/// verbatim in tag 34675 so viewers interpret the samples in the space they
+/// were encoded for.
 ///
 /// # Panics
 ///
-/// Panics if either dimension is zero, `pixels` does not contain exactly
-/// `width * height * 3` samples, or the pixel byte count cannot be stored
-/// in a classic TIFF `LONG` field.
-pub fn encode_tiff_rgb_u16(width: u32, height: u32, pixels: &[u16]) -> Vec<u8> {
+/// Panics if either dimension is zero, `icc_profile` is empty, `pixels` does
+/// not contain exactly `width * height * 3` samples, or the file offsets
+/// cannot be stored in a classic TIFF `LONG` field.
+pub fn encode_tiff_rgb_u16(width: u32, height: u32, pixels: &[u16], icc_profile: &[u8]) -> Vec<u8> {
     assert!(width != 0 && height != 0, "TIFF dimensions must be nonzero");
+    assert!(!icc_profile.is_empty(), "ICC profile must not be empty");
     let expected_samples = (width as usize)
         .checked_mul(height as usize)
         .and_then(|count| count.checked_mul(3))
@@ -27,13 +34,21 @@ pub fn encode_tiff_rgb_u16(width: u32, height: u32, pixels: &[u16]) -> Vec<u8> {
         expected_samples,
         "pixel count must equal width * height * 3"
     );
-    // Header (8) + IFD count (2) + ten 12-byte entries + next-IFD offset (4).
+    // Header (8) + IFD count (2) + eleven 12-byte entries + next-IFD offset (4).
     const IFD_OFFSET: u32 = 8;
-    const TAG_COUNT: u16 = 10;
+    const TAG_COUNT: u16 = 11;
     const IFD_BYTES: u32 = 2 + (TAG_COUNT as u32) * 12 + 4;
     const BITS_PER_SAMPLE_OFFSET: u32 = IFD_OFFSET + IFD_BYTES;
     const BITS_PER_SAMPLE_BYTES: u32 = 6;
-    let strip_offset = BITS_PER_SAMPLE_OFFSET + BITS_PER_SAMPLE_BYTES;
+    let icc_offset = BITS_PER_SAMPLE_OFFSET + BITS_PER_SAMPLE_BYTES;
+    let icc_len = u32::try_from(icc_profile.len()).expect("ICC profile exceeds classic TIFF LONG");
+    // TIFF values start on word boundaries.
+    let icc_padded = icc_len
+        .checked_add(icc_len & 1)
+        .expect("ICC profile exceeds classic TIFF LONG");
+    let strip_offset = icc_offset
+        .checked_add(icc_padded)
+        .expect("TIFF file size exceeds classic TIFF LONG");
     let pixel_byte_count = pixels
         .len()
         .checked_mul(2)
@@ -60,12 +75,17 @@ pub fn encode_tiff_rgb_u16(width: u32, height: u32, pixels: &[u16]) -> Vec<u8> {
     put_entry(&mut bytes, 278, 4, 1, height);
     put_entry(&mut bytes, 279, 4, 1, strip_byte_count);
     put_entry(&mut bytes, 284, 3, 1, 1);
+    put_entry(&mut bytes, TAG_ICC_PROFILE, 7, icc_len, icc_offset);
     // No following IFD.
     put_u32(&mut bytes, 0);
 
     put_u16(&mut bytes, 16);
     put_u16(&mut bytes, 16);
     put_u16(&mut bytes, 16);
+    bytes.extend_from_slice(icc_profile);
+    if icc_len & 1 == 1 {
+        bytes.push(0);
+    }
     for &sample in pixels {
         put_u16(&mut bytes, sample);
     }
@@ -107,6 +127,7 @@ mod tests {
         bits_per_sample: [u16; 3],
         strip_offset: usize,
         strip_byte_count: usize,
+        icc: &'a [u8],
         bytes: &'a [u8],
     }
 
@@ -131,12 +152,16 @@ mod tests {
         let mut bits = None;
         let mut strip_offset = None;
         let mut strip_byte_count = None;
+        let mut icc = None;
+        let mut previous_tag = 0;
         for i in 0..count {
             let at = ifd + 2 + i * 12;
             let tag = read_u16(bytes, at);
             let field_type = read_u16(bytes, at + 2);
             let item_count = read_u32(bytes, at + 4);
             let value = at + 8;
+            assert!(tag > previous_tag, "IFD tags must ascend");
+            previous_tag = tag;
             match tag {
                 256 => {
                     assert_eq!(field_type, 4);
@@ -192,6 +217,11 @@ mod tests {
                     assert_eq!(item_count, 1);
                     assert_eq!(read_u16(bytes, value), 1);
                 }
+                34675 => {
+                    assert_eq!(field_type, 7);
+                    let at = read_u32(bytes, value) as usize;
+                    icc = Some(&bytes[at..at + item_count as usize]);
+                }
                 tag => panic!("unexpected TIFF tag {tag}"),
             }
         }
@@ -204,6 +234,7 @@ mod tests {
             bits_per_sample: bits.expect("BitsPerSample"),
             strip_offset,
             strip_byte_count,
+            icc: icc.expect("ICCProfile"),
             bytes,
         }
     }
@@ -211,7 +242,7 @@ mod tests {
     #[test]
     fn tiff_round_trips_pixel_bytes_and_tags() {
         let pixels = [0u16, 1, 65535, 32768, 1234, 54321];
-        let bytes = encode_tiff_rgb_u16(2, 1, &pixels);
+        let bytes = encode_tiff_rgb_u16(2, 1, &pixels, b"profile-bytes");
         let view = read_tiff(&bytes);
         assert_eq!((view.width, view.height), (2, 1));
         assert_eq!(view.bits_per_sample, [16, 16, 16]);
@@ -223,7 +254,7 @@ mod tests {
     #[test]
     fn strip_byte_count_matches_data_length() {
         let pixels: Vec<u16> = (0..27).map(|i| i * 257).collect();
-        let bytes = encode_tiff_rgb_u16(3, 3, &pixels);
+        let bytes = encode_tiff_rgb_u16(3, 3, &pixels, b"icc");
         let view = read_tiff(&bytes);
         assert_eq!(view.strip_byte_count, pixels.len() * 2);
         assert_eq!(view.strip_offset + view.strip_byte_count, bytes.len());
@@ -233,8 +264,29 @@ mod tests {
     fn bytes_are_deterministic() {
         let pixels = [9u16, 8, 7, 6, 5, 4];
         assert_eq!(
-            encode_tiff_rgb_u16(1, 2, &pixels),
-            encode_tiff_rgb_u16(1, 2, &pixels)
+            encode_tiff_rgb_u16(1, 2, &pixels, b"icc"),
+            encode_tiff_rgb_u16(1, 2, &pixels, b"icc")
         );
+    }
+
+    #[test]
+    fn icc_profile_is_stored_verbatim_at_any_length() {
+        let pixels = [1u16, 2, 3];
+        for len in [1usize, 2, 3, 600, 601] {
+            let icc: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+            let bytes = encode_tiff_rgb_u16(1, 1, &pixels, &icc);
+            let view = read_tiff(&bytes);
+            assert_eq!(view.icc, icc.as_slice(), "profile length {len}");
+            assert_eq!(view.strip_offset % 2, 0, "strip must be word aligned");
+            assert_eq!(view.strip_offset + view.strip_byte_count, bytes.len());
+            let expected: Vec<u8> = pixels.iter().flat_map(|v| v.to_le_bytes()).collect();
+            assert_eq!(&bytes[view.strip_offset..], expected.as_slice());
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "ICC profile must not be empty")]
+    fn empty_icc_profile_is_rejected() {
+        encode_tiff_rgb_u16(1, 1, &[0, 0, 0], &[]);
     }
 }

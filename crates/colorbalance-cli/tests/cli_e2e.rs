@@ -397,3 +397,107 @@ fn batch_handles_good_corrupt_existing_and_duplicate_names() {
 
     let _ = fs::remove_dir_all(work);
 }
+
+/// The embedded ICC profile of a little-endian TIFF written by `apply`.
+fn tiff_icc_profile(path: &std::path::Path) -> Vec<u8> {
+    let tiff = fs::read(path).unwrap();
+    let ifd = u32::from_le_bytes(tiff[4..8].try_into().unwrap()) as usize;
+    let count = u16::from_le_bytes(tiff[ifd..ifd + 2].try_into().unwrap()) as usize;
+    for entry in 0..count {
+        let at = ifd + 2 + entry * 12;
+        if u16::from_le_bytes(tiff[at..at + 2].try_into().unwrap()) == 34675 {
+            let len = u32::from_le_bytes(tiff[at + 4..at + 8].try_into().unwrap()) as usize;
+            let offset = u32::from_le_bytes(tiff[at + 8..at + 12].try_into().unwrap()) as usize;
+            return tiff[offset..offset + len].to_vec();
+        }
+    }
+    panic!("{} has no ICC profile tag", path.display());
+}
+
+#[test]
+fn apply_output_space_embeds_matching_icc_and_unknown_space_fails_closed() {
+    let work = temp_dir("output-space");
+    let reference = work.join("reference.dng");
+    let shoot = work.join("shoot");
+    fs::create_dir_all(&shoot).unwrap();
+    let scene = ChartScene::default();
+    render_chart_dng(&reference, &scene).unwrap();
+    render_chart_dng(&shoot.join("shot.dng"), &scene).unwrap();
+    let quad = scene
+        .quad
+        .iter()
+        .flatten()
+        .map(|v| v.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let bin = env!("CARGO_BIN_EXE_colorbalance");
+    let profile = work.join("p.cbprofile.json");
+    let derive = std::process::Command::new(bin)
+        .args(["derive"])
+        .arg(&reference)
+        .args(["--chart", "classic-before-nov-2014", "--quad", &quad])
+        .arg("--profile")
+        .arg(&profile)
+        .arg("--report")
+        .arg(work.join("r.html"))
+        .output()
+        .unwrap();
+    assert!(
+        derive.status.success(),
+        "{}",
+        String::from_utf8_lossy(&derive.stderr)
+    );
+
+    let apply = |space: &str, out: &std::path::Path| {
+        std::process::Command::new(bin)
+            .arg("apply")
+            .arg(&profile)
+            .arg(&shoot)
+            .arg("--output")
+            .arg(out)
+            .arg("--summary")
+            .arg(out.join("summary.json"))
+            .args(["--output-space", space])
+            .output()
+            .unwrap()
+    };
+
+    let mut icc = Vec::new();
+    for (space, config_recorded) in [("srgb", false), ("display-p3", true), ("adobe-rgb", true)] {
+        let out = work.join(space);
+        let run = apply(space, &out);
+        assert!(
+            run.status.success(),
+            "{space}: {}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        let summary: serde_json::Value =
+            serde_json::from_slice(&fs::read(out.join("summary.json")).unwrap()).unwrap();
+        assert_eq!(summary["output-space"], space);
+        assert_eq!(
+            summary["ocio-config"].is_string(),
+            config_recorded,
+            "{space}"
+        );
+        assert_eq!(
+            summary["ocio-version"].is_string(),
+            config_recorded,
+            "{space}"
+        );
+        let profile_bytes = tiff_icc_profile(&out.join("shot.tiff"));
+        assert_eq!(&profile_bytes[36..40], b"acsp", "{space}");
+        icc.push(profile_bytes);
+    }
+    assert!(icc[0] != icc[1] && icc[1] != icc[2] && icc[0] != icc[2]);
+
+    let bogus = work.join("bogus");
+    let run = apply("rec2020", &bogus);
+    assert!(!run.status.success(), "unknown space must fail");
+    assert!(
+        !bogus.exists(),
+        "nothing is written before the space is resolved"
+    );
+    assert!(String::from_utf8_lossy(&run.stderr).contains("rec2020"));
+
+    let _ = fs::remove_dir_all(work);
+}
