@@ -144,7 +144,10 @@ pub fn render_preview_rgb(
                     TypedImage::from_pixels_slice(out_w as u32, rows as u32, destination)
                         .map_err(|e| e.to_string())?;
                 let top = (first * height) as f64 / out_h as f64 - start as f64;
-                let extent = (rows * height) as f64 / out_h as f64;
+                // Float rounding can push top + extent a few ulps past the band's
+                // source height, which the resizer rejects; clamp to what exists.
+                let extent =
+                    ((rows * height) as f64 / out_h as f64).min((end - start) as f64 - top);
                 let options = ResizeOptions::new()
                     .resize_alg(ResizeAlg::Convolution(FilterType::Box))
                     .crop(0.0, top, width as f64, extent);
@@ -421,6 +424,20 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn preview_survives_a_last_band_whose_crop_box_rounds_past_the_source() {
+        // 100x200 down to 199 rows: the last band's fractional crop box ends a
+        // few ulps past its source rows. A flat image must still come back flat.
+        let rgb = vec![0.25_f32; 100 * 200 * 3];
+        let out = decoded_png(&render_preview_rgb(&rgb, 100, 200, None, 199).unwrap());
+        assert_eq!(out.height(), 199);
+        let expected = (colorbalance_core::color::srgb_encode(0.25) * 255.0).round() as i32;
+        assert!(out
+            .pixels()
+            .flat_map(|p| p.0)
+            .all(|c| (i32::from(c) - expected).abs() <= 1));
     }
 
     #[test]

@@ -17,7 +17,7 @@ Milestones 1 to 4 are done and their GitHub issues are closed. Milestone 5 (brow
 | CLF and `.cube` export | Done |
 | Desktop app (Tauri 2, React) with light table, editable corners, before and after | Done |
 | Automatic chart finding in the desktop app | Done, pure Rust, no OpenCV |
-| RAW decode through the `rawler` crate, then this project's AHD demosaic | Done, verified on synthetic DNGs only (uncompressed CFA, 12-bit LinearRaw). Other camera formats are rawler's, untested here |
+| RAW decode through the `rawler` crate, then this project's AHD demosaic | Done. Verified on synthetic DNGs (uncompressed CFA, 12-bit LinearRaw) and on one Samsung Galaxy S25 LinearRaw DNG, which loads and previews. Other camera formats are rawler's, untested here |
 | `colorbalance-core` compiles for `wasm32-unknown-unknown` | Builds, checked in CI. No wasm-bindgen glue, worker, or parity tests yet (issue 21) |
 | Browser app, hosted mode, benchmark harness | Not started (issues 22 to 25) |
 | Chart auto-detection in the CLI | Not wired. The CLI uses a manual `--quad` or an 8% inset rectangle |

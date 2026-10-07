@@ -37,6 +37,8 @@ It prints the canonical RAW decode contract as JSON. The pinned settings are raw
 
 RAW files are decoded by the `rawler` crate (pinned 0.8) and demosaiced by the in-repo AHD in `colorbalance-core`. The adapter accepts a 2x2 RGB Bayer CFA or three-component LinearRaw at full frame; other layouts, crops and float samples fail closed. The only camera files checked so far are synthetic DNGs written by `dng_writer.rs` and, in October 2026, a Samsung Galaxy S25 LinearRaw DNG before the switch to rawler; no real camera RAW fixtures are in the repo. `research/samsung_reference_decode.py` can independently decode a local SOF3 strip with `imagecodecs`, `numpy`, and `tifffile`; it is an independent reference, not a production dependency. AHD is tested with analytic cases in `ahd.rs`, not Python fixtures. Profiles recorded with the old `colorbalance-dng` decoder no longer match and must be re-derived.
 
+LinearRaw black levels may be one value, one value per channel, or a repeat grid with one value per channel in each cell (a Samsung Galaxy S25 DNG writes a 2x2 grid of zeros). The decode contract carries one black level per channel, so the adapter accepts a grid only when every repeat cell agrees for that channel and fails closed on a spatially varying one. The S25 file `20261006_155208.dng` decodes through this path (3060x4080 after orientation); it is a local file and not in the repo.
+
 ## Workspace layout
 
 | Crate | Role | wasm32 |

@@ -7,7 +7,7 @@ use colorbalance_core::decode::{
     CameraIdentity, DecodeError, DecodedImage, RawDecoder, SensorLayout,
 };
 use rawler::decoders::{Orientation, RawDecodeParams};
-use rawler::rawimage::{RawImage, RawImageData, RawPhotometricInterpretation};
+use rawler::rawimage::{BlackLevel, RawImage, RawImageData, RawPhotometricInterpretation};
 use rawler::rawsource::RawSource;
 
 pub const DECODER_NAME: &str = "rawler-ahd";
@@ -24,6 +24,32 @@ fn level(value: f32) -> Result<u16, DecodeError> {
         return Err(unsupported("fractional or out-of-range black level"));
     }
     Ok(value as u16)
+}
+
+/// Index of the black level for `channel` of a three-component LinearRaw image.
+///
+/// The grid is indexed `(row * width + column) * cpp + channel`. The decode
+/// contract carries one black level per channel, so every repeat cell must agree
+/// for that channel; a spatially varying grid fails closed.
+fn linear_black_index(black: &BlackLevel, channel: usize) -> Result<usize, DecodeError> {
+    let cells = black.width.checked_mul(black.height);
+    if black.width == 0
+        || black.height == 0
+        || !matches!(black.cpp, 1 | 3)
+        || cells.and_then(|c| c.checked_mul(black.cpp)) != Some(black.levels.len())
+    {
+        return Err(unsupported("unsupported LinearRaw black-level grid"));
+    }
+    let channel = if black.cpp == 1 { 0 } else { channel };
+    let first = black.levels[channel].as_f32();
+    let uniform = (1..black.width * black.height)
+        .all(|cell| black.levels[cell * black.cpp + channel].as_f32() == first);
+    if !uniform {
+        return Err(unsupported(
+            "LinearRaw black level varies across the repeat grid",
+        ));
+    }
+    Ok(channel)
 }
 
 fn normalize(raw: u16, black: u16, white: u16) -> f32 {
@@ -156,14 +182,7 @@ fn from_raw(image: RawImage) -> Result<DecodedImage, DecodeError> {
                 i
             }
         } else {
-            if black.width != 1 || black.height != 1 || !matches!(black.cpp, 1 | 3) {
-                return Err(unsupported("unsupported LinearRaw black-level grid"));
-            }
-            if black.cpp == 1 {
-                0
-            } else {
-                i
-            }
+            linear_black_index(black, i)?
         };
         let value = black
             .levels
@@ -293,5 +312,39 @@ mod pin_tests {
             manifest.contains(&expected),
             "Cargo.toml must contain `{expected}`"
         );
+    }
+}
+
+#[cfg(test)]
+mod linear_black_tests {
+    use super::linear_black_index;
+    use rawler::rawimage::BlackLevel;
+
+    #[test]
+    fn uniform_repeat_grid_selects_each_channel() {
+        // 2x2 repeat, three channels; per-channel values agree across cells.
+        let cells: Vec<u16> = (0..4).flat_map(|_| [64, 66, 68]).collect();
+        let black = BlackLevel::new(&cells, 2, 2, 3);
+        for channel in 0..3 {
+            assert_eq!(linear_black_index(&black, channel).unwrap(), channel);
+        }
+    }
+
+    #[test]
+    fn grid_that_varies_between_cells_fails_closed() {
+        let mut cells: Vec<u16> = (0..4).flat_map(|_| [64, 66, 68]).collect();
+        cells[3 * 3 + 1] = 70;
+        let black = BlackLevel::new(&cells, 2, 2, 3);
+        assert!(linear_black_index(&black, 0).is_ok());
+        assert!(linear_black_index(&black, 1).is_err());
+    }
+
+    #[test]
+    fn malformed_grids_are_rejected() {
+        let two_channels = BlackLevel::new(&[0_u16; 8], 2, 2, 2);
+        assert!(linear_black_index(&two_channels, 0).is_err());
+        let mut short = BlackLevel::new(&[0_u16; 3], 1, 1, 3);
+        short.width = 2;
+        assert!(linear_black_index(&short, 0).is_err());
     }
 }
