@@ -934,7 +934,7 @@ export const App: React.FC = () => {
                   {detectionStatus === 'idle' && loadedPath && imageSize.width * imageSize.height > 12_000_000 && 'Large image: automatic detection skipped. Use Find Chart to start it.'}
                   {detectionStatus === 'idle' && referencePreview && !loadedPath && 'Detection needs a desktop-loaded file. Set corners manually in browser preview mode.'}
                 </p>
-                <div className="grid grid-cols-2 gap-1.5 pt-0.5">
+                <div className="pt-0.5">
                   <button
                     type="button"
                     onClick={inspectReference}
@@ -942,9 +942,6 @@ export const App: React.FC = () => {
                     className="ui-btn ui-btn-secondary w-full"
                   >
                     <SearchCheck className="w-3 h-3" /> {isProcessing ? 'SCANNING…' : 'INSPECT CHART'}
-                  </button>
-                  <button type="button" onClick={loadSyntheticDemo} className="ui-btn ui-btn-ghost w-full">
-                    <Sparkles className="w-3 h-3" /> LOAD DEMO
                   </button>
                 </div>
                 {inspectResult && (
