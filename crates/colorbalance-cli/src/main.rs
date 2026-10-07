@@ -327,6 +327,11 @@ fn execute_derive(args: DeriveArgs) -> Result<(), String> {
             condition_number: validation.condition_number,
             patch_count: validation.per_patch.len() as u32,
         },
+        quality: Some(profile::QualityProvenance::from_gates(
+            &gate_failures,
+            args.force,
+            args.quick_and_dirty,
+        )),
         digest: String::new(),
     };
     let initial_json = profile::to_json(&p_initial);

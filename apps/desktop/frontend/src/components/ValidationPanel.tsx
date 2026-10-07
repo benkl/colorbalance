@@ -1,11 +1,13 @@
 import React from 'react';
-import type { PatchValidation, ValidationSummary } from '../types';
+import type { InspectGateFailure, PatchValidation, ValidationSummary } from '../types';
+import { QualityFailures } from './QualityFailures';
 
 interface Props {
   validation?: ValidationSummary;
   patches?: PatchValidation[];
   warnings?: string[];
   qualityPassed?: boolean;
+  gateFailures?: InspectGateFailure[];
 }
 
 export const ValidationPanel: React.FC<Props> = ({
@@ -13,6 +15,7 @@ export const ValidationPanel: React.FC<Props> = ({
   patches = [],
   warnings = [],
   qualityPassed = true,
+  gateFailures = [],
 }) => {
   if (!validation) {
     return (
@@ -32,8 +35,8 @@ export const ValidationPanel: React.FC<Props> = ({
               qualityPassed ? 'bg-[var(--bb-gold)]' : 'bg-[var(--bb-crimson)]'
             }`}
           />
-          <span className="font-bold text-[11px] tracking-wider text-[var(--bb-white)]">
-            {qualityPassed ? 'CALIBRATION PASS' : 'CALIBRATION OVERRIDE / WARNING'}
+          <span className="font-bold text-[11px] tracking-wider text-[var(--bb-white)]" data-testid="quality-badge">
+            {qualityPassed ? 'CAPTURE QUALITY PASS' : `PROCESSED WITH ${Math.max(warnings.length, 1)} WARNING(S)`}
           </span>
         </div>
         <span className="text-[10px] text-[var(--bb-smoke)]">CIEDE2000 D65</span>
@@ -67,17 +70,46 @@ export const ValidationPanel: React.FC<Props> = ({
         </div>
       </div>
 
-      {/* Warnings Banner */}
-      {warnings.length > 0 && (
-        <div className="p-2.5 bg-[var(--bb-ember-dark)]/40 border border-[var(--bb-crimson)] text-[11px] space-y-1">
-          <div className="text-[var(--bb-gold)] font-bold flex items-center gap-1.5">
-            <span>⚠</span> SPECTRAL ADVISORY
-          </div>
-          <ul className="list-disc list-inside text-[10px] text-[var(--bb-sand)] space-y-0.5">
+
+      {/* Weakest fit patches */}
+      {patches.length > 0 && (
+        <div className="space-y-1">
+          <div className="text-[10px] font-bold text-[var(--bb-smoke)] tracking-wider">WEAKEST PATCHES (FIT ΔE00)</div>
+          <ol className="grid grid-cols-2 gap-x-3 text-[10px] text-[var(--bb-sand)]" data-testid="weakest-patches">
+            {[...patches]
+              .sort((a, b) => b.deltaE - a.deltaE)
+              .slice(0, 5)
+              .map((p) => (
+                <li key={p.patch} className="flex justify-between">
+                  <span>{p.patch}</span>
+                  <span className="font-bold text-[var(--bb-orange)]">{p.deltaE.toFixed(2)}</span>
+                </li>
+              ))}
+          </ol>
+        </div>
+      )}
+
+      {/* Compact warnings: short causes up front, the unabridged failures one click away */}
+      {(warnings.length > 0 || gateFailures.length > 0) && (
+        <div className="p-2 bg-[var(--bb-ember-dark)]/40 border border-[var(--bb-crimson)] space-y-1.5" data-testid="warnings">
+          <ul className="space-y-0.5 text-[10px] text-[var(--bb-sand)]">
             {warnings.map((w, i) => (
-              <li key={i}>{w}</li>
+              <li key={i} className="flex gap-1.5">
+                <span className="text-[var(--bb-gold)]">⚠</span>
+                <span>{w}</span>
+              </li>
             ))}
           </ul>
+          {gateFailures.length > 0 && (
+            <details>
+              <summary className="cursor-pointer text-[9px] text-[var(--bb-smoke)] hover:text-[var(--bb-gold)]">
+                DETAILS ({gateFailures.length} checks)
+              </summary>
+              <div className="pt-1.5">
+                <QualityFailures failures={gateFailures} />
+              </div>
+            </details>
+          )}
         </div>
       )}
 

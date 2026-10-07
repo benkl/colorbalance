@@ -11,9 +11,17 @@ use colorbalance_core::profile::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tauri::{Emitter, State, Window};
 
-use crate::AppState;
+/// Stage reporter for long commands: `(label, step, steps)`, called as each
+/// stage starts. `step` is 1-based. The IPC layer turns these into events;
+/// tests and other callers pass [`no_progress`].
+pub type Report<'a> = &'a dyn Fn(&str, usize, usize);
+
+/// Batch reporter: `(completed, total, file just started)`.
+pub type BatchReport = std::sync::Arc<dyn Fn(usize, usize, Option<&Path>) + Send + Sync>;
+
+/// A reporter that discards every stage.
+pub fn no_progress(_label: &str, _step: usize, _steps: usize) {}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -77,6 +85,8 @@ pub struct DeriveResponse {
     report_path: Option<String>,
     digest: String,
     quality_passed: bool,
+    quality_override: bool,
+    gate_failures: Vec<GateFailureResponse>,
     validation: ValidationResponse,
     patches: Vec<PatchResponse>,
     warnings: Vec<String>,
@@ -171,10 +181,11 @@ fn preview_data_url(image: &DecodedImage) -> Result<String, BackendError> {
 
 /// Decode a reference image and return a displayable preview with its true
 /// dimensions, so the light-table can show it before any calibration step.
-#[tauri::command]
-pub fn load_reference(path: String) -> Result<LoadedReference, BackendError> {
+pub fn load_reference(path: String, report: Report) -> Result<LoadedReference, BackendError> {
+    report("Decoding image", 1, 2);
     let image = decode_auto(Path::new(&path))?;
     let quad = quad_from_payload(None, image.width, image.height);
+    report("Rendering preview", 2, 2);
     Ok(LoadedReference {
         image_width: image.width,
         image_height: image.height,
@@ -183,26 +194,25 @@ pub fn load_reference(path: String) -> Result<LoadedReference, BackendError> {
     })
 }
 
-#[tauri::command]
 pub fn inspect_reference(
     path: String,
     chart_revision: String,
     quad: Option<QuadPayload>,
-    quick_and_dirty: bool,
+    report: Report,
 ) -> Result<InspectResponse, BackendError> {
+    report("Decoding image", 1, 4);
     let image = decode_auto(Path::new(&path))?;
     let revision = parse_revision(&chart_revision)?;
     let chart_quad = quad_from_payload(quad, image.width, image.height);
+    report("Sampling chart patches", 2, 4);
     let samples = calibration::sample_patches(&image, &chart_quad)
         .map_err(|error| BackendError::Message(error.to_string()))?;
-    let gate_config = if quick_and_dirty {
-        GateConfig::quick_and_dirty()
-    } else {
-        GateConfig::default()
-    };
+    report("Checking quality gates", 3, 4);
+    let gate_config = gate_config_for(&image);
     let failures = calibration::evaluate_quality(&samples, &gate_config)
         .err()
         .unwrap_or_default();
+    report("Rendering preview", 4, 4);
     let preview = Some(preview_data_url(&image)?);
     Ok(InspectResponse {
         camera: image.camera,
@@ -223,90 +233,96 @@ pub fn inspect_reference(
     })
 }
 
-/// Turn the quality-gate failures into a short, actionable message.
+/// True when the source is a rendered JPEG/PNG rather than RAW.
+fn is_rendered_source(image: &DecodedImage) -> bool {
+    image.camera.decoder == colorbalance_raw::JPEG_DECODER_NAME
+}
+
+/// Rendered sources get the relaxed gate set; RAW never does.
+fn gate_config_for(image: &DecodedImage) -> GateConfig {
+    if is_rendered_source(image) {
+        GateConfig::quick_and_dirty()
+    } else {
+        GateConfig::default()
+    }
+}
+
+/// Short, human-readable warnings for the gate failures, one line per cause.
 ///
-/// Failures are grouped by patch and carry the measured value, so a user can
-/// tell "the chart is clipped" from "the corners are off" at a glance.
-pub fn gate_failure_message(failures: &[calibration::GateFailure]) -> String {
-    let clipped = failures
-        .iter()
-        .filter(|f| f.reason.starts_with("clipped"))
-        .count();
-    let noisy = failures
-        .iter()
-        .filter(|f| f.reason.contains("coefficient of variation"))
-        .count();
+/// Counts patches rather than individual checks so a chart with several failed
+/// channels does not read as dozens of problems.
+fn gate_warnings(failures: &[calibration::GateFailure], rendered: bool) -> Vec<String> {
+    let distinct = |matches: &dyn Fn(&calibration::GateFailure) -> bool| {
+        let mut seen: Vec<String> = Vec::new();
+        for failure in failures.iter().filter(|f| matches(f)) {
+            let label = failure
+                .patch
+                .map_or_else(|| "chart".to_owned(), |patch| format!("{patch:?}"));
+            if !seen.contains(&label) {
+                seen.push(label);
+            }
+        }
+        seen.len()
+    };
+    let clipped = distinct(&|f| f.reason.starts_with("clipped"));
+    let noisy = distinct(&|f| f.reason.contains("coefficient of variation"));
     let layout = failures
         .iter()
         .any(|f| f.reason.starts_with("last row is not the neutral row"));
+    let other = distinct(&|f| {
+        !f.reason.starts_with("clipped")
+            && !f.reason.contains("coefficient of variation")
+            && !f.reason.starts_with("last row is not the neutral row")
+    });
 
-    let mut lines = vec![format!(
-        "Quality gates failed ({} checks): {clipped} clipped, {noisy} too noisy{}.",
-        failures.len(),
-        if layout {
-            ", chart orientation looks wrong"
-        } else {
-            ""
-        }
-    )];
-    let mut seen: Vec<String> = Vec::new();
-    for failure in failures {
-        let label = failure
-            .patch
-            .map_or_else(|| "chart".to_owned(), |patch| format!("{patch:?}"));
-        let kind = failure
-            .reason
-            .replace(" coefficient of variation", " noise");
-        let entry = format!("{label}: {kind} ({})", failure.measured);
-        if !seen.contains(&entry) {
-            seen.push(entry);
-        }
-    }
-    for entry in seen.iter().take(6) {
-        lines.push(format!("- {entry}"));
-    }
-    if seen.len() > 6 {
-        lines.push(format!("- ...and {} more", seen.len() - 6));
+    let mut warnings = Vec::new();
+    if rendered {
+        warnings.push("Rendered JPEG/PNG source: approximate, not RAW.".to_owned());
     }
     if clipped > 0 {
-        lines.push(
-            "Clipped patches carry no colour information. Re-shoot at lower exposure, \
-             or tick Quick & Dirty to fit an approximation from a JPEG."
-                .to_owned(),
-        );
+        warnings.push(format!(
+            "{clipped} clipped patch(es): re-shoot at lower exposure."
+        ));
     }
-    lines.join("\n")
+    if noisy > 0 {
+        warnings.push(format!(
+            "{noisy} noisy patch(es): glare or corners off the patches."
+        ));
+    }
+    if layout {
+        warnings.push("Chart looks rotated: check the corner order.".to_owned());
+    }
+    if other > 0 {
+        warnings.push(format!("{other} other check(s) failed."));
+    }
+    warnings
 }
 
-#[tauri::command]
 pub fn derive_profile(
     path: String,
     chart_revision: String,
     profile_path: String,
     report_path: Option<String>,
     quad: Option<QuadPayload>,
-    quick_and_dirty: bool,
-    force: bool,
+    report: Report,
 ) -> Result<DeriveResponse, BackendError> {
+    let steps = if report_path.is_some() { 5 } else { 4 };
+    report("Decoding image", 1, steps);
     let image = decode_auto(Path::new(&path))?;
     let revision = parse_revision(&chart_revision)?;
     let chart_quad = quad_from_payload(quad, image.width, image.height);
     let dataset = colorbalance_core::dataset::load(revision)
         .map_err(|error| BackendError::Message(error.to_string()))?;
+    report("Sampling chart patches", 2, steps);
     let samples = calibration::sample_patches(&image, &chart_quad)
         .map_err(|error| BackendError::Message(error.to_string()))?;
-    let gate_config = if quick_and_dirty {
-        GateConfig::quick_and_dirty()
-    } else {
-        GateConfig::default()
-    };
+    let rendered = is_rendered_source(&image);
+    let gate_config = gate_config_for(&image);
     let failures = calibration::evaluate_quality(&samples, &gate_config)
         .err()
         .unwrap_or_default();
-    if !failures.is_empty() && !force && !quick_and_dirty {
-        return Err(BackendError::Message(gate_failure_message(&failures)));
-    }
 
+    report("Fitting the 3×3 transform", 3, steps);
     let (stages, validation) = calibration::fit(&samples, &dataset)
         .map_err(|error| BackendError::Message(error.to_string()))?;
     let reference_bytes = fs::read(&path)?;
@@ -334,30 +350,32 @@ pub fn derive_profile(
             condition_number: validation.condition_number,
             patch_count: validation.per_patch.len() as u32,
         },
+        quality: Some(profile::QualityProvenance::from_gates(
+            &failures, true, rendered,
+        )),
         digest: String::new(),
     };
     let mut profile_value: Profile = serde_json::from_str(&profile::to_json(&initial))
         .map_err(|error| BackendError::Message(error.to_string()))?;
     profile_value.digest = profile::digest(&profile_value);
+    report("Writing profile", 4, steps);
     fs::write(&profile_path, profile::to_json(&profile_value))?;
 
-    if let Some(report) = &report_path {
+    if let Some(report_file) = &report_path {
+        report("Writing report", 5, steps);
         fs::write(
-            report,
-            build_report_html(&profile_value, &chart_quad, &failures, quick_and_dirty),
+            report_file,
+            build_report_html(
+                &profile_value,
+                &chart_quad,
+                &failures,
+                &validation.per_patch,
+                rendered,
+            ),
         )?;
     }
 
-    let mut warnings = failures
-        .iter()
-        .map(|failure| format!("{}: {}", failure.reason, failure.measured))
-        .collect::<Vec<_>>();
-    if quick_and_dirty {
-        warnings.insert(
-            0,
-            "Quick-and-dirty approximation: source was rendered JPEG/PNG, not RAW.".to_owned(),
-        );
-    }
+    let warnings = gate_warnings(&failures, rendered);
     let validation_response = ValidationResponse {
         mean_delta_e: validation.mean_delta_e,
         median_delta_e: validation.median_delta_e,
@@ -383,26 +401,35 @@ pub fn derive_profile(
         profile_path,
         report_path,
         digest: profile_value.digest,
-        quality_passed: warnings.is_empty(),
+        quality_passed: failures.is_empty() && !rendered,
+        quality_override: !failures.is_empty(),
+        gate_failures: failures
+            .iter()
+            .map(|failure| GateFailureResponse {
+                patch: failure.patch.map(|patch| format!("{patch:?}")),
+                reason: failure.reason.clone(),
+                measured: failure.measured.clone(),
+            })
+            .collect(),
         validation: validation_response,
         patches,
         warnings,
     })
 }
 
-#[tauri::command]
+/// Run a batch. `on_progress(completed, total, file)` fires once at the start
+/// (`completed == 0`, no file), when each file starts (`file` set), and when
+/// each file finishes (`completed` counts finished files, including skipped and
+/// failed ones). Workers run concurrently, so `file` is the one that just began.
 pub fn apply_batch(
     profile_path: String,
     input_path: String,
     output_path: String,
     overwrite: bool,
-    force: bool,
-    state: State<'_, AppState>,
-    window: Window,
+    cancellation: colorbalance_core::CancelFlag,
+    on_progress: BatchReport,
 ) -> Result<BatchResponse, BackendError> {
-    state
-        .cancellation
-        .store(false, std::sync::atomic::Ordering::Relaxed);
+    cancellation.store(false, std::sync::atomic::Ordering::Relaxed);
     let profile_text = fs::read_to_string(&profile_path)?;
     let profile = std::sync::Arc::new(
         profile::from_json(&profile_text)
@@ -428,67 +455,43 @@ pub fn apply_batch(
             }
         }
     }
-    let result_total = inputs.len();
-    let window_clone = window.clone();
-    let progress =
-        std::sync::Arc::new(move |input: &std::path::Path, index: usize, total: usize| {
-            let _ = window_clone.emit(
-                "batch-progress",
-                serde_json::json!({
-                    "completed": index,
-                    "total": total,
-                    "file": input.display().to_string()
-                }),
+    let total = inputs.len();
+    let finished = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    on_progress(0, total, None);
+    let started = {
+        let on_progress = on_progress.clone();
+        let finished = finished.clone();
+        std::sync::Arc::new(move |input: &std::path::Path, _index: usize, total: usize| {
+            on_progress(
+                finished.load(std::sync::atomic::Ordering::Relaxed),
+                total,
+                Some(input),
             );
-        });
-    let process = move |input: &std::path::Path, output: std::path::PathBuf| {
-        if output.exists() && !overwrite {
-            return Ok(None);
-        }
-        let image = decode_auto(input).map_err(|e| e.to_string())?;
-        if (image.camera.make != profile.camera.make || image.camera.model != profile.camera.model)
-            && !force
-        {
-            return Err(format!(
-                "camera mismatch: {} {}",
-                image.camera.make, image.camera.model
-            ));
-        }
-        let mut pixels = Vec::with_capacity(image.rgb.len());
-        for rgb in image.rgb.as_chunks::<3>().0 {
-            let (corrected, _) = apply_transform(
-                &profile,
-                [f64::from(rgb[0]), f64::from(rgb[1]), f64::from(rgb[2])],
-            );
-            let encoded = [
-                colorbalance_core::color::srgb_encode(corrected[0]),
-                colorbalance_core::color::srgb_encode(corrected[1]),
-                colorbalance_core::color::srgb_encode(corrected[2]),
-            ];
-            pixels.extend_from_slice(&encode_srgb_u16(encoded));
-        }
-        let data = encode_tiff_rgb_u16(image.width, image.height, &pixels);
-        let temporary = output.with_extension("tiff.tmp");
-        fs::write(&temporary, data).map_err(|e| e.to_string())?;
-        fs::rename(&temporary, &output).map_err(|e| e.to_string())?;
-        Ok(Some(output))
+        })
     };
-    let summary = colorbalance_core::run_batch(
-        inputs,
-        &options,
-        Some(progress),
-        state.cancellation.clone(),
-        process,
-    )
-    .map_err(BackendError::Message)?;
-    let _ = window.emit(
-        "batch-progress",
-        serde_json::json!({
-            "completed": result_total,
-            "total": result_total,
-            "file": null
-        }),
-    );
+    let process = {
+        let on_progress = on_progress.clone();
+        let finished = finished.clone();
+        move |input: &std::path::Path, output: std::path::PathBuf| {
+            let result = (|| {
+                if output.exists() && !overwrite {
+                    return Ok(None);
+                }
+                let mut image = decode_auto(input).map_err(|e| e.to_string())?;
+                check_camera(&profile, &image)?;
+                let (pixels, _) = correct_in_place(&profile, &mut image);
+                let data = encode_tiff_rgb_u16(image.width, image.height, &pixels);
+                write_atomically(&output, &data).map_err(|e| e.to_string())?;
+                Ok(Some(output))
+            })();
+            let done = finished.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            on_progress(done, total, None);
+            result
+        }
+    };
+    let summary =
+        colorbalance_core::run_batch(inputs, &options, Some(started), cancellation, process)
+            .map_err(BackendError::Message)?;
     Ok(BatchResponse {
         succeeded: summary.succeeded.into_iter().map(|r| r.input).collect(),
         skipped: summary.skipped,
@@ -504,15 +507,154 @@ pub fn apply_batch(
     })
 }
 
-#[tauri::command]
-pub fn cancel_batch(state: State<'_, AppState>) -> Result<(), BackendError> {
-    state
-        .cancellation
-        .store(true, std::sync::atomic::Ordering::Relaxed);
+/// Fail closed when the image was not captured by the profile's camera.
+fn check_camera(profile: &Profile, image: &DecodedImage) -> Result<(), String> {
+    if image.camera.make != profile.camera.make || image.camera.model != profile.camera.model {
+        return Err(format!(
+            "camera mismatch (profile: {} {}, image: {} {})",
+            profile.camera.make, profile.camera.model, image.camera.make, image.camera.model
+        ));
+    }
     Ok(())
 }
 
-#[tauri::command]
+/// Apply the profile to every pixel and return the sRGB-encoded 16-bit samples
+/// plus the fraction of pixels the transform pushed out of gamut.
+///
+/// `image.rgb` is overwritten with the corrected linear sRGB values so the same
+/// buffer can feed the preview renderer; no second full-size copy is made.
+fn correct_in_place(profile: &Profile, image: &mut DecodedImage) -> (Vec<u16>, f64) {
+    let mut pixels = Vec::with_capacity(image.rgb.len());
+    let mut out_of_gamut = 0usize;
+    for rgb in image.rgb.as_chunks_mut::<3>().0 {
+        let (corrected, flags) = apply_transform(
+            profile,
+            [f64::from(rgb[0]), f64::from(rgb[1]), f64::from(rgb[2])],
+        );
+        if flags != 0 {
+            out_of_gamut += 1;
+        }
+        for (slot, value) in rgb.iter_mut().zip(corrected) {
+            *slot = value as f32;
+        }
+        let encoded = [
+            colorbalance_core::color::srgb_encode(corrected[0]),
+            colorbalance_core::color::srgb_encode(corrected[1]),
+            colorbalance_core::color::srgb_encode(corrected[2]),
+        ];
+        pixels.extend_from_slice(&encode_srgb_u16(encoded));
+    }
+    // The buffer is corrected sRGB now; the camera neutral no longer applies.
+    image.display_neutral = None;
+    let total = (image.rgb.len() / 3).max(1);
+    (pixels, out_of_gamut as f64 / total as f64)
+}
+
+/// Write `data` next to `output` through a unique temporary file, flush it to
+/// disk, then rename it into place. The temporary file is removed on failure.
+fn write_atomically(output: &Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let directory = output
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let temporary = directory.join(format!(
+        ".tmp-{}-{}.tiff",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let result = (|| {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        file.write_all(data)?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&temporary, output)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CorrectResponse {
+    /// Downscaled PNG of the image as decoded, for the "before" half.
+    before_data_url: String,
+    /// Downscaled PNG of the corrected image, for the "after" half.
+    after_data_url: String,
+    /// Where the corrected TIFF was written, when an output path was given.
+    output_path: Option<String>,
+    warnings: Vec<String>,
+}
+
+/// Correct one image with a saved profile.
+///
+/// Always returns before/after previews. When `output_path` is set the full
+/// resolution 16-bit TIFF is also written atomically; an existing file is an
+/// error unless `overwrite` is set. Camera mismatch fails closed.
+pub fn correct_image(
+    profile_path: String,
+    input_path: String,
+    output_path: Option<String>,
+    overwrite: bool,
+    report: Report,
+) -> Result<CorrectResponse, BackendError> {
+    let steps = if output_path.is_some() { 5 } else { 4 };
+    let profile = profile::from_json(&fs::read_to_string(&profile_path)?)
+        .map_err(|error| BackendError::Message(error.to_string()))?;
+    if let Some(output) = &output_path {
+        if Path::new(output).exists() && !overwrite {
+            return Err(BackendError::Message(format!(
+                "output already exists: {output}"
+            )));
+        }
+    }
+    report("Decoding image", 1, steps);
+    let mut image = decode_auto(Path::new(&input_path))?;
+    check_camera(&profile, &image).map_err(BackendError::Message)?;
+    report("Rendering original preview", 2, steps);
+    let before_data_url = preview_data_url(&image)?;
+    report("Applying the transform", 3, steps);
+    let (pixels, out_of_gamut) = correct_in_place(&profile, &mut image);
+    report("Rendering corrected preview", 4, steps);
+    let after_data_url = preview_data_url(&image)?;
+    if let Some(output) = &output_path {
+        report("Writing 16-bit TIFF", 5, steps);
+        let data = encode_tiff_rgb_u16(image.width, image.height, &pixels);
+        write_atomically(Path::new(output), &data)?;
+    }
+
+    let mut warnings = Vec::new();
+    if let Some(quality) = &profile.quality {
+        if quality.quick_and_dirty {
+            warnings.push("Profile came from a rendered image: approximate.".to_owned());
+        }
+        if !quality.failures.is_empty() {
+            warnings.push("Profile was derived despite failed quality checks.".to_owned());
+        }
+    }
+    if out_of_gamut > 0.01 {
+        warnings.push(format!(
+            "{:.1}% of pixels fall outside sRGB and were clipped.",
+            out_of_gamut * 100.0
+        ));
+    }
+    Ok(CorrectResponse {
+        before_data_url,
+        after_data_url,
+        output_path,
+        warnings,
+    })
+}
+
+/// Write the profile as CLF or `.cube`.
 pub fn export_profile(
     profile_path: String,
     format: String,
@@ -535,21 +677,62 @@ pub fn export_profile(
     Ok(output_path)
 }
 
+fn escape_html(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
 fn build_report_html(
     profile: &Profile,
     quad: &ChartQuad,
     failures: &[colorbalance_core::calibration::GateFailure],
-    quick_and_dirty: bool,
+    per_patch: &[calibration::PatchValidation],
+    rendered: bool,
 ) -> String {
-    let warning = if quick_and_dirty {
-        "QUICK & DIRTY APPROXIMATION: rendered source; sRGB inversion is approximate."
-    } else if failures.is_empty() {
+    let status = if failures.is_empty() && !rendered {
         "QUALITY GATES PASS"
+    } else if failures.is_empty() {
+        "RENDERED SOURCE: approximate, sRGB inversion is not RAW"
+    } else if rendered {
+        "RENDERED SOURCE: approximate, with quality warnings"
     } else {
-        "QUALITY GATES OVERRIDDEN"
+        "QUALITY WARNINGS: profile derived despite failed gates"
     };
-    format!(
-        "<!doctype html><meta charset=\"utf-8\"><title>ColorBalance Report</title><h1>{warning}</h1><p>Profile digest: {}</p><p>Mean ΔE2000: {:.3} | Max: {:.3}</p><p>Quad: {:?}</p>",
+    let mut html = format!(
+        "<!doctype html><meta charset=\"utf-8\"><title>ColorBalance Report</title><h1>{status}</h1><p>Profile digest: {}</p><p>Mean ΔE2000: {:.3} | Max: {:.3}</p><p>Quad: {:?}</p>",
         profile.digest, profile.validation.mean_delta_e, profile.validation.max_delta_e, quad.corners
-    )
+    );
+    if !failures.is_empty() {
+        html.push_str(&format!(
+            "<h2>Quality gate failures ({})</h2><table border=\"1\" cellpadding=\"4\"><tr><th>Patch</th><th>Reason</th><th>Measured</th></tr>",
+            failures.len()
+        ));
+        for failure in failures {
+            let patch = failure
+                .patch
+                .map_or_else(|| "chart".to_owned(), |patch| format!("{patch:?}"));
+            html.push_str(&format!(
+                "<tr><td>{}</td><td>{}</td><td>{}</td></tr>",
+                escape_html(&patch),
+                escape_html(&failure.reason),
+                escape_html(&failure.measured)
+            ));
+        }
+        html.push_str("</table>");
+    }
+    let mut ranked: Vec<&calibration::PatchValidation> = per_patch.iter().collect();
+    ranked.sort_by(|a, b| b.delta_e.total_cmp(&a.delta_e));
+    html.push_str(
+        "<h2>Patches by fit error</h2><table border=\"1\" cellpadding=\"4\"><tr><th>Patch</th><th>ΔE2000</th></tr>",
+    );
+    for row in ranked {
+        html.push_str(&format!(
+            "<tr><td>{:?}</td><td>{:.3}</td></tr>",
+            row.patch, row.delta_e
+        ));
+    }
+    html.push_str("</table>");
+    html
 }

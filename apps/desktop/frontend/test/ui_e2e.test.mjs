@@ -113,7 +113,6 @@ test('UI end-to-end: native file drop loads image, enables derive, and completes
     uiState.referencePath,
     'classic-from-nov-2014',
     undefined,
-    true,
   );
   assert.equal(inspected.imageWidth, 1864);
   assert.equal(inspected.imageHeight, 1398);
@@ -126,8 +125,6 @@ test('UI end-to-end: native file drop loads image, enables derive, and completes
     'colorbalance.cbprofile.json',
     'report.html',
     inspected.quad.map(([x, y]) => ({ x, y })),
-    true,
-    false,
   );
   assert.equal(derived.validation.patchCount, 24);
   assert.equal(derived.digest.length, 64);
@@ -145,8 +142,40 @@ test('UI end-to-end: native file drop loads image, enables derive, and completes
     uiState.batchInputPath,
     uiState.batchOutputPath,
     false,
-    false,
   );
   assert.equal(batchSummary.total, 3);
   assert.equal(batchSummary.succeeded.length, 3);
+});
+
+test('correct image: IPC carries the output path and returns backend-rendered previews', async () => {
+  const calls = [];
+  globalThis.window = {
+    __TAURI_INTERNALS__: {
+      invoke: async (cmd, args) => {
+        assert.equal(cmd, 'correct_image');
+        calls.push(args);
+        return {
+          beforeDataUrl: 'data:image/png;base64,AAAA',
+          afterDataUrl: 'data:image/png;base64,BBBB',
+          outputPath: args.outputPath ?? null,
+          warnings: [],
+        };
+      },
+      transformCallback: (fn) => fn,
+      unregisterCallback: () => undefined,
+      convertFileSrc: (path) => `asset://${path}`,
+    },
+  };
+  const tauri = await import('../src/tauri.ts');
+  const saved = await tauri.backend.correctImage('p.cbprofile.json', 'in.dng', 'out.tiff', false);
+  assert.deepEqual(calls[0], {
+    profilePath: 'p.cbprofile.json',
+    inputPath: 'in.dng',
+    outputPath: 'out.tiff',
+    overwrite: false,
+  });
+  assert.equal(saved.outputPath, 'out.tiff');
+  const preview = await tauri.backend.correctImage('p.cbprofile.json', 'in.dng');
+  assert.equal(preview.outputPath, null);
+  assert.notEqual(preview.beforeDataUrl, preview.afterDataUrl);
 });

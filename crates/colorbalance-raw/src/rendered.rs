@@ -53,10 +53,21 @@ pub fn decode_upright(path: &Path) -> Result<DynamicImage, DecodeError> {
 /// the preview keeps the decoded image's aspect ratio and orientation, so
 /// chart coordinates stay in full-resolution pixel space.
 pub fn render_preview_png(image: &DecodedImage, max_dim: u32) -> Result<Vec<u8>, DecodeError> {
+    // Camera RGB has no white balance under the decode contract, so a raw
+    // preview is strongly tinted. Divide by the camera's recorded neutral for
+    // display only; the buffer and every measurement stay untouched.
+    let gain = image
+        .display_neutral
+        .filter(|n| n.iter().all(|v| v.is_finite() && *v > 0.0))
+        .map_or([1.0_f64; 3], |n| n.map(|v| 1.0 / f64::from(v)));
     let mut bytes = Vec::with_capacity(image.rgb.len());
-    for &value in &image.rgb {
-        let encoded = colorbalance_core::color::srgb_encode(f64::from(value).clamp(0.0, 1.0));
-        bytes.push((encoded * 255.0).round().clamp(0.0, 255.0) as u8);
+    for pixel in image.rgb.chunks_exact(3) {
+        for (channel, &value) in pixel.iter().enumerate() {
+            let encoded = colorbalance_core::color::srgb_encode(
+                (f64::from(value) * gain[channel]).clamp(0.0, 1.0),
+            );
+            bytes.push((encoded * 255.0).round().clamp(0.0, 255.0) as u8);
+        }
     }
     let full = image::RgbImage::from_raw(image.width, image.height, bytes).ok_or_else(|| {
         DecodeError::CorruptFile("pixel buffer does not match dimensions".to_owned())
@@ -124,6 +135,7 @@ pub fn decode_rendered_image(path: &Path) -> Result<DecodedImage, DecodeError> {
         black_levels: [0; 4],
         white_levels: [255, 255, 255, 0],
         cfa_pattern: [0; 4],
+        display_neutral: None,
         camera: CameraIdentity {
             make: "Rendered Image (Quick & Dirty)".to_owned(),
             model: path
@@ -204,5 +216,53 @@ mod tests {
 
         assert_eq!((upright_plain.width, upright_plain.height), (8, 4));
         assert_eq!((upright_tagged.width, upright_tagged.height), (4, 8));
+    }
+
+    fn flat_image(rgb: [f32; 3], display_neutral: Option<[f32; 3]>) -> DecodedImage {
+        DecodedImage {
+            sensor_layout: colorbalance_core::decode::SensorLayout::LinearRaw,
+            width: 2,
+            height: 1,
+            rgb: [rgb, rgb].concat(),
+            clipped: vec![0; 2],
+            black_levels: [0; 4],
+            white_levels: [1; 4],
+            cfa_pattern: [0; 4],
+            display_neutral,
+            camera: colorbalance_core::decode::CameraIdentity {
+                make: "m".into(),
+                model: "m".into(),
+                decoder: "d".into(),
+                decoder_version: "1".into(),
+            },
+        }
+    }
+
+    fn first_pixel(png: &[u8]) -> [u8; 3] {
+        image::load_from_memory(png)
+            .unwrap()
+            .to_rgb8()
+            .get_pixel(0, 0)
+            .0
+    }
+
+    #[test]
+    fn preview_divides_by_the_as_shot_neutral_so_a_neutral_patch_shows_gray() {
+        // The neutral a camera records is exactly the raw RGB of a gray object.
+        let neutral = [0.5, 1.0, 0.25];
+        let image = flat_image(neutral, Some(neutral));
+        let [r, g, b] = first_pixel(&render_preview_png(&image, 16).unwrap());
+        assert_eq!((r, b), (g, g), "gray expected, got {r},{g},{b}");
+        assert_eq!(image.rgb[0], 0.5, "decoded buffer must stay untouched");
+    }
+
+    #[test]
+    fn preview_without_a_neutral_shows_the_raw_tint() {
+        let [r, g, b] =
+            first_pixel(&render_preview_png(&flat_image([0.5, 1.0, 0.25], None), 16).unwrap());
+        assert!(
+            r < g && b < r,
+            "unbalanced RGB must stay tinted, got {r},{g},{b}"
+        );
     }
 }

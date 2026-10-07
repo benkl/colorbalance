@@ -65,6 +65,18 @@ export interface DeriveResult {
   validation: ValidationSummary;
   patches: PatchValidation[];
   qualityPassed: boolean;
+  /** True when gates failed and the profile was derived under an explicit override. */
+  qualityOverride: boolean;
+  gateFailures: InspectGateFailure[];
+  warnings: string[];
+}
+
+/** Result of correcting one image: downscaled PNG previews rendered by the backend. */
+export interface CorrectResult {
+  beforeDataUrl: string;
+  afterDataUrl: string;
+  /** Path of the written TIFF, or null for a preview-only run. */
+  outputPath: string | null;
   warnings: string[];
 }
 

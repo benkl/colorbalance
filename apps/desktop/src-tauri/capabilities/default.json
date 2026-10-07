@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Capabilities required by the local ColorBalance image-processing workflow.",
   "windows": ["main"],
-  "permissions": ["dialog:default"]
+  "permissions": ["core:event:default", "dialog:default"]
 }

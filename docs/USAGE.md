@@ -39,7 +39,7 @@ $$\text{input} \in [0.0, 1.0]^3, \quad \text{linear light, camera raw colorimetr
 
 1. **Not for camera-developed images**: The transform must **not** be applied directly to finished, tone-curved, or sRGB-encoded JPEG/TIFF files. Applying the transform to already-gamma-encoded values produces severe over-saturation and crushed shadows.
 2. **Not for RAW editors without contract reproduction**: Exported CLF and `.cube` files do **not** reproduce RAW decoding. They require the host to provide the exact linear camera-RGB arrays defined by the profile's decode contract.
-3. **Quick-and-Dirty mode exception**: When calibrating from camera-processed JPEG frames using `--quick-and-dirty`, sRGB non-linearities are inverted to approximate linear scene values. This mode is explicitly flagged with warning badges in the profile and reports.
+3. **Rendered-source exception**: When the reference is a camera-processed JPEG or PNG, sRGB non-linearities are inverted to approximate linear scene values. The CLI selects this with `--quick-and-dirty`. The desktop app detects it from the file. The profile and report flag the result as approximate.
 
 ## 4. Why DNG Camera Profile (DCP) is Deferred
 
@@ -87,3 +87,50 @@ colorbalance export studio.cbprofile.json --format clf -o studio.clf
 # Export to 3D LUT (.cube) with custom grid size
 colorbalance export studio.cbprofile.json --format cube --size 33 -o studio.cube
 ```
+
+### Quality warnings in the desktop app
+
+The desktop app never blocks derivation on chart quality. It derives the profile, then shows what it found. There are no Quick & Dirty or "derive despite failures" checkboxes.
+
+- A rendered JPEG or PNG source is detected from the file contents and gets the relaxed gate set. A RAW source always gets the strict gates.
+- The result header reads `CAPTURE QUALITY PASS` or `PROCESSED WITH N WARNING(S)`. Each warning is one line, for example `10 clipped patch(es): re-shoot at lower exposure.` The unabridged per-patch list sits under `DETAILS`.
+- The profile stores a `quality` record with `passed`, `overridden`, `quick-and-dirty`, and every failed gate (patch, reason, measured value). `overridden` is true whenever gates failed and the profile was written anyway. Profiles written before this field existed omit it and keep their digests.
+- The HTML report repeats the failures and ranks all patches by fit error.
+
+A low fit error does not mean the capture was sound. Clipped patches carry no color information, and noisy or misaligned patches bias the fit. Check the corners and exposure before trusting a profile that came with warnings.
+
+The CLI is unchanged. `derive` still refuses a failing chart unless you pass `--force`, and `--quick-and-dirty` still selects the relaxed gates.
+
+### Correcting single images and comparing before and after
+
+Once a profile is derived, step 2 of the desktop app offers three actions:
+
+- **Before / after** corrects the reference image and opens the comparison viewer over the viewport.
+- **Save reference** does the same and also writes the corrected reference as a 16-bit sRGB TIFF.
+- **Correct single image** picks any image, corrects it with the profile, shows before and after, and writes a TIFF.
+
+Both previews are rendered in Rust and downscaled to 1600 px on the long side. The TIFF is full resolution. The writer uses a temporary file in the destination folder, flushes it, then renames it, so a failed write leaves no partial output. The save dialog confirms replacing an existing file. The camera must match the profile. A mismatch fails with both camera names and writes nothing, so a profile derived from a rendered JPEG cannot correct a RAW file.
+
+#### Comparison viewer controls
+
+A toolbar above the image controls what the viewport shows. Both images always share one zoom and pan, so the same pixels stay aligned.
+
+| Control | Effect | Key |
+| --- | --- | --- |
+| Split | Reveals the original on one side of a draggable line, with the corrected image on the other. | `1` |
+| Side by side | Original and corrected in two panes. | `2` |
+| Before / After | One image alone. | `3` / `4` |
+| Left-right or top-bottom | Direction of the split line. Arrow keys nudge it by 2%. | arrows |
+| Zoom `-` `+`, Fit, 100% | The readout is display pixels per preview pixel, up to 800%. From 200% up, pixels render unsmoothed. | `-` `+` |
+| Mouse wheel, double-click | Zoom at the cursor. Double-click toggles between fit and 2x. | |
+| Drag | Pans while zoomed. At least 48 px of the image stays in view. | |
+| Hold: Before | Shows the original while held. | Space |
+| Backdrop | Dark, mid-gray, or light surround for judging color. | |
+| Reset | Fit zoom, no pan, split at 50%. | `0` |
+| Close | Back to the chart view. | Esc |
+
+### Why a raw preview looks green
+
+The decode contract uses unity white balance, so a DNG decodes as unbalanced camera RGB. Sensors collect much more green than red or blue, so that data looks green. A Galaxy S25 DNG averaged R 76, G 96, B 70 before balancing. Phone galleries hide this because they apply the camera's recorded neutral.
+
+For display only, the preview and the "before" image divide each channel by the DNG `AsShotNeutral` tag. On the same file that gives R 103, G 96, B 96. Pixel values, calibration, chart measurement, and corrected output never see this gain, and rendered JPEG/PNG sources have none. The "before" image is a white-balanced view of the camera data, not what the contract decodes.

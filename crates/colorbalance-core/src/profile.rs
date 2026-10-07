@@ -41,8 +41,66 @@ pub struct Profile {
     pub transform: FittedStages,
     /// Validation summary of the fit.
     pub validation: ValidationSummary,
+    /// Chart-quality outcome recorded at derivation. Absent in profiles
+    /// written before this field existed; those serialize unchanged, so
+    /// their digests stay valid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quality: Option<QualityProvenance>,
     /// sha256 hex digest of the canonical JSON with this field empty.
     pub digest: String,
+}
+
+/// Chart-quality gate outcome stored with a profile.
+///
+/// `passed` is true only when no gate failed. `overridden` is true when
+/// gates failed and the user derived anyway. `quick_and_dirty` marks the
+/// relaxed gate set used for rendered JPEG/PNG references.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct QualityProvenance {
+    /// No quality gate failed.
+    pub passed: bool,
+    /// Gates failed and derivation proceeded under an explicit override.
+    pub overridden: bool,
+    /// The relaxed quick-and-dirty gate set was used.
+    pub quick_and_dirty: bool,
+    /// Every failed gate, unabridged.
+    pub failures: Vec<QualityFailure>,
+}
+
+/// One failed quality gate.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct QualityFailure {
+    /// Chart patch name, or `None` for chart-wide checks.
+    pub patch: Option<String>,
+    /// What failed.
+    pub reason: String,
+    /// Measured value that failed the gate.
+    pub measured: String,
+}
+
+impl QualityProvenance {
+    /// Build provenance from gate failures and the user's choices.
+    pub fn from_gates(
+        failures: &[crate::calibration::GateFailure],
+        forced: bool,
+        quick_and_dirty: bool,
+    ) -> Self {
+        Self {
+            passed: failures.is_empty(),
+            overridden: !failures.is_empty() && (forced || quick_and_dirty),
+            quick_and_dirty,
+            failures: failures
+                .iter()
+                .map(|failure| QualityFailure {
+                    patch: failure.patch.map(|patch| format!("{patch:?}")),
+                    reason: failure.reason.clone(),
+                    measured: failure.measured.clone(),
+                })
+                .collect(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -219,6 +277,7 @@ mod tests {
                 condition_number: 1.0432,
                 patch_count: 24,
             },
+            quality: None,
             digest: String::new(),
         }
     }
@@ -425,5 +484,62 @@ mod tests {
         assert_eq!(encode_srgb_u16([0.0, 1.0, 0.5]), [0, 65535, 32768]);
         assert_eq!(encode_srgb_u16([0.0001, 0.25, 0.75]), [7, 16384, 49151]);
         // 0.25 * 65535 = 16383.75 -> 16384; 0.75 * 65535 = 49151.25 -> 49151.
+    }
+
+    #[test]
+    fn profile_without_quality_keeps_digest_and_omits_field() {
+        let p = sealed_profile();
+        assert!(p.quality.is_none());
+        let json = to_json(&p);
+        assert!(!json.contains("\"quality\""));
+        let back = from_json(&json).expect("legacy-shaped profile loads");
+        assert!(back.quality.is_none());
+        assert_eq!(digest(&back), back.digest);
+    }
+
+    #[test]
+    fn quality_provenance_round_trips_and_is_digest_covered() {
+        use crate::calibration::GateFailure;
+        use crate::chart::ChartPatch;
+        let failures = vec![GateFailure {
+            patch: Some(ChartPatch::DarkSkin),
+            reason: "channel 2 coefficient of variation above limit".to_owned(),
+            measured: "0.055777".to_owned(),
+        }];
+        let mut p = test_profile();
+        p.quality = Some(QualityProvenance::from_gates(&failures, true, false));
+        p.digest = digest(&p);
+
+        let back = from_json(&to_json(&p)).expect("profile with quality loads");
+        let quality = back.quality.as_ref().expect("quality survives");
+        assert!(!quality.passed);
+        assert!(quality.overridden);
+        assert!(!quality.quick_and_dirty);
+        assert_eq!(quality.failures.len(), 1);
+        assert_eq!(quality.failures[0].patch.as_deref(), Some("DarkSkin"));
+        assert_eq!(quality.failures[0].measured, "0.055777");
+
+        // Editing the recorded failure list must break the seal.
+        let mut tampered = back;
+        tampered.quality.as_mut().expect("quality").failures.clear();
+        assert_ne!(digest(&tampered), tampered.digest);
+    }
+
+    #[test]
+    fn quality_provenance_flags_distinguish_pass_override_and_unforced() {
+        use crate::calibration::GateFailure;
+        let failure = GateFailure {
+            patch: None,
+            reason: "last row is not the neutral row".to_owned(),
+            measured: "x".to_owned(),
+        };
+        let clean = QualityProvenance::from_gates(&[], true, false);
+        assert!(clean.passed && !clean.overridden);
+
+        let forced = QualityProvenance::from_gates(std::slice::from_ref(&failure), true, false);
+        assert!(!forced.passed && forced.overridden);
+
+        let unforced = QualityProvenance::from_gates(std::slice::from_ref(&failure), false, false);
+        assert!(!unforced.passed && !unforced.overridden);
     }
 }

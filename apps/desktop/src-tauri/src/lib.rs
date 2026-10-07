@@ -56,12 +56,13 @@ pub fn run_app() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            crate::commands::load_reference,
-            crate::commands::inspect_reference,
-            crate::commands::derive_profile,
-            crate::commands::apply_batch,
-            crate::commands::cancel_batch,
-            crate::commands::export_profile,
+            crate::ipc::load_reference,
+            crate::ipc::inspect_reference,
+            crate::ipc::derive_profile,
+            crate::ipc::correct_image,
+            crate::ipc::apply_batch,
+            crate::ipc::cancel_batch,
+            crate::ipc::export_profile,
             choose_image,
             choose_directory,
             choose_save_path,
@@ -94,8 +95,10 @@ fn register_native_drag_drop(app: &mut App) {
     });
 }
 
+// Dialog commands are `async` on purpose: Tauri runs sync commands on the main
+// thread, and `blocking_*` dialog calls there stall the window event loop.
 #[tauri::command]
-fn choose_image(app: tauri::AppHandle) -> Option<String> {
+async fn choose_image(app: tauri::AppHandle) -> Option<String> {
     app.dialog()
         .file()
         .add_filter("Supported images", &["dng", "jpg", "jpeg", "png"])
@@ -104,7 +107,7 @@ fn choose_image(app: tauri::AppHandle) -> Option<String> {
 }
 
 #[tauri::command]
-fn choose_directory(app: tauri::AppHandle) -> Option<String> {
+async fn choose_directory(app: tauri::AppHandle) -> Option<String> {
     app.dialog()
         .file()
         .blocking_pick_folder()
@@ -112,7 +115,7 @@ fn choose_directory(app: tauri::AppHandle) -> Option<String> {
 }
 
 #[tauri::command]
-fn choose_save_path(
+async fn choose_save_path(
     app: tauri::AppHandle,
     default_path: String,
     extension: String,
@@ -126,6 +129,7 @@ fn choose_save_path(
 }
 
 pub mod commands;
+pub mod ipc;
 
 #[cfg(test)]
 mod tests {

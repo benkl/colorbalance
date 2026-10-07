@@ -1,10 +1,12 @@
 import React, { useEffect, useRef, useState } from 'react';
-import type { ChartQuad, ChartRevision, DeriveResult, BatchSummary, InspectResult } from './types';
-import { backend, chooseDirectory, chooseImage, chooseSavePath, listenForBatchProgress, listenForFileDrop, listenForFileDropHover } from './tauri';
-import type { BatchProgress } from './tauri';
+import type { ChartQuad, ChartRevision, CorrectResult, DeriveResult, BatchSummary, InspectResult } from './types';
+import { backend, chooseDirectory, chooseImage, chooseSavePath, listenForBatchProgress, listenForFileDrop, listenForFileDropHover, listenForOperationProgress } from './tauri';
+import type { BatchProgress, OperationProgress } from './tauri';
 import { referenceFromDrop } from './interaction';
 import { LightTableOverlay } from './components/LightTableOverlay';
 import { ValidationPanel } from './components/ValidationPanel';
+import { QualityFailures } from './components/QualityFailures';
+import { BeforeAfter } from './components/BeforeAfter';
 import { DiagnosticConsole } from './components/DiagnosticConsole';
 import { logger } from './logger';
 import {
@@ -31,8 +33,7 @@ export const App: React.FC = () => {
   // True pixel size of the displayed image; chart coordinates live in this space.
   const [imageSize, setImageSize] = useState<{ width: number; height: number }>({ width: 480, height: 320 });
   const [chartRevision, setChartRevision] = useState<ChartRevision | ''>('');
-  const [quickAndDirty, setQuickAndDirty] = useState<boolean>(false);
-  const [forceDerive] = useState<boolean>(false);
+  const [compare, setCompare] = useState<(CorrectResult & { source: string }) | null>(null);
 
   // Chart Quadrilateral State
   const [quad, setQuad] = useState<ChartQuad>([
@@ -56,6 +57,7 @@ export const App: React.FC = () => {
   const [overwriteOutputs, setOverwriteOutputs] = useState<boolean>(false);
   const [batchSummary, setBatchSummary] = useState<BatchSummary | null>(null);
   const [batchProgress, setBatchProgress] = useState<BatchProgress | null>(null);
+  const [operationProgress, setOperationProgress] = useState<OperationProgress | null>(null);
 
   useEffect(() => {
     const preventDefault = (event: DragEvent) => event.preventDefault();
@@ -121,6 +123,29 @@ export const App: React.FC = () => {
     return () => unlisten?.();
   }, []);
 
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    listenForOperationProgress(setOperationProgress)
+      .then((stop) => {
+        unlisten = stop;
+      })
+      .catch(() => {
+        // Browser preview mode
+      });
+    return () => unlisten?.();
+  }, []);
+
+  /** The backend runs commands off the UI thread; these bracket one so the progress strip and disabled buttons track it. */
+  const beginWork = () => {
+    setIsProcessing(true);
+    setOperationProgress(null);
+    setBatchProgress(null);
+  };
+  const endWork = () => {
+    setIsProcessing(false);
+    setOperationProgress(null);
+  };
+
   /** Default chart rectangle: 8% margin on every side of the image. */
   const defaultQuad = (width: number, height: number): ChartQuad => {
     const mx = Math.round(width * 0.08);
@@ -138,6 +163,7 @@ export const App: React.FC = () => {
     setReferencePath(path);
     setErrorMessage('');
     setInspectResult(null);
+    beginWork();
     try {
       const loaded = await backend.loadReference(path);
       setReferencePreview(loaded.previewDataUrl);
@@ -147,6 +173,8 @@ export const App: React.FC = () => {
     } catch (err: unknown) {
       setReferencePreview('');
       setErrorMessage(`Could not load image: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      endWork();
     }
   };
 
@@ -199,10 +227,10 @@ export const App: React.FC = () => {
       setErrorMessage('Explicitly select the physical chart revision before inspecting.');
       return;
     }
-    setIsProcessing(true);
+    beginWork();
     setErrorMessage('');
     try {
-      const result = await backend.inspectReference(referencePath, chartRevision, quad, quickAndDirty);
+      const result = await backend.inspectReference(referencePath, chartRevision, quad);
       setInspectResult(result);
       setQuad(result.quad.map(([x, y]) => ({ x, y })) as ChartQuad);
       if (result.previewDataUrl) {
@@ -211,7 +239,7 @@ export const App: React.FC = () => {
     } catch (error: unknown) {
       setErrorMessage(error instanceof Error ? error.message : String(error));
     } finally {
-      setIsProcessing(false);
+      endWork();
     }
   };
 
@@ -226,7 +254,6 @@ export const App: React.FC = () => {
     };
     probe.src = '/test-data/20261003_183314.jpg';
     setChartRevision('classic-from-nov-2014');
-    setQuickAndDirty(true);
     setDeriveResult({
       profilePath: 'studio_calibration.cbprofile.json',
       reportPath: 'studio_calibration_report.html',
@@ -252,6 +279,8 @@ export const App: React.FC = () => {
         { patch: 'Neutral8', sourceRgb: [0.58, 0.58, 0.56], correctedRgb: [0.582, 0.584, 0.562], targetRgb: [0.583, 0.584, 0.561], deltaE: 0.22 },
         { patch: 'Black', sourceRgb: [0.03, 0.03, 0.03], correctedRgb: [0.031, 0.031, 0.032], targetRgb: [0.031, 0.031, 0.032], deltaE: 0.09 },
       ],
+      qualityOverride: false,
+      gateFailures: [],
     });
   };
 
@@ -265,8 +294,8 @@ export const App: React.FC = () => {
       return;
     }
     setErrorMessage('');
-    setIsProcessing(true);
-    setTimeout(async () => {
+    beginWork();
+    void (async () => {
       try {
         const result = await backend.deriveProfile(
           referencePath,
@@ -274,8 +303,6 @@ export const App: React.FC = () => {
           'colorbalance_profile.cbprofile.json',
           'colorbalance_report.html',
           quad,
-          quickAndDirty,
-          forceDerive,
         );
         setDeriveResult(result);
         setStep(2);
@@ -288,9 +315,47 @@ export const App: React.FC = () => {
           setErrorMessage(error instanceof Error ? error.message : String(error));
         }
       } finally {
-        setIsProcessing(false);
+        endWork();
       }
-    }, 50);
+    })();
+  };
+
+  /**
+   * Correct one image with the derived profile and show before/after.
+   * With `save` the full-resolution TIFF is also written; the native save
+   * dialog has already asked about replacing an existing file.
+   */
+  const runCorrect = async (input: string, save: boolean) => {
+    if (!deriveResult?.profilePath) {
+      setErrorMessage('Derive a profile first.');
+      return;
+    }
+    setErrorMessage('');
+    beginWork();
+    try {
+      let output: string | undefined;
+      if (save) {
+        const name = (input.split(/[\\/]/).pop() ?? 'image').replace(/\.[^.]+$/, '');
+        const chosen = await chooseSavePath(`${name}_corrected.tiff`, 'tiff');
+        if (!chosen) return;
+        output = chosen;
+      }
+      const result = await backend.correctImage(deriveResult.profilePath, input, output, true);
+      setCompare({ ...result, source: input });
+    } catch (error: unknown) {
+      setErrorMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      endWork();
+    }
+  };
+
+  const handleCorrectSingle = async () => {
+    try {
+      const picked = await chooseImage();
+      if (picked) await runCorrect(picked, true);
+    } catch {
+      setErrorMessage('Image picker requires the desktop application.');
+    }
   };
 
   const handleRunBatch = () => {
@@ -299,24 +364,23 @@ export const App: React.FC = () => {
       return;
     }
     setErrorMessage('');
-    setIsProcessing(true);
-    setTimeout(async () => {
+    beginWork();
+    void (async () => {
       try {
         const result = await backend.applyBatch(
           deriveResult.profilePath,
           batchInputPath,
           batchOutputPath,
           overwriteOutputs,
-          false,
         );
         setBatchSummary(result);
         setStep(4);
       } catch (error: unknown) {
         setErrorMessage(error instanceof Error ? error.message : String(error));
       } finally {
-        setIsProcessing(false);
+        endWork();
       }
-    }, 50);
+    })();
   };
 
   return (
@@ -372,6 +436,38 @@ export const App: React.FC = () => {
         </div>
       </header>
 
+      {/* Live progress: stage of the running single-image command, or finished/total for a batch. */}
+      {isProcessing && (
+        <div data-testid="progress-strip" className="shrink-0 px-3 py-1.5 bg-[var(--bb-vacuum)] border-b border-[var(--bb-border)] flex items-center gap-3 text-[10px] text-[var(--bb-smoke)]">
+          <span data-testid="progress-label" className="font-bold text-[var(--bb-amber)] tracking-wider shrink-0">
+            {batchProgress ? 'BATCH' : operationProgress ? operationProgress.stage.toUpperCase() : 'WORKING'}…
+          </span>
+          <div className="flex-1 h-1 bg-[var(--bb-charcoal)] border border-[var(--bb-border)] overflow-hidden">
+            <div
+              data-testid="progress-bar"
+              className={`h-full bg-gradient-to-r from-[var(--bb-crimson)] via-[var(--bb-orange)] to-[var(--bb-gold)] transition-all ${batchProgress || operationProgress ? '' : 'animate-pulse w-full'}`}
+              style={
+                batchProgress
+                  ? { width: `${batchProgress.total > 0 ? (batchProgress.completed / batchProgress.total) * 100 : 0}%` }
+                  : operationProgress
+                    ? { width: `${((operationProgress.step - 1) / operationProgress.steps) * 100}%` }
+                    : undefined
+              }
+            />
+          </div>
+          <span data-testid="progress-count" className="shrink-0 tabular-nums">
+            {batchProgress
+              ? `${batchProgress.completed}/${batchProgress.total} FILES`
+              : operationProgress
+                ? `STEP ${operationProgress.step}/${operationProgress.steps}`
+                : ''}
+          </span>
+          {batchProgress?.file && (
+            <span className="truncate max-w-[260px]">{batchProgress.file.split(/[\\/]/).pop()}</span>
+          )}
+        </div>
+      )}
+
       {/* Global Error Banner */}
       {errorMessage && (
         <div className="shrink-0 px-3 py-1.5 bg-[var(--bb-ember-dark)] border-b border-[var(--bb-crimson)] text-[11px] text-[var(--bb-white)] flex items-center justify-between gap-2 shadow-[0_0_15px_rgba(179,35,11,0.5)]">
@@ -405,15 +501,24 @@ export const App: React.FC = () => {
 
         {/* Left Side: Fully Contained Light-Table Viewport */}
         <div className="flex-1 min-w-0 h-full border-r border-[var(--bb-border)] flex flex-col bg-[var(--bb-vacuum)] overflow-hidden">
-          <LightTableOverlay
-            imageSrc={referencePreview}
-            imageWidth={imageSize.width}
-            imageHeight={imageSize.height}
-            quad={quad}
-            onQuadChange={setQuad}
-            onBrowse={browseReference}
-            disabled={isProcessing}
-          />
+          {compare ? (
+            <BeforeAfter
+              key={compare.source}
+              beforeSrc={compare.beforeDataUrl}
+              afterSrc={compare.afterDataUrl}
+              onClose={() => setCompare(null)}
+            />
+          ) : (
+            <LightTableOverlay
+              imageSrc={referencePreview}
+              imageWidth={imageSize.width}
+              imageHeight={imageSize.height}
+              quad={quad}
+              onQuadChange={setQuad}
+              onBrowse={browseReference}
+              disabled={isProcessing}
+            />
+          )}
         </div>
 
         {/* Right Side: Fixed Inspector HUD */}
@@ -468,8 +573,20 @@ export const App: React.FC = () => {
                   </button>
                 </div>
                 {inspectResult && (
-                  <div className={`px-2.5 py-1.5 border text-[10px] ${inspectResult.qualityPassed ? 'border-[var(--bb-amber)] text-[var(--bb-gold)] bg-[var(--bb-panel)]' : 'border-[var(--bb-crimson)] text-[var(--bb-orange)] bg-[var(--bb-ember-dark)]/40'}`}>
-                    {inspectResult.qualityPassed ? '✓ CHART PASSED QUALITY GATES' : `⚠ ${inspectResult.gateFailures.length} QUALITY GATE WARNING(S)`}
+                  <div className={`px-2.5 py-1.5 border text-[10px] space-y-1.5 ${inspectResult.qualityPassed ? 'border-[var(--bb-amber)] text-[var(--bb-gold)] bg-[var(--bb-panel)]' : 'border-[var(--bb-crimson)] text-[var(--bb-orange)] bg-[var(--bb-ember-dark)]/40'}`}>
+                    <div>
+                      {inspectResult.qualityPassed
+                        ? '✓ CHART PASSED QUALITY GATES'
+                        : `⚠ ${inspectResult.gateFailures.length} QUALITY WARNING(S): deriving still works`}
+                    </div>
+                    {inspectResult.gateFailures.length > 0 && (
+                      <details>
+                        <summary className="cursor-pointer text-[9px] text-[var(--bb-smoke)]">DETAILS</summary>
+                        <div className="pt-1.5">
+                          <QualityFailures failures={inspectResult.gateFailures} />
+                        </div>
+                      </details>
+                    )}
                   </div>
                 )}
               </div>
@@ -486,24 +603,6 @@ export const App: React.FC = () => {
                   <option value="classic-before-nov-2014">ColorChecker Classic (Pre-Nov 2014)</option>
                   <option value="classic-from-nov-2014">ColorChecker Classic / Calibrite (Post-Nov 2014)</option>
                 </select>
-              </div>
-
-              {/* Quick & Dirty Mode Toggle */}
-              <div className="p-2.5 bg-[var(--bb-panel)] border border-[var(--bb-border)] space-y-1">
-                <label className="flex items-center gap-2 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={quickAndDirty}
-                    onChange={(e) => setQuickAndDirty(e.target.checked)}
-                    className="accent-[var(--bb-amber)]"
-                  />
-                  <span className="text-[11px] font-bold text-[var(--bb-gold)]">
-                    QUICK & DIRTY APPROXIMATION
-                  </span>
-                </label>
-                <p className="text-[9px] text-[var(--bb-smoke)] leading-relaxed">
-                  Inverts sRGB gamma non-linearities for non-RAW JPEG/PNG sources and relaxes neutral row constraints.
-                </p>
               </div>
 
               {/* Primary Action Button */}
@@ -537,7 +636,50 @@ export const App: React.FC = () => {
                 patches={deriveResult?.patches}
                 warnings={deriveResult?.warnings}
                 qualityPassed={deriveResult?.qualityPassed}
+                gateFailures={deriveResult?.gateFailures}
               />
+
+              {/* Correct images with the derived profile */}
+              <div className="space-y-1.5 p-2.5 bg-[var(--bb-panel)] border border-[var(--bb-border)]" data-testid="correct-panel">
+                <div className="text-[9px] text-[var(--bb-smoke)] font-bold tracking-wider">CORRECT AN IMAGE</div>
+                <div className="grid grid-cols-2 gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => runCorrect(referencePath, false)}
+                    disabled={isProcessing || !deriveResult || !referencePath}
+                    className="ui-btn ui-btn-secondary"
+                    data-testid="compare-reference"
+                  >
+                    <SearchCheck className="w-3 h-3" /> BEFORE / AFTER
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => runCorrect(referencePath, true)}
+                    disabled={isProcessing || !deriveResult || !referencePath}
+                    className="ui-btn ui-btn-secondary"
+                    data-testid="save-reference"
+                  >
+                    <Save className="w-3 h-3" /> SAVE REFERENCE
+                  </button>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleCorrectSingle}
+                  disabled={isProcessing || !deriveResult}
+                  className="ui-btn ui-btn-secondary w-full"
+                  data-testid="correct-single"
+                >
+                  <FolderOpen className="w-3 h-3" /> CORRECT SINGLE IMAGE…
+                </button>
+                {compare && (
+                  <div className="text-[10px] space-y-0.5" data-testid="correct-result">
+                    {compare.outputPath && <div className="text-[var(--bb-gold)] break-all">✓ SAVED {compare.outputPath}</div>}
+                    {compare.warnings.map((w, i) => (
+                      <div key={i} className="text-[var(--bb-orange)]">⚠ {w}</div>
+                    ))}
+                  </div>
+                )}
+              </div>
 
               <div className="pt-2 flex gap-2">
                 <button
@@ -636,22 +778,6 @@ export const App: React.FC = () => {
                 </p>
               </div>
 
-              {/* Live Batch Progress Bar */}
-              {isProcessing && batchProgress && (
-                <div className="space-y-1.5 p-2 bg-[var(--bb-vacuum)] border border-[var(--bb-border)]">
-                  <div className="flex justify-between text-[9px] text-[var(--bb-smoke)]">
-                    <span className="truncate max-w-[220px]">{batchProgress.file ?? 'FINALIZING…'}</span>
-                    <span>{batchProgress.completed}/{batchProgress.total}</span>
-                  </div>
-                  <div className="h-1 bg-[var(--bb-charcoal)] border border-[var(--bb-border)] overflow-hidden">
-                    <div
-                      className="h-full bg-gradient-to-r from-[var(--bb-crimson)] via-[var(--bb-orange)] to-[var(--bb-gold)] transition-all"
-                      style={{ width: `${batchProgress.total > 0 ? (batchProgress.completed / batchProgress.total) * 100 : 0}%` }}
-                    />
-                  </div>
-                </div>
-              )}
-
               <div className="grid grid-cols-4 gap-1.5">
                 <button
                   type="button"
@@ -664,7 +790,7 @@ export const App: React.FC = () => {
                 </button>
                 <button
                   type="button"
-                  disabled={!isProcessing}
+                  disabled={!isProcessing || !batchProgress}
                   onClick={async () => {
                     try {
                       await backend.cancelBatch();
@@ -714,6 +840,25 @@ export const App: React.FC = () => {
                       </div>
                     </div>
                   </div>
+
+                  {batchSummary.failed.length > 0 && (
+                    <div
+                      className="p-2.5 bg-[var(--bb-ember-dark)]/40 border border-[var(--bb-crimson)] space-y-1"
+                      data-testid="batch-failures"
+                    >
+                      <div className="text-[10px] font-bold text-[var(--bb-orange)] tracking-wider">
+                        FAILED FILES
+                      </div>
+                      <ul className="space-y-1 text-[9px] text-[var(--bb-sand)] max-h-40 overflow-y-auto">
+                        {batchSummary.failed.map((item) => (
+                          <li key={item.file}>
+                            <span className="text-[var(--bb-gold)] break-all">{item.file}</span>
+                            <div className="text-[var(--bb-orange)]">{item.error}</div>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
 
                   {/* Export Options */}
                   <div className="p-2.5 bg-[var(--bb-vacuum)] border border-[var(--bb-border)] space-y-1.5">

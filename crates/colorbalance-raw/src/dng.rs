@@ -219,6 +219,25 @@ impl<'a> Tiff<'a> {
             .map_err(|_| corrupt(format!("tag {tag} is not valid UTF-8")))
     }
 
+    /// Camera as-shot neutral for display previews. Absent or malformed
+    /// values yield `None`: this never gates decoding.
+    fn as_shot_neutral(&self) -> Option<[f32; 3]> {
+        let entry = self.entries.get(&50_728)?;
+        if entry.field_type != 5 || entry.count != 3 {
+            return None;
+        }
+        let data = self.data(entry).ok()?;
+        let mut out = [0.0_f32; 3];
+        for (slot, value) in out.iter_mut().zip(data.chunks_exact(8)) {
+            let denominator = self.order.u32(&value[4..]);
+            if denominator == 0 {
+                return None;
+            }
+            *slot = (f64::from(self.order.u32(&value[..4])) / f64::from(denominator)) as f32;
+        }
+        out.iter().all(|v| *v > 0.0).then_some(out)
+    }
+
     fn black_levels(&self) -> Result<[u16; 4], DngError> {
         let entry = self.required(50_714)?;
         let data = self.data(entry)?;
@@ -580,6 +599,7 @@ fn parse_linear_raw(tiff: &Tiff<'_>, width: u32, height: u32) -> Result<DecodedI
         black_levels: [black[0], black[1], black[2], 0],
         white_levels: [white[0], white[1], white[2], 0],
         cfa_pattern: [0; 4],
+        display_neutral: tiff.as_shot_neutral(),
         camera: CameraIdentity {
             make: tiff.ascii(271)?,
             model: tiff.ascii(272)?,
@@ -797,6 +817,7 @@ fn parse_dng(bytes: &[u8]) -> Result<DecodedImage, DngError> {
         black_levels,
         white_levels,
         cfa_pattern,
+        display_neutral: tiff.as_shot_neutral(),
         camera: CameraIdentity {
             make: tiff.ascii(271)?,
             model: tiff.ascii(272)?,

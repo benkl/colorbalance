@@ -173,6 +173,7 @@ mod tests {
                 .into(),
             transform,
             validation,
+            quality: None,
             digest: String::new(),
         };
         p.digest = crate::profile::digest(&p);

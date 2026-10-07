@@ -2,7 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 import { logger } from './logger.ts';
-import type { BatchSummary, ChartQuad, ChartRevision, DeriveResult, InspectResult, LoadedReference } from './types';
+import type { BatchSummary, ChartQuad, ChartRevision, CorrectResult, DeriveResult, InspectResult, LoadedReference } from './types';
 
 export type { UnlistenFn };
 
@@ -12,6 +12,14 @@ export interface BatchProgress {
   file: string | null;
 }
 
+/** Stage report from a single-image command (`load`, `inspect`, `derive`, `correct`). */
+export interface OperationProgress {
+  operation: 'load' | 'inspect' | 'derive' | 'correct';
+  stage: string;
+  step: number;
+  steps: number;
+}
+
 export interface DroppedFiles {
   paths: string[];
   position: { x: number; y: number };
@@ -19,9 +27,10 @@ export interface DroppedFiles {
 
 export interface BackendBridge {
   loadReference(path: string): Promise<LoadedReference>;
-  inspectReference(path: string, revision: ChartRevision, quad?: ChartQuad, quickAndDirty?: boolean): Promise<InspectResult>;
-  deriveProfile(path: string, revision: ChartRevision, profilePath: string, reportPath?: string, quad?: ChartQuad, quickAndDirty?: boolean, force?: boolean): Promise<DeriveResult>;
-  applyBatch(profilePath: string, inputPath: string, outputPath: string, overwrite?: boolean, force?: boolean): Promise<BatchSummary>;
+  inspectReference(path: string, revision: ChartRevision, quad?: ChartQuad): Promise<InspectResult>;
+  deriveProfile(path: string, revision: ChartRevision, profilePath: string, reportPath?: string, quad?: ChartQuad): Promise<DeriveResult>;
+  correctImage(profilePath: string, inputPath: string, outputPath?: string, overwrite?: boolean): Promise<CorrectResult>;
+  applyBatch(profilePath: string, inputPath: string, outputPath: string, overwrite?: boolean): Promise<BatchSummary>;
   cancelBatch(): Promise<void>;
   exportProfile(profilePath: string, format: 'clf' | 'cube', outputPath: string, size?: number): Promise<string>;
 }
@@ -38,14 +47,13 @@ export const backend: BackendBridge = {
       throw err;
     }
   },
-  inspectReference: async (path, revision, quad, quickAndDirty) => {
-    logger.ipc('IPC', `Invoking inspect_reference on "${path}" [${revision}] (quickAndDirty: ${Boolean(quickAndDirty)})`);
+  inspectReference: async (path, revision, quad) => {
+    logger.ipc('IPC', `Invoking inspect_reference on "${path}" [${revision}]`);
     try {
       const result = await invoke<InspectResult>('inspect_reference', {
         path,
         chartRevision: revision,
         quad: quad ? { corners: quad.map(({ x, y }) => [x, y]) } : undefined,
-        quickAndDirty,
       });
       logger.success('IPC', `inspect_reference succeeded: ${result.imageWidth}x${result.imageHeight} (${result.qualityPassed ? 'PASS' : 'WARN'})`);
       return result;
@@ -54,7 +62,7 @@ export const backend: BackendBridge = {
       throw err;
     }
   },
-  deriveProfile: async (path, revision, profilePath, reportPath, quad, quickAndDirty, force) => {
+  deriveProfile: async (path, revision, profilePath, reportPath, quad) => {
     logger.ipc('IPC', `Invoking derive_profile on "${path}" -> "${profilePath}"`);
     try {
       const result = await invoke<DeriveResult>('derive_profile', {
@@ -63,8 +71,6 @@ export const backend: BackendBridge = {
         profilePath,
         reportPath,
         quad: quad ? { corners: quad.map(({ x, y }) => [x, y]) } : undefined,
-        quickAndDirty,
-        force,
       });
       logger.success('IPC', `derive_profile completed: mean ΔE = ${result.validation.meanDeltaE.toFixed(3)}, max ΔE = ${result.validation.maxDeltaE.toFixed(3)}`);
       return result;
@@ -73,7 +79,23 @@ export const backend: BackendBridge = {
       throw err;
     }
   },
-  applyBatch: async (profilePath, inputPath, outputPath, overwrite, force) => {
+  correctImage: async (profilePath, inputPath, outputPath, overwrite) => {
+    logger.ipc('IPC', `Invoking correct_image: "${inputPath}"${outputPath ? ` -> "${outputPath}"` : ' (preview only)'}`);
+    try {
+      const result = await invoke<CorrectResult>('correct_image', {
+        profilePath,
+        inputPath,
+        outputPath,
+        overwrite: Boolean(overwrite),
+      });
+      logger.success('IPC', `correct_image complete${result.outputPath ? `: wrote "${result.outputPath}"` : ''}`);
+      return result;
+    } catch (err: unknown) {
+      logger.error('IPC', `correct_image failed: ${err instanceof Error ? err.message : String(err)}`);
+      throw err;
+    }
+  },
+  applyBatch: async (profilePath, inputPath, outputPath, overwrite) => {
     logger.ipc('IPC', `Invoking apply_batch: "${inputPath}" -> "${outputPath}"`);
     try {
       const result = await invoke<BatchSummary>('apply_batch', {
@@ -81,9 +103,11 @@ export const backend: BackendBridge = {
         inputPath,
         outputPath,
         overwrite,
-        force,
       });
       logger.success('IPC', `apply_batch complete: ${result.succeeded.length} succeeded, ${result.skipped.length} skipped, ${result.failed.length} failed`);
+      for (const failure of result.failed) {
+        logger.error('IPC', `apply_batch failed for "${failure.file}": ${failure.error}`);
+      }
       return result;
     } catch (err: unknown) {
       logger.error('IPC', `apply_batch failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -161,6 +185,13 @@ export async function chooseSavePath(defaultPath: string, extension: string): Pr
 export function listenForBatchProgress(callback: (progress: BatchProgress) => void): Promise<UnlistenFn> {
   return listen<BatchProgress>('batch-progress', (event) => {
     logger.info('PROGRESS', `Batch item ${event.payload.completed}/${event.payload.total}: ${event.payload.file ?? 'DONE'}`);
+    callback(event.payload);
+  });
+}
+
+export function listenForOperationProgress(callback: (progress: OperationProgress) => void): Promise<UnlistenFn> {
+  return listen<OperationProgress>('operation-progress', (event) => {
+    logger.info('PROGRESS', `${event.payload.operation}: ${event.payload.stage} (${event.payload.step}/${event.payload.steps})`);
     callback(event.payload);
   });
 }

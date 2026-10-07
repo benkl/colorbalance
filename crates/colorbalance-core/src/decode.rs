@@ -51,6 +51,10 @@ pub struct DecodedImage {
     pub white_levels: [u16; 4],
     /// CFA colors for CFA images; zeroed for non-CFA layouts.
     pub cfa_pattern: [u8; 4],
+    /// Camera-recorded as-shot neutral (DNG `AsShotNeutral`, R, G, B), used
+    /// only to white-balance display previews. Never enters calibration or
+    /// correction; `None` when the file has none or `rgb` is no longer camera RGB.
+    pub display_neutral: Option<[f32; 3]>,
     pub camera: CameraIdentity,
 }
 
