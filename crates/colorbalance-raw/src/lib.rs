@@ -3,6 +3,7 @@
 pub mod dng_writer;
 pub mod rawler_decode;
 pub mod rendered;
+mod restart_ljpeg;
 
 pub use dng_writer::{write_dng, DngWriteSpec};
 pub use rawler_decode::{decode_raw, RawlerDecoder, DECODER_NAME, DECODER_VERSION};

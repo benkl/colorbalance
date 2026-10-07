@@ -144,23 +144,14 @@ fn full_frame_crop_is_accepted_but_smaller_crop_is_rejected() {
     assert!(error.contains("not the full frame"), "{error}");
 }
 
-#[test]
-fn linear_raw_jpeg_uses_measured_channels_not_a_cfa() {
-    use colorbalance_core::decode::SensorLayout;
-
-    // A single SOF3 pixel with three zero differences from the 12-bit
-    // initial predictor (2048). Frame component IDs are R=0, G=1, B=2.
-    let jpeg: &[u8] = &[
-        0xff, 0xd8, 0xff, 0xc3, 0, 17, 12, 0, 1, 0, 1, 3, 0, 0x11, 0, 1, 0x11, 0, 2, 0x11, 0, 0xff,
-        0xc4, 0, 20, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xda, 0, 12, 3, 0,
-        0, 1, 0, 2, 0, 1, 0, 0, 0x1f, 0xff, 0xd9,
-    ];
-    let path = temp_path("linear-raw");
+/// Write a three-component LinearRaw DNG around `jpeg`, a single lossless JPEG strip.
+/// Channel black levels are 0, 1024, 0 and white levels 4095, 3072, 2048.
+fn write_linear_raw(path: &std::path::Path, jpeg: &[u8], width: u32, height: u32) {
     let mut data = b"II*\0\x08\0\0\0".to_vec();
     let entries: &[(u16, u16, u32, u32)] = &[
         (254, 4, 1, 0),
-        (256, 4, 1, 1),
-        (257, 4, 1, 1),
+        (256, 4, 1, width),
+        (257, 4, 1, height),
         (258, 3, 3, 256),
         (259, 3, 1, 7),
         (262, 3, 1, 34_892),
@@ -169,14 +160,14 @@ fn linear_raw_jpeg_uses_measured_channels_not_a_cfa() {
         (273, 4, 1, 285),
         (274, 3, 1, 6),
         (277, 3, 1, 3),
-        (278, 4, 1, 1),
+        (278, 4, 1, height),
         (279, 4, 1, jpeg.len() as u32),
         (284, 3, 1, 1),
         (50_706, 1, 4, 0x0000_0601),
         (50_714, 3, 3, 273),
         (50_717, 3, 3, 279),
         (50_719, 3, 2, 0),
-        (50_720, 3, 2, 0x0001_0001),
+        (50_720, 3, 2, width | (height << 16)),
     ];
     data.extend_from_slice(&(entries.len() as u16).to_le_bytes());
     for &(tag, ty, count, value) in entries {
@@ -197,7 +188,22 @@ fn linear_raw_jpeg_uses_measured_channels_not_a_cfa() {
     }
     data.resize(285, 0);
     data.extend_from_slice(jpeg);
-    fs::write(&path, data).unwrap();
+    fs::write(path, data).unwrap();
+}
+
+#[test]
+fn linear_raw_jpeg_uses_measured_channels_not_a_cfa() {
+    use colorbalance_core::decode::SensorLayout;
+
+    // A single SOF3 pixel with three zero differences from the 12-bit
+    // initial predictor (2048). Frame component IDs are R=0, G=1, B=2.
+    let jpeg: &[u8] = &[
+        0xff, 0xd8, 0xff, 0xc3, 0, 17, 12, 0, 1, 0, 1, 3, 0, 0x11, 0, 1, 0x11, 0, 2, 0x11, 0, 0xff,
+        0xc4, 0, 20, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xda, 0, 12, 3, 0,
+        0, 1, 0, 2, 0, 1, 0, 0, 0x1f, 0xff, 0xd9,
+    ];
+    let path = temp_path("linear-raw");
+    write_linear_raw(&path, jpeg, 1, 1);
     let result = colorbalance_raw::decode_any(&path).unwrap();
     fs::remove_file(path).unwrap();
     assert_eq!(result.sensor_layout, SensorLayout::LinearRaw);
@@ -210,6 +216,71 @@ fn linear_raw_jpeg_uses_measured_channels_not_a_cfa() {
     assert!((pixel[0] - 2048.0 / 4095.0).abs() < 1e-6);
     assert!((pixel[1] - 1024.0 / 2048.0).abs() < 1e-6);
     assert_eq!(pixel[2], 1.0);
+}
+
+/// Three-component 12-bit lossless JPEG with a two-code Huffman table: `0` is a
+/// zero difference and `1` is category 1, followed by a sign bit (1 is +1, 0 is -1).
+fn restart_jpeg(lines: u16, restart_pixels: u16, entropy: &[u8]) -> Vec<u8> {
+    let mut jpeg = vec![0xff, 0xd8, 0xff, 0xc3, 0, 17, 12];
+    jpeg.extend_from_slice(&lines.to_be_bytes());
+    jpeg.extend_from_slice(&[0, 1, 3, 0, 0x11, 0, 1, 0x11, 0, 2, 0x11, 0]);
+    jpeg.extend_from_slice(&[0xff, 0xc4, 0, 21, 0, 2]);
+    jpeg.extend_from_slice(&[0; 15]);
+    jpeg.extend_from_slice(&[0, 1]);
+    jpeg.extend_from_slice(&[0xff, 0xdd, 0, 4]);
+    jpeg.extend_from_slice(&restart_pixels.to_be_bytes());
+    jpeg.extend_from_slice(&[0xff, 0xda, 0, 12, 3, 0, 0, 1, 0, 2, 0, 1, 0, 0]);
+    jpeg.extend_from_slice(entropy);
+    jpeg.extend_from_slice(&[0xff, 0xd9]);
+    jpeg
+}
+
+#[test]
+fn linear_raw_restart_intervals_reset_the_predictor() {
+    // Two rows of one pixel, one restart interval per row. Each interval codes
+    // +1, -1, 0 against the 12-bit initial predictor 2048, bits 11 10 0 plus
+    // one-padding (0xe7). Both rows must decode to (2049, 2047, 2048). A decoder
+    // that ignores the restart marker predicts row 1 from row 0 instead.
+    let jpeg = restart_jpeg(2, 1, &[0xe7, 0xff, 0xd0, 0xe7]);
+    let path = temp_path("linear-raw-restart");
+    write_linear_raw(&path, &jpeg, 1, 2);
+    let result = colorbalance_raw::decode_any(&path).unwrap();
+    fs::remove_file(path).unwrap();
+    // Orientation 6 turns the two rows into two columns.
+    assert_eq!((result.width, result.height), (2, 1));
+    for x in 0..2 {
+        let pixel = result.rgb_at(x, 0);
+        assert!((pixel[0] - 2049.0 / 4095.0).abs() < 1e-6, "{pixel:?}");
+        assert!((pixel[1] - 1023.0 / 2048.0).abs() < 1e-6, "{pixel:?}");
+        assert_eq!(pixel[2], 1.0, "{pixel:?}");
+    }
+}
+
+#[test]
+fn linear_raw_restart_marker_out_of_order_is_rejected() {
+    let jpeg = restart_jpeg(2, 1, &[0xe7, 0xff, 0xd1, 0xe7]);
+    let path = temp_path("linear-raw-restart-order");
+    write_linear_raw(&path, &jpeg, 1, 2);
+    let error = colorbalance_raw::decode_any(&path).unwrap_err().to_string();
+    fs::remove_file(path).unwrap();
+    assert!(error.contains("restart"), "{error}");
+}
+
+#[test]
+fn linear_raw_samples_far_above_white_fail_closed() {
+    // 16-bit precision starts every component at 32768, more than twice any
+    // white level this fixture declares (4095, 3072, 2048), as a decode that
+    // lost its place would produce.
+    let jpeg: &[u8] = &[
+        0xff, 0xd8, 0xff, 0xc3, 0, 17, 16, 0, 1, 0, 1, 3, 0, 0x11, 0, 1, 0x11, 0, 2, 0x11, 0, 0xff,
+        0xc4, 0, 20, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xda, 0, 12, 3, 0,
+        0, 1, 0, 2, 0, 1, 0, 0, 0x1f, 0xff, 0xd9,
+    ];
+    let path = temp_path("linear-raw-garbage");
+    write_linear_raw(&path, jpeg, 1, 1);
+    let error = colorbalance_raw::decode_any(&path).unwrap_err().to_string();
+    fs::remove_file(path).unwrap();
+    assert!(error.contains("twice the white level"), "{error}");
 }
 
 #[test]

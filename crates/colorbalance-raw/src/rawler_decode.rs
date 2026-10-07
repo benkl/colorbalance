@@ -7,8 +7,13 @@ use colorbalance_core::decode::{
     CameraIdentity, DecodeError, DecodedImage, RawDecoder, SensorLayout,
 };
 use rawler::decoders::{Orientation, RawDecodeParams};
+use rawler::formats::tiff::reader::TiffReader;
+use rawler::formats::tiff::GenericTiffReader;
 use rawler::rawimage::{BlackLevel, RawImage, RawImageData, RawPhotometricInterpretation};
 use rawler::rawsource::RawSource;
+use rawler::tags::TiffCommonTag;
+
+use crate::restart_ljpeg::decode_restart_strip;
 
 pub const DECODER_NAME: &str = "rawler-ahd";
 pub const DECODER_VERSION: &str = "0.8.0";
@@ -216,6 +221,22 @@ fn from_raw(image: RawImage) -> Result<DecodedImage, DecodeError> {
             &saturated,
         )
     } else {
+        // A correct decode stays near the white level (the S25 overshoots it by
+        // under 1%). Samples far beyond it mean the entropy decode went wrong,
+        // so stop instead of normalizing garbage into color math.
+        for (channel, white) in white_levels.iter().take(3).enumerate() {
+            let limit = u32::from(*white) * 2;
+            if samples
+                .iter()
+                .skip(channel)
+                .step_by(3)
+                .any(|&raw| u32::from(raw) > limit)
+            {
+                return Err(DecodeError::CorruptFile(format!(
+                    "channel {channel} has samples above twice the white level {white}; the lossless JPEG decode is not trustworthy"
+                )));
+            }
+        }
         let mut rgb = Vec::with_capacity(expected);
         let mut clipped = Vec::with_capacity(pixels);
         for raw in samples.as_chunks::<3>().0 {
@@ -269,6 +290,43 @@ fn from_raw(image: RawImage) -> Result<DecodedImage, DecodeError> {
     })
 }
 
+/// Replace rawler's samples with a restart-interval aware decode.
+///
+/// rawler 0.8.0 ignores JPEG restart markers, so a LinearRaw DNG that uses them
+/// decodes correctly for the first interval and as noise afterwards, without an
+/// error. The raw IFD is located the same way rawler does (compressed 7,
+/// full-resolution) and only that case is touched.
+fn repair_restart_intervals(source: &RawSource, image: &mut RawImage) -> Result<(), DecodeError> {
+    if !matches!(image.photometric, RawPhotometricInterpretation::LinearRaw) {
+        return Ok(());
+    }
+    let Ok(tiff) = GenericTiffReader::new_with_buffer(source.buf(), 0, 0, None) else {
+        return Ok(());
+    };
+    let corrupt = |message: String| DecodeError::CorruptFile(message);
+    let candidates = tiff.find_ifds_with_tag(TiffCommonTag::Compression);
+    let Some(ifd) = candidates.into_iter().find(|ifd| {
+        let value = |tag| ifd.get_entry(tag).map(|entry| entry.force_u32(0));
+        value(TiffCommonTag::Compression) == Some(7)
+            && value(TiffCommonTag::PhotometricInt) == Some(34_892)
+            && value(TiffCommonTag::NewSubFileType).unwrap_or(0) & 1 == 0
+    }) else {
+        return Ok(());
+    };
+    if !ifd.contains_singlestrip_image() {
+        return Ok(());
+    }
+    let strip = ifd
+        .singlestrip_data_rawsource(source)
+        .map_err(|e| corrupt(e.to_string()))?;
+    let samples = decode_restart_strip(strip, image.width, image.height, image.cpp)
+        .map_err(|e| corrupt(format!("lossless JPEG restart intervals: {e}")))?;
+    if let Some(samples) = samples {
+        image.data = RawImageData::Integer(samples);
+    }
+    Ok(())
+}
+
 pub fn decode_raw(path: &Path) -> Result<DecodedImage, DecodeError> {
     // rawler 0.8 reaches `todo!()` for photometric interpretations it does not
     // implement. Report that as an unsupported format instead of aborting.
@@ -279,9 +337,11 @@ pub fn decode_raw(path: &Path) -> Result<DecodedImage, DecodeError> {
                 "unrecognized image data; expected a DNG, JPEG, PNG, or camera RAW file supported by rawler ({e})"
             ))
         })?;
-        decoder
+        let mut image = decoder
             .raw_image(&source, &RawDecodeParams::default(), false)
-            .map_err(|e| DecodeError::CorruptFile(e.to_string()))
+            .map_err(|e| DecodeError::CorruptFile(e.to_string()))?;
+        repair_restart_intervals(&source, &mut image)?;
+        Ok(image)
     })
     .map_err(|_| {
         DecodeError::UnsupportedFormat(
