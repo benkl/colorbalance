@@ -19,7 +19,6 @@ import {
   Play,
   Cpu,
   AlertCircle,
-  Flame,
   Upload,
   SearchCheck,
   X,
@@ -498,14 +497,11 @@ export const App: React.FC = () => {
     })();
   };
 
-  /**
-   * Correct one image with the derived profile and show before/after.
-   * With `save` the full-resolution image is also written; the native save
-   * dialog has already asked about replacing an existing file.
-   */
+  /** The active Library entry wins over the session profile; single images still fail closed. */
+  const exportProfile = chooseBatchProfile(deriveResult?.profilePath ?? null, activeLibrary);
   const runCorrect = async (input: string, save: boolean) => {
-    if (!deriveResult?.profilePath) {
-      setErrorMessage('Derive a profile first.');
+    if (!exportProfile) {
+      setErrorMessage('Derive a profile or choose a library entry first.');
       return;
     }
     setErrorMessage('');
@@ -519,7 +515,7 @@ export const App: React.FC = () => {
         if (!chosen) return;
         output = chosen;
       }
-      const result = await backend.correctImage(deriveResult.profilePath, input, output, { ...exportSettings, overwrite: true }, false);
+      const result = await backend.correctImage(exportProfile.profilePath, input, output, { ...exportSettings, overwrite: true }, false);
       try {
         await Promise.all([decodePreview(result.beforeUrl), decodePreview(result.afterUrl)]);
       } catch (error) {
@@ -546,23 +542,20 @@ export const App: React.FC = () => {
     }
   };
 
-  // The viewport follows the tab: VALIDATE and EXPORT show the before/after of the
-  // loaded reference. Load it once per profile and reference, so a failure cannot loop.
+  // Preview the derived reference only. A Library profile may belong to a different camera.
   const previewAttempt = useRef('');
   useEffect(() => {
-    if (tab === 'reference' || tab === 'library' || compare || isProcessing || !deriveResult?.profilePath || !referencePath) return;
+    if (tab === 'reference' || tab === 'library' || activeLibrary || compare || isProcessing || !deriveResult?.profilePath || !referencePath) return;
     const key = `${deriveResult.profilePath}|${deriveResult.digest}|${referencePath}`;
     if (previewAttempt.current === key) return;
     previewAttempt.current = key;
     void runCorrect(referencePath, false);
   });
 
-  /** The profile the batch applies: an active library entry, else the profile derived in this session. */
-  const batchProfile = chooseBatchProfile(deriveResult?.profilePath ?? null, activeLibrary);
   const loadedCamera = inspectResult ? { make: inspectResult.camera.make, model: inspectResult.camera.model } : null;
 
   const handleRunBatch = () => {
-    if (!batchInputPath || !batchOutputPath || !batchProfile) {
+    if (!batchInputPath || !batchOutputPath || !exportProfile) {
       setErrorMessage('Select source and destination folders, and derive a profile or choose a library entry.');
       return;
     }
@@ -571,11 +564,11 @@ export const App: React.FC = () => {
     void (async () => {
       try {
         const result = await backend.applyBatch(
-          batchProfile.profilePath,
+          exportProfile.profilePath,
           batchInputPath,
           batchOutputPath,
           { ...exportSettings, overwrite: overwriteOutputs },
-          batchProfile.allowMismatch,
+          exportProfile.allowMismatch,
         );
         setBatchSummary(result);
       } catch (error: unknown) {
@@ -640,7 +633,7 @@ export const App: React.FC = () => {
   const useLibraryEntry = (entry: LibraryEntryView) => {
     setActiveLibrary(entry);
     setBatchSummary(null);
-    setTab('export');
+    setCompare(null);
   };
 
   const openSaveForm = () => {
@@ -690,18 +683,10 @@ export const App: React.FC = () => {
 
   return (
     <div className="w-screen h-screen flex flex-col bg-[var(--bb-space)] text-[var(--bb-sand)] font-mono select-none overflow-hidden">
-      {/* Top Precision Masthead */}
       <header className="h-10 shrink-0 border-b border-[var(--bb-border)] bg-[var(--bb-vacuum)] px-3 flex items-center justify-between text-xs">
-        <div className="flex items-center gap-2.5">
-          <div className="w-4 h-4 rounded-xs bg-[var(--bb-ember)] flex items-center justify-center border border-[var(--bb-gold)] thermal-glow">
-            <Flame className="w-3 h-3 text-[var(--bb-incandescent)]" />
-          </div>
-          <span className="font-bold tracking-widest text-[var(--bb-gold)] text-xs">
-            COLORBALANCE // LIGHT-TABLE OS
-          </span>
-          <span className="px-1.5 py-0.2 text-[9px] bg-[var(--bb-panel)] text-[var(--bb-amber)] border border-[var(--bb-border)]">
-            v0.1.0
-          </span>
+        <div className="flex items-center gap-2">
+          <span className="font-bold text-[var(--bb-sand)] text-xs">ColorBalance</span>
+          <span className="text-[9px] text-[var(--bb-smoke)]">v0.1.0</span>
         </div>
 
         {/* Workspace tabs */}
@@ -714,10 +699,10 @@ export const App: React.FC = () => {
                 key={item.id}
                 type="button"
                 onClick={() => openTab(item.id)}
-                className={`h-7 px-2.5 flex items-center gap-1.5 text-[10px] font-bold tracking-wider border cursor-pointer transition-all ${
+                className={`h-7 px-2.5 flex items-center gap-1.5 text-[10px] font-bold border-b cursor-pointer transition-colors ${
                   isActive
-                    ? 'bg-[var(--bb-surface)] text-[var(--bb-gold)] border-[var(--bb-gold)] shadow-[0_0_8px_rgba(245,185,49,0.2)]'
-                    : 'text-[var(--bb-smoke)] border-transparent hover:text-[var(--bb-sand)] hover:bg-[var(--bb-panel)]'
+                    ? 'text-[var(--bb-gold)] border-[var(--bb-gold)]'
+                    : 'text-[var(--bb-smoke)] border-transparent hover:text-[var(--bb-sand)]'
                 }`}
               >
                 <Icon className="w-3 h-3" />
@@ -727,13 +712,7 @@ export const App: React.FC = () => {
           })}
         </nav>
 
-        {/* Engine Status Diagnostic */}
-        <div className="flex items-center gap-2 text-[10px] text-[var(--bb-ash)]">
-          <span className="flex items-center gap-1 text-[var(--bb-amber)] font-bold">
-            <span className="w-1.5 h-1.5 rounded-full bg-[var(--bb-gold)] animate-pulse" />
-            ENGINE READY
-          </span>
-        </div>
+        <div className="text-[10px] text-[var(--bb-smoke)]">ENGINE READY</div>
       </header>
 
       {/* Live progress: stage of the running single-image command, or finished/total for a batch. */}
@@ -831,18 +810,13 @@ export const App: React.FC = () => {
           )}
         </div>
 
-        {/* Right Side: Fixed Inspector HUD */}
-        <aside className="w-[380px] shrink-0 h-full bg-[var(--bb-surface)] p-3.5 flex flex-col justify-between overflow-y-auto border-l border-[var(--bb-border)]">
+        {/* Workspace controls */}
+        <aside className="w-[380px] shrink-0 h-full bg-[var(--bb-surface)] p-4 flex flex-col overflow-y-auto border-l border-[var(--bb-border)]">
           {tab === 'reference' && (
             <div className="space-y-3.5">
-              <div className="border-b border-[var(--bb-border)] pb-2">
-                <h2 className="text-[11px] font-bold text-[var(--bb-gold)] tracking-wider flex items-center gap-1.5">
-                  <Layers className="w-3.5 h-3.5 text-[var(--bb-amber)]" />
-                  REFERENCE FRAME CALIBRATION
-                </h2>
-                <p className="text-[10px] text-[var(--bb-smoke)] mt-0.5">
-                  Load a RAW (DNG) or compressed ColorChecker frame to calculate 3×3 transformation.
-                </p>
+              <div className="border-b border-[var(--bb-border)] pb-2 space-y-1">
+                <h2 className="text-xs font-bold text-[var(--bb-sand)]">Reference</h2>
+                <p className="text-[10px] text-[var(--bb-smoke)]">Load a ColorChecker frame, check its corners, then derive a profile.</p>
               </div>
 
               <input
@@ -873,7 +847,7 @@ export const App: React.FC = () => {
                   type="button"
                   onClick={() => { if (loadedPath) void detectReference(loadedPath, referenceGeneration.current); }}
                   disabled={!loadedPath || detectionStatus === 'running' || isProcessing}
-                  className="ui-btn ui-btn-secondary w-full"
+                  className="ui-btn ui-btn-ghost w-full"
                 >
                   <SearchCheck className="w-3 h-3" /> {detectionStatus === 'running' ? 'FINDING CHART…' : 'FIND CHART / RETRY'}
                 </button>
@@ -900,7 +874,7 @@ export const App: React.FC = () => {
                   </button>
                 </div>
                 {inspectResult && (
-                  <div className={`px-2.5 py-1.5 border text-[10px] space-y-1.5 ${inspectResult.qualityPassed ? 'border-[var(--bb-amber)] text-[var(--bb-gold)] bg-[var(--bb-panel)]' : 'border-[var(--bb-crimson)] text-[var(--bb-orange)] bg-[var(--bb-ember-dark)]/40'}`}>
+                  <div className={`border-l-2 pl-2 text-[10px] space-y-1.5 ${inspectResult.qualityPassed ? 'border-[var(--bb-amber)] text-[var(--bb-gold)]' : 'border-[var(--bb-crimson)] text-[var(--bb-orange)]'}`}>
                     <div>
                       {inspectResult.qualityPassed
                         ? '✓ CHART PASSED QUALITY GATES'
@@ -918,7 +892,6 @@ export const App: React.FC = () => {
                 )}
               </div>
 
-              {/* Physical Chart Revision Selection */}
               <div className="space-y-1">
                 <label className="text-[9px] text-[var(--bb-smoke)] font-bold tracking-wider">CHART REVISION (REQUIRED)</label>
                 <select
@@ -932,7 +905,6 @@ export const App: React.FC = () => {
                 </select>
               </div>
 
-              {/* Primary Action Button */}
               <div className="pt-1">
                 <button
                   type="button"
@@ -965,13 +937,9 @@ export const App: React.FC = () => {
 
           {tab === 'validate' && (
             <div className="space-y-3.5">
-              <div className="border-b border-[var(--bb-border)] pb-2">
-                <h2 className="text-[11px] font-bold text-[var(--bb-gold)] tracking-wider">
-                  CALIBRATION VALIDATION
-                </h2>
-                <p className="text-[10px] text-[var(--bb-smoke)]">
-                  Verify patch error distributions and matrix condition numbers.
-                </p>
+              <div className="border-b border-[var(--bb-border)] pb-2 space-y-1">
+                <h2 className="text-xs font-bold text-[var(--bb-sand)]">Validate</h2>
+                <p className="text-[10px] text-[var(--bb-smoke)]">Check patch errors and capture warnings before using the profile.</p>
               </div>
 
               <ValidationPanel
@@ -982,17 +950,7 @@ export const App: React.FC = () => {
                 gateFailures={deriveResult?.gateFailures}
               />
 
-              <div className="pt-2 flex gap-2">
-                <button
-                  type="button"
-                  onClick={() => setTab('export')}
-                  disabled={!deriveResult}
-                  className="ui-btn ui-btn-primary flex-1 h-9"
-                >
-                  CONTINUE TO EXPORT →
-                </button>
-              </div>
-              <div className="space-y-1.5 p-2.5 bg-[var(--bb-panel)] border border-[var(--bb-border)]" data-testid="save-library-panel">
+              <div className="space-y-1.5 border-t border-[var(--bb-border)] pt-3" data-testid="save-library-panel">
                 <button
                   type="button"
                   onClick={openSaveForm}
@@ -1071,31 +1029,31 @@ export const App: React.FC = () => {
 
           {tab === 'export' && (
             <div className="space-y-3.5">
-              <div className="border-b border-[var(--bb-border)] pb-2">
-                <h2 className="text-[11px] font-bold text-[var(--bb-gold)] tracking-wider flex items-center gap-1.5">
-                  <Save className="w-3.5 h-3.5 text-[var(--bb-amber)]" />
-                  EXPORT
-                </h2>
-                <p className="text-[10px] text-[var(--bb-smoke)]">
-                  Save corrected images, interchange files, and run batches with the derived profile.
-                </p>
+              <div className="border-b border-[var(--bb-border)] pb-2 space-y-1">
+                <h2 className="text-xs font-bold text-[var(--bb-sand)]">Export</h2>
+                <p className="text-[10px] text-[var(--bb-smoke)]">Apply the active profile to an image or folder. Inputs are never changed.</p>
               </div>
 
-              {!deriveResult && !activeLibrary && (
-                <div className="p-2.5 bg-[var(--bb-panel)] border border-[var(--bb-border)] text-[10px] text-[var(--bb-smoke)]">
-                  Derive a profile on the REFERENCE tab to enable exports.
+              {exportProfile ? (
+                <div className="border-b border-[var(--bb-border)] pb-2 space-y-1 text-[10px]" data-testid="profile-files">
+                  <div className="text-[9px] text-[var(--bb-smoke)] font-bold tracking-wider">ACTIVE PROFILE · {exportProfile.source === 'library' ? 'LIBRARY' : 'DERIVED'}</div>
+                  <div className="text-[var(--bb-gold)] break-all">{activeLibrary?.label ?? exportProfile.profilePath}</div>
+                  {activeLibrary && <div className="text-[var(--bb-smoke)] break-all">{exportProfile.profilePath}</div>}
+                  {deriveResult && exportProfile.source === 'derived' && <div className="text-[var(--bb-smoke)] break-all">Report: {deriveResult.reportPath}</div>}
+                  {activeLibrary && (
+                    <>
+                      <button type="button" className="text-[var(--bb-amber)] underline" onClick={() => { setActiveLibrary(null); setCompare(null); }}>Clear Library selection</button>
+                      <p className="text-[var(--bb-smoke)]">Single images block camera or decode mismatches. Batches continue with per-file warnings; exposure mismatches still block.</p>
+                      <CameraMismatchNotice entry={activeLibrary} loadedCamera={loadedCamera} />
+                    </>
+                  )}
                 </div>
+              ) : (
+                <p className="text-[10px] text-[var(--bb-smoke)]">Derive a profile in Reference or select one in Library.</p>
               )}
 
-              {deriveResult && (
-                <div className="p-2.5 bg-[var(--bb-panel)] border border-[var(--bb-border)] space-y-0.5 text-[10px]" data-testid="profile-files">
-                  <div className="text-[9px] text-[var(--bb-smoke)] font-bold tracking-wider">PROFILE FILES</div>
-                  <div className="text-[var(--bb-gold)] break-all">{deriveResult.profilePath}</div>
-                  <div className="text-[var(--bb-gold)] break-all">{deriveResult.reportPath}</div>
-                </div>
-              )}
-
-              <div className="space-y-1.5 p-2.5 bg-[var(--bb-panel)] border border-[var(--bb-border)]" data-testid="output-space-panel">
+              <div className="space-y-1.5 border-b border-[var(--bb-border)] pb-3" data-testid="output-space-panel">
+                <h3 className="text-[10px] font-bold text-[var(--bb-sand)]">Output settings</h3>
                 <label htmlFor="export-format" className="text-[9px] text-[var(--bb-smoke)] font-bold tracking-wider">FILE FORMAT</label>
                 <select
                   id="export-format"
@@ -1164,33 +1122,22 @@ export const App: React.FC = () => {
                   />
                   <span className="text-[10px] text-[var(--bb-sand)]">Strip GPS location</span>
                 </label>
-                <p className="text-[9px] text-[var(--bb-smoke)]">
-                  Applies to saved and batch files, which embed a matching ICC profile. Basic camera and capture EXIF is copied. Previews on screen are always sRGB.
-                </p>
+                <p className="text-[9px] text-[var(--bb-smoke)]">Saved files embed a matching ICC profile and copy basic camera EXIF. On-screen previews use sRGB.</p>
               </div>
 
-              <div className="space-y-1.5 p-2.5 bg-[var(--bb-panel)] border border-[var(--bb-border)]" data-testid="correct-panel">
-                <div className="text-[9px] text-[var(--bb-smoke)] font-bold tracking-wider">
-                  CORRECTED IMAGES ({exportSettings.format === 'jpeg' ? '8-BIT JPEG' : '16-BIT TIFF'})
+              <div className="space-y-2 border-b border-[var(--bb-border)] pb-3" data-testid="correct-panel">
+                <div>
+                  <h3 className="text-[10px] font-bold text-[var(--bb-sand)]">One image</h3>
+                  <p className="text-[9px] text-[var(--bb-smoke)]">Choose an image, then choose where to write the corrected file.</p>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => runCorrect(referencePath, true)}
-                  disabled={isProcessing || !deriveResult || !referencePath}
-                  className="ui-btn ui-btn-secondary w-full"
-                  data-testid="save-reference"
-                >
-                  <Save className="w-3 h-3" /> SAVE REFERENCE
+                <button type="button" onClick={handleCorrectSingle} disabled={isProcessing || !exportProfile} className="ui-btn ui-btn-primary w-full" data-testid="correct-single">
+                  <FolderOpen className="w-3 h-3" /> APPLY &amp; SAVE IMAGE…
                 </button>
-                <button
-                  type="button"
-                  onClick={handleCorrectSingle}
-                  disabled={isProcessing || !deriveResult}
-                  className="ui-btn ui-btn-secondary w-full"
-                  data-testid="correct-single"
-                >
-                  <FolderOpen className="w-3 h-3" /> CORRECT SINGLE IMAGE…
-                </button>
+                {deriveResult && !activeLibrary && referencePath && (
+                  <button type="button" onClick={() => void runCorrect(referencePath, true)} disabled={isProcessing} className="ui-btn ui-btn-ghost w-full" data-testid="save-reference">
+                    <Save className="w-3 h-3" /> SAVE REFERENCE…
+                  </button>
+                )}
                 {compare && (
                   <div className="text-[10px] space-y-0.5" data-testid="correct-result">
                     {compare.outputPath && <div className="text-[var(--bb-gold)] break-all">✓ SAVED {compare.outputPath}</div>}
@@ -1202,64 +1149,35 @@ export const App: React.FC = () => {
                 )}
               </div>
 
-                <div className="p-2.5 bg-[var(--bb-vacuum)] border border-[var(--bb-border)] space-y-1.5">
-                  <span className="text-[9px] font-bold text-[var(--bb-smoke)] tracking-wider">EXPORT INTERCHANGE</span>
-                  <div className="grid grid-cols-2 gap-1.5">
-                    {(['clf', 'cube'] as const).map((format) => (
-                      <button
-                        key={format}
-                        type="button"
-                        className="ui-btn ui-btn-secondary"
-                        onClick={async () => {
-                          if (!deriveResult?.profilePath) {
-                            setErrorMessage('Derive a profile before exporting.');
-                            return;
-                          }
-                          try {
-                            const output = await chooseSavePath(`colorbalance.${format}`, format);
-                            if (output) await backend.exportProfile(deriveResult.profilePath, format, output, 33);
-                          } catch (error: unknown) {
-                            setErrorMessage(error instanceof Error ? error.message : String(error));
-                          }
-                        }}
-                      >
-                        <Save className="w-3 h-3" /> .{format.toUpperCase()}
-                      </button>
-                    ))}
-                  </div>
+              <details className="border-b border-[var(--bb-border)] pb-3 text-[10px]">
+                <summary className="cursor-pointer text-[var(--bb-smoke)]">Interchange files (.CLF / .cube)</summary>
+                <div className="grid grid-cols-2 gap-1.5 pt-2">
+                  {(['clf', 'cube'] as const).map((format) => (
+                    <button
+                      key={format}
+                      type="button"
+                      disabled={!exportProfile}
+                      className="ui-btn ui-btn-secondary"
+                      onClick={async () => {
+                        if (!exportProfile) return;
+                        try {
+                          const output = await chooseSavePath(`colorbalance.${format}`, format);
+                          if (output) await backend.exportProfile(exportProfile.profilePath, format, output, 33);
+                        } catch (error: unknown) {
+                          setErrorMessage(error instanceof Error ? error.message : String(error));
+                        }
+                      }}
+                    >
+                      <Save className="w-3 h-3" /> .{format.toUpperCase()}
+                    </button>
+                  ))}
                 </div>
+              </details>
 
-              <div className="border-t border-[var(--bb-border)] pt-3 space-y-3.5">
+              <div className="space-y-2.5">
                 <div>
-                  <h3 className="text-[11px] font-bold text-[var(--bb-gold)] tracking-wider flex items-center gap-1.5">
-                    <FolderOpen className="w-3.5 h-3.5 text-[var(--bb-amber)]" />
-                    BATCH
-                  </h3>
-                  <p className="text-[10px] text-[var(--bb-smoke)]">
-                    Select matching image folders for batch correction. Files are written with the format and metadata options above.
-                  </p>
-                  {activeLibrary && batchProfile?.source === 'library' && (
-                    <div className="mt-1.5 p-2 border border-[var(--bb-amber)] bg-[var(--bb-panel)] space-y-1 text-[10px]" data-testid="batch-active-library">
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="text-[9px] font-bold tracking-wider text-[var(--bb-amber)]">LIBRARY CALIBRATION ACTIVE</span>
-                        <button
-                          type="button"
-                          className="text-[9px] text-[var(--bb-smoke)] hover:text-[var(--bb-white)] cursor-pointer"
-                          onClick={() => setActiveLibrary(null)}
-                          data-testid="batch-clear-library"
-                        >
-                          {deriveResult ? 'USE DERIVED PROFILE' : 'CLEAR'}
-                        </button>
-                      </div>
-                      <div className="text-[var(--bb-gold)] break-words">{activeLibrary.label}</div>
-                      <div className="text-[var(--bb-sand)] break-words">{activeLibrary.cameraMake} {activeLibrary.cameraModel}</div>
-                      <div className="text-[var(--bb-smoke)] break-all">{activeLibrary.profilePath}</div>
-                      <div className="text-[var(--bb-smoke)]">
-                        A camera or decode-contract mismatch will not stop the batch; it is recorded as a warning in the batch report.
-                      </div>
-                      <CameraMismatchNotice entry={activeLibrary} loadedCamera={loadedCamera} />
-                    </div>
-                  )}
+                  <h3 className="text-[10px] font-bold text-[var(--bb-sand)]">Folder batch</h3>
+                  <p className="text-[9px] text-[var(--bb-smoke)]">Apply to supported images in a source folder; write to a separate folder.</p>
                 </div>
 
                 <div className="space-y-1">
@@ -1338,11 +1256,11 @@ export const App: React.FC = () => {
                   <button
                     type="button"
                     onClick={handleRunBatch}
-                    disabled={isProcessing || !batchInputPath || !batchOutputPath || !batchProfile}
+                    disabled={isProcessing || !batchInputPath || !batchOutputPath || !exportProfile}
                     className="ui-btn ui-btn-primary col-span-3 h-9"
                   >
                     <Cpu className="w-3.5 h-3.5" />
-                    {isProcessing ? 'PROCESSING…' : 'START BATCH'}
+                    {isProcessing ? 'PROCESSING…' : 'APPLY & WRITE BATCH'}
                   </button>
                   <button
                     type="button"

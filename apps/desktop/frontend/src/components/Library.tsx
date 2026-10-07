@@ -219,12 +219,12 @@ export const LibraryPanel: React.FC<PanelProps> = ({
           onClick={() => onUse(selected)}
           data-testid="library-use"
         >
-          {active?.id === selected.id ? 'ACTIVE FOR BATCH · GO TO EXPORT →' : 'USE FOR BATCH'}
+          {active?.id === selected.id ? 'ACTIVE PROFILE' : 'USE THIS PROFILE'}
         </button>
       </div>
     ) : (
       <div className="p-2.5 bg-[var(--bb-panel)] border border-[var(--bb-border)] text-[10px] text-[var(--bb-smoke)]">
-        Select a card to see its notes and use it for a batch.
+        Select a card to see its notes, then use it as the active profile on the Export tab.
       </div>
     )}
   </div>
@@ -238,6 +238,6 @@ export const CameraMismatchNotice: React.FC<{
   loadedCamera && libraryCameraMismatch(entry, loadedCamera) ? (
     <div className="p-2 border border-[var(--bb-orange)] bg-[var(--bb-ember-dark)]/30 text-[9px] text-[var(--bb-sand)]" data-testid="library-mismatch">
       <span className="font-bold text-[var(--bb-orange)]">⚠ CAMERA MISMATCH</span>: this calibration is for {entry.cameraMake} {entry.cameraModel}, the
-      loaded reference is {loadedCamera.make} {loadedCamera.model}. Applying it will proceed with a warning recorded in the batch report.
+      loaded reference is {loadedCamera.make} {loadedCamera.model}. A batch continues with a warning per file; a single image is refused.
     </div>
   ) : null;

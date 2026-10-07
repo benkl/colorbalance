@@ -151,16 +151,14 @@ The CLI is unchanged. `derive` still refuses a failing chart unless you pass `--
 
 ### Correcting single images and comparing before and after
 
-The desktop app has three tabs: **REFERENCE**, **VALIDATE**, and **EXPORT**. The viewport follows the active tab. REFERENCE shows the light table with the chart corners. VALIDATE and EXPORT show the before and after comparison of the reference, which loads after a profile is derived. Everything that writes a file lives on EXPORT:
+The desktop app has four tabs: **REFERENCE**, **VALIDATE**, **EXPORT**, and **LIBRARY**. Switch tabs from the header; no panel button moves you to the next one. The viewport follows the active tab. REFERENCE shows the light table with the chart corners. VALIDATE and EXPORT show the before and after comparison of the reference, which loads after a profile is derived. Everything that writes a file lives on EXPORT, and it always acts on one **active profile**: the Library entry you chose with "Use this profile", otherwise the profile derived in this session. Clear the Library selection on EXPORT to go back to the derived profile.
 
-- **Save reference** corrects the reference image and writes it as a 16-bit TIFF in the chosen TIFF color space (sRGB by default).
-- **Correct single image** picks any image, corrects it with the profile, shows before and after, and writes a TIFF.
-- **.CLF** and **.CUBE** export the transform for other tools.
-- **Batch** corrects a folder into a destination folder, with an overwrite switch and a stop button. The result counts, failed files, and warnings appear below the controls.
+- **Apply & save image** picks any image, corrects it with the active profile, shows before and after, and writes a TIFF or JPEG to the path you choose.
+- **Save reference** (derived profile only) corrects the reference image and writes it in the chosen format.
+- **Apply & write batch** corrects a folder into a destination folder, with an overwrite switch and a stop button. The result counts, failed files, and warnings appear below the controls.
+- **.CLF** and **.CUBE**, under "Interchange files", export the active profile's transform for other tools.
 
-The **BEFORE / AFTER** button on VALIDATE reloads the comparison without saving anything.
-
-Both previews are rendered in Rust and downscaled to 1600 px on the long side. The TIFF is full resolution. The writer uses a temporary file in the destination folder, flushes it, then renames it, so a failed write leaves no partial output. The save dialog confirms replacing an existing file. The camera must match the profile. A mismatch fails with both camera names and writes nothing, so a profile derived from a rendered JPEG cannot correct a RAW file.
+Both previews are rendered in Rust and downscaled to 1600 px on the long side. The saved file is full resolution. The writer uses a temporary file in the destination folder, flushes it, then renames it, so a failed write leaves no partial output. The save dialog confirms replacing an existing file. For a single image, the camera and decode contract must match the profile, whether the profile is derived or from the Library. A mismatch fails with both camera names and writes nothing, so a profile derived from a rendered JPEG cannot correct a RAW file. Only Library batches continue past a camera or decode-contract mismatch; see the Library section.
 
 The desktop app keeps downscaled PNG previews in a private temporary directory and displays them through Tauri's asset protocol. It waits for replacement images to decode and for subsequent animation frames before removing previews it no longer needs; failed replacements leave the old image available. Closing the app removes any remaining files. Original images and saved TIFFs are not webview asset files.
 
@@ -198,4 +196,4 @@ To save an entry, derive a profile, then use "Save to library" on the Validate t
 
 To share a calibration, copy its folder into another person's library folder. To use a `.cube` or `.clf` file, run `colorbalance export` on the entry's `profile.cbprofile.json`.
 
-"Use for batch" makes an entry the active profile. If the entry's camera or decode contract differs from the batch image, the file is still processed and the batch report carries a warning for it. The result will be wrong in color unless the two cameras behave alike. Exposure mismatches still stop processing.
+"Use this profile" makes an entry the active profile for EXPORT and stays on the Library tab; switch to EXPORT to apply it. The active profile is used for single images, batches, and interchange export. For a batch, if the entry's camera or decode contract differs from the image, the file is still processed and the batch report carries a warning for it. The result will be wrong in color unless the two cameras behave alike. Exposure mismatches still stop processing. Single-image export with a Library entry does not have this exception: a mismatch fails and writes nothing.

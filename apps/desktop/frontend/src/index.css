@@ -104,7 +104,7 @@
   animation: thermal-pulse 2.8s infinite ease-in-out;
 }
 
-/* Precision Minimalist Monospace Button Framework */
+/* Shared controls */
 .ui-btn {
   display: inline-flex;
   align-items: center;
@@ -118,51 +118,31 @@
   font-family: 'JetBrains Mono', monospace;
   font-size: 11px;
   font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  transition: all 120ms ease;
-  position: relative;
-  overflow: hidden;
+  letter-spacing: 0.02em;
+  transition: color 120ms ease, background 120ms ease, border-color 120ms ease;
   cursor: pointer;
-  border-radius: 1px;
+  border-radius: 2px;
 }
 
-/* Corner registration marks */
-.ui-btn::before,
-.ui-btn::after {
-  content: '';
-  position: absolute;
-  width: 4px;
-  height: 4px;
-  border-color: currentColor;
-  pointer-events: none;
-}
-.ui-btn::before { top: 2px; left: 2px; border-top: 1px solid; border-left: 1px solid; }
-.ui-btn::after { right: 2px; bottom: 2px; border-right: 1px solid; border-bottom: 1px solid; }
-
-.ui-btn:active { transform: translateY(1px); }
 
 .ui-btn-primary {
-  color: var(--bb-white);
-  background: linear-gradient(135deg, var(--bb-ember) 0%, var(--bb-crimson) 50%, var(--bb-orange) 100%);
+  color: var(--bb-vacuum);
+  background: var(--bb-gold);
   border-color: var(--bb-gold);
-  box-shadow: 0 0 14px rgba(235, 100, 21, 0.25), inset 0 0 10px rgba(245, 185, 49, 0.2);
 }
 .ui-btn-primary:hover:not(:disabled) {
-  background: linear-gradient(135deg, var(--bb-crimson) 0%, var(--bb-vermilion) 50%, var(--bb-amber) 100%);
-  box-shadow: 0 0 20px rgba(245, 185, 49, 0.4);
+  background: var(--bb-incandescent);
+  border-color: var(--bb-incandescent);
 }
 
 .ui-btn-secondary {
-  color: var(--bb-gold);
-  background: var(--bb-panel);
+  color: var(--bb-sand);
+  background: transparent;
   border-color: var(--bb-border-bright);
 }
 .ui-btn-secondary:hover:not(:disabled) {
   color: var(--bb-white);
-  border-color: var(--bb-orange);
-  background: var(--bb-surface);
-  box-shadow: 0 0 8px rgba(235, 100, 21, 0.2);
+  border-color: var(--bb-smoke);
 }
 
 .ui-btn-ghost {
@@ -179,5 +159,5 @@
 .ui-btn:disabled {
   opacity: 0.35;
   cursor: not-allowed;
-  filter: grayscale(0.6);
+  filter: none;
 }
