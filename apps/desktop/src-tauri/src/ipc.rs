@@ -17,8 +17,8 @@ use serde::Serialize;
 use tauri::{Emitter, State, Window};
 
 use crate::commands::{
-    self, BackendError, BatchResponse, CorrectResponse, DeriveResponse, InspectResponse,
-    LoadedReference, QuadPayload,
+    self, BackendError, BatchResponse, CorrectResponse, DeriveResponse, DetectResponse,
+    InspectResponse, LoadedReference, QuadPayload,
 };
 use crate::AppState;
 
@@ -75,6 +75,15 @@ pub async fn load_reference(
         })
     })
     .await
+}
+
+#[tauri::command]
+pub async fn detect_chart(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<DetectResponse, BackendError> {
+    let cache = state.reference.clone();
+    background(move || commands::detect_chart_cached(&cache, path)).await
 }
 
 #[tauri::command]

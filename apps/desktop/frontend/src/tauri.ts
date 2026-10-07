@@ -2,7 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 import { logger } from './logger.ts';
-import type { BatchSummary, ChartQuad, ChartRevision, CorrectResult, DeriveResult, InspectResult, LoadedReference } from './types';
+import type { BatchSummary, ChartQuad, ChartRevision, CorrectResult, DeriveResult, DetectResult, InspectResult, LoadedReference } from './types';
 
 export type { UnlistenFn };
 
@@ -27,6 +27,7 @@ export interface DroppedFiles {
 
 export interface BackendBridge {
   loadReference(path: string): Promise<LoadedReference>;
+  detectChart(path: string): Promise<DetectResult>;
   inspectReference(path: string, revision: ChartRevision, quad?: ChartQuad): Promise<InspectResult>;
   deriveProfile(path: string, revision: ChartRevision, profilePath: string, reportPath?: string, quad?: ChartQuad): Promise<DeriveResult>;
   correctImage(profilePath: string, inputPath: string, outputPath?: string, overwrite?: boolean): Promise<CorrectResult>;
@@ -47,6 +48,7 @@ export const backend: BackendBridge = {
       throw err;
     }
   },
+  detectChart: (path) => invoke<DetectResult>('detect_chart', { path }),
   inspectReference: async (path, revision, quad) => {
     logger.ipc('IPC', `Invoking inspect_reference on "${path}" [${revision}]`);
     try {

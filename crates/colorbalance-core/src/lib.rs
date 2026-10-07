@@ -17,6 +17,7 @@ pub mod color;
 pub mod contract;
 pub mod dataset;
 pub mod decode;
+pub mod detection;
 pub mod interchange;
 pub mod output;
 pub mod profile;

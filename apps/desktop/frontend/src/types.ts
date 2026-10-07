@@ -39,6 +39,12 @@ export interface LoadedReference {
   quad: [[number, number], [number, number], [number, number], [number, number]];
   previewDataUrl: string;
 }
+
+/** Detection proposes corners only. It cannot identify the physical chart revision. */
+export type DetectResult =
+  | { status: 'found'; quad: [[number, number], [number, number], [number, number], [number, number]] }
+  | { status: 'missing' | 'ambiguous' };
+
 export interface PatchValidation {
   patch: string;
   sourceRgb: [number, number, number];

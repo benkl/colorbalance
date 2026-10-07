@@ -7,6 +7,7 @@ interface Props {
   imageHeight?: number;
   quad: ChartQuad;
   onQuadChange: (quad: ChartQuad) => void;
+  onQuadInteractionStart?: () => void;
   onBrowse?: () => void;
   disabled?: boolean;
 }
@@ -17,6 +18,7 @@ export const LightTableOverlay: React.FC<Props> = ({
   imageHeight = 320,
   quad,
   onQuadChange,
+  onQuadInteractionStart,
   onBrowse,
   disabled = false,
 }) => {
@@ -80,6 +82,7 @@ export const LightTableOverlay: React.FC<Props> = ({
     if (disabled || !containerRef.current) return;
     e.preventDefault();
     e.stopPropagation();
+    onQuadInteractionStart?.();
     const rect = containerRef.current.getBoundingClientRect();
     const centre = toScreen(quad[index]);
     grabOffset.current = {

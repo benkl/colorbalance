@@ -41,11 +41,61 @@ The built-in DNG decoder accepts uncompressed 16-bit CFA and a narrow three-comp
 
 | Crate | Role | wasm32 |
 | --- | --- | --- |
-| `colorbalance-core` | Decode contract, chart model, color math, profiles. No LibRaw, Tauri, CLI, or UI dependencies. `unsafe` forbidden. | yes |
-| `colorbalance-raw` | LibRaw layer: decoder identity, contract-to-parameter mapping, later the FFI decode implementation. `unsafe` only inside the FFI module. | no |
+| `colorbalance-core` | Decode contract, chart datasets, sampling, chart detection, color math, profiles, batch scheduler, TIFF encoding, CLF and `.cube` export. No LibRaw, Tauri, CLI, or UI dependencies. `unsafe` forbidden. | yes |
+| `colorbalance-raw` | Built-in DNG decoder, JPEG/PNG loading, decoder identity, contract-to-LibRaw-parameter mapping. `unsafe` only inside a future FFI module. | no |
 | `colorbalance-cli` | `clap` command-line interface over the core operations. `unsafe` forbidden. | no |
+| `colorbalance-fixtures` | Shared test fixtures. | no |
 
-`Cargo.lock` is committed. A clean checkout builds from it.
+`apps/desktop/src-tauri` is a separate Cargo project, excluded from the workspace, so `cargo test --workspace` does not build it. `Cargo.lock` is committed. A clean checkout builds from it.
+
+## Desktop app
+
+Frontend (`apps/desktop/frontend`, Node.js 20 or newer):
+
+```text
+npm ci
+npm run build     # tsc -b and vite build, output in dist/, which the Tauri build embeds
+npm test          # node --test over interaction and UI-to-IPC tests
+npm run lint      # oxlint
+npm run dev       # Vite dev server for the UI alone: browser preview mode with a synthetic demo, no native backend, no DNG decode
+```
+
+Backend (`apps/desktop/src-tauri`):
+
+```text
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+cargo run         # or cargo build, then run target/debug/colorbalance-desktop
+```
+
+Run `npm run build` before building the backend after any frontend change, because the bundle is embedded. On Windows, close the running app first or the build fails with an access-denied error on the exe. The test runs may write `colorbalance_profile.cbprofile.json` and `colorbalance_report.html` into the working directory. Both are gitignored.
+
+CI does not build the desktop app or run the frontend tests. Run both locally before changing them.
+
+### Smoke-testing the real app
+
+`npm test` mocks the Tauri bridge. For UI work, drive the real window too. On Windows, WebView2 exposes the Chrome DevTools Protocol:
+
+```text
+cd apps/desktop/src-tauri && cargo build
+WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--remote-debugging-port=9333" ./target/debug/colorbalance-desktop.exe
+```
+
+List targets at `http://127.0.0.1:9333/json` and attach to the page over its WebSocket. Load a file by emitting the drop event from the page:
+
+```js
+window.__TAURI_INTERNALS__.invoke('plugin:event|emit', {
+  event: 'native-file-drop',
+  payload: { paths: ['C:/path/to/reference.jpg'] },
+})
+```
+
+Commands such as `load_reference` and `detect_chart` can be called the same way through `__TAURI_INTERNALS__.invoke`. Check the status line, the corner readout, and that dragging a corner keeps your edit.
+
+## Chart detector checks
+
+`cargo test -p colorbalance-core detection` runs the synthetic cases: offset chart, rotated and perspective chart, chart merged with a dark scene, blank image, and two charts (must return `Ambiguous`). On 2026-10-07 the detector also found the chart in the repo sample `20261003_183314.jpg`; patch colors sampled at the returned corners followed ColorChecker order (dark skin first, white to black along the bottom row). Timings are in `docs/ARCHITECTURE.md`. The CLI does not call the detector.
 
 ## LibRaw notes
 

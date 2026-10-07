@@ -7,7 +7,7 @@ ColorBalance creates a reusable color transform from one X-Rite or Calibrite Col
 The first release should solve one narrow workflow well:
 
 1. Load a RAW reference frame containing a 24-patch ColorChecker Classic.
-2. Detect the chart, with manual four-corner selection as a fallback.
+2. Detect the chart from a bounded thumbnail when the reference is small enough, or run detection on request; keep manual four-corner selection available for misses and ambiguous results.
 3. Reject a bad reference before fitting if patches have RAW photosite clipping, insufficient size, excessive within-patch variation, or a detectable clipped or non-uniform reflection.
 4. Fit and validate a transform from deterministic linear, unbalanced camera RGB to linear sRGB D65 using a named chart dataset.
 5. Save the transform and a human-readable quality report.
@@ -27,6 +27,25 @@ A profile is valid only when these stay fixed:
 Exposure must also stay fixed in the first release. A profile stores the scalar derived from its reference and applies that same scalar to every batch image. A later workflow may accept an explicit per-image exposure offset from the user or matched capture metadata. It must never infer a neutral or brightness adjustment from arbitrary scene pixels.
 The first release rejects capture-exposure mismatch unless the user supplies an explicit stop offset. The tool cannot correct mixed or spatially varying light, undetectable smooth glare, clipped channels, a chart that occupies too few pixels, or a different camera response. It should report detectable cases rather than produce a confident-looking bad profile.
 
+## Current status (2026-10-07)
+
+The milestone text below is the original plan and its acceptance criteria. This section records what the repository does today.
+
+| Milestone | Issues | State |
+| --- | --- | --- |
+| 1. Measured calibration core | 1 to 7 | Closed. Decoding is the built-in pure-Rust DNG decoder, not LibRaw (D10, D12). Chart detection is pure Rust (D16) |
+| 2. Safe batch workflow | 8 to 12 | Closed |
+| 3. Interchange and independent validation | 13 to 16 | Closed. See `docs/model-selection-and-tolerances.md` |
+| 4. Desktop release | 17 to 20 | Closed. Tauri 2 app builds and runs; release gate report in `docs/release-gate-1.0.md`. No installer has been published |
+| 5. Web-capable platform | 21 to 26 | Issue 26 (delivery decision, D11) closed. Issues 21 to 25 open. The core builds for `wasm32` in CI; nothing else in this milestone is built |
+
+Differences from the plan text that readers keep tripping over:
+
+- LibRaw is not linked. Only DNG files (uncompressed 16-bit CFA, 12-bit LinearRaw in SOF3 lossless JPEG) decode as RAW. `colorbalance-raw` holds the contract-to-LibRaw parameter mapping for the future FFI layer.
+- JPEG and PNG references work through `--quick-and-dirty` (CLI) or automatic detection of a rendered file (desktop). The profile and report flag the result as approximate.
+- The CLI does not run the chart detector. Without `--quad` it samples an 8% inset rectangle. The desktop app runs the detector automatically through 12 MP and on request above that.
+- `colorbalance derive --chart` takes `classic-before-nov-2014` or `classic-from-nov-2014`. The CLI defaults to `classic-from-nov-2014`; the desktop app requires an explicit choice before deriving.
+
 ## Platform and technology decision
 
 Build a Rust color engine and deliver it through a command-line interface, a Tauri 2 desktop application with a React UI, and later a browser or hosted mode. The full platform and performance record, including deployment modes and the decision log, lives in `docs/ARCHITECTURE.md`.
@@ -41,7 +60,7 @@ Target 64-bit Windows, macOS, and Linux. Windows is the first packaged target. B
 | --- | --- | --- |
 | Color engine and fitting | Rust with `nalgebra` | One core for native, WebAssembly, and server; least-squares fitting without a hand-rolled solver |
 | RAW decode | LibRaw through a Rust FFI layer | Broad camera support, documented black and saturation levels, controllable white balance and demosaic |
-| Chart detection | Rust engine with OpenCV bindings | Deterministic templated detection in the shipped product |
+| Chart detection | Pure Rust in `colorbalance-core`, using a bounded thumbnail | Avoids OpenCV and bounds the search after thumbnail sampling; uncertain results require manual corners |
 | Parallelism | `rayon` | Native per-image and per-tile CPU parallelism |
 | TIFF output and metadata | `tiff` crate or libtiff binding, Exiv2 or `kamadak-exif` | 16-bit output, embedded ICC, reviewed EXIF copying |
 | Serialization and profiles | `serde`, `serde_json`, `jsonschema` crate | Versioned `*.cbprofile.json` with schema validation |
@@ -128,19 +147,20 @@ CLF does not reproduce RAW decoding. This export accepts only normalized linear 
 - Do not use ICC as the project format. Embed a standard output ICC profile in rendered files. Input ICC profiles are possible, but application support and camera-RAW semantics do not match this workflow as cleanly as DCP.
 - An OCIO configuration is optional packaging around one or more CLF transforms. It is useful for VFX pipelines but too large as the profile itself.
 
-## Proposed package structure
+## Package structure
 
 ```text
 crates/
-  colorbalance-core/    # color math, chart sampling, fitting, profiles, quality gates
-  colorbalance-raw/     # LibRaw FFI, decode contract, saturation masks (native only)
-  colorbalance-cli/     # clap CLI (native only)
+  colorbalance-core/      # color math, chart sampling and detection, fitting, profiles, quality gates
+  colorbalance-raw/       # built-in DNG decoder, JPEG/PNG loading; LibRaw FFI planned (native only)
+  colorbalance-cli/       # clap CLI (native only)
+  colorbalance-fixtures/  # shared test fixtures
 apps/
-  desktop/              # Tauri 2 shell with the React UI (milestone 4)
-  web/                  # browser experiment (milestone 5)
-research/               # Python verification notebooks and fixture generators (non-runtime)
-tests/                  # cross-crate integration tests and fixtures
-docs/                   # implementation plan, architecture, decision log
+  desktop/                # Tauri 2 shell (src-tauri) and React UI (frontend)
+  web/                    # browser experiment (milestone 5), not started
+research/                 # Python verification notebooks and fixture generators (non-runtime)
+tests/                    # cross-crate integration tests and fixtures
+docs/                     # implementation plan, architecture, decision log
 ```
 
 `colorbalance-core` exposes operations such as `inspect_reference`, `derive_profile`, `apply_profile`, `export_clf`, and `export_cube`, and accepts a decoder implementation as a trait. It must compile for native and `wasm32` targets and must not depend on LibRaw, Tauri, or the CLI. The native CLI and desktop app inject the LibRaw decoder. Tests inject synthetic and fixture decoders. No color calculation lives in TypeScript.
@@ -179,9 +199,10 @@ Exit criterion: a repeatable command derives a validated profile from a supporte
    - Acceptance: fixed RAW samples yield expected numeric channel values and masks; repeated decode is identical; sparse source clipping remains flagged after mask mapping; unsupported sensor layouts return a specific error.
 
 4. **Detect ColorChecker Classic and support manual corners**
-   - Integrate deterministic chart detection, chart orientation, perspective warp, four-corner fallback input, and explicit chart-revision selection.
-   - Save a diagnostic overlay.
-   - Acceptance: supported fixtures produce 24 ordered patch regions; a detection miss requests corners rather than guessing; no chart dataset is selected silently.
+   - Use a pure-Rust, non-ML detector in `colorbalance-core` on an at-most-roughly-512-pixel-long-side thumbnail. Return a quadrilateral only for a sufficiently distinct 24-patch match; handle orientation and reasonable perspective. Keep four-corner manual input and the diagnostic overlay of the quad and sample regions.
+   - In the desktop, run detection after the preview loads only when the decoded image is at most 12 megapixels (`width × height <= 12_000_000`). Provide an explicit Detect chart action for larger images and retries on every image. Reuse the cached decoded reference instead of decoding again.
+   - A miss or ambiguous multiple-chart result leaves the corners for manual placement; never substitute a guessed quad. A detected quad does not identify the physical chart revision: the user still selects it explicitly before fitting.
+   - Acceptance: supported fixtures produce 24 ordered patch regions; rotated and reasonably perspective-skewed fixtures are detected where the pattern is clear; weak and competing candidates fail closed. Report measured detection latency on named fixtures and hardware after implementation, including misses and large images. Thumbnail resolution, glare, occlusion, unusual charts and perspective can defeat this detector; manual corners remain the fallback.
 
 5. **Sample patches and enforce reference quality gates**
    - Map patch polygons to the RAW saturation masks. Sample central patch areas with robust statistics and calculate RAW clipping, variance, patch size, neutral monotonicity, and detectable reflection flags.

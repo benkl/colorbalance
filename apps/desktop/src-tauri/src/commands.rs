@@ -4,6 +4,7 @@ use std::path::Path;
 use colorbalance_core::calibration::{self, ChartQuad, GateConfig};
 use colorbalance_core::chart::ChartRevision;
 use colorbalance_core::decode::DecodedImage;
+use colorbalance_core::detection::{detect_chart, Detection};
 use colorbalance_core::interchange::{profile_to_clf, profile_to_cube};
 use colorbalance_core::output::encode_tiff_rgb_u16;
 use colorbalance_core::profile::{
@@ -173,6 +174,15 @@ pub struct LoadedReference {
     pub preview_data_url: String,
 }
 
+/// Chart geometry only; the physical chart revision must be selected by the user.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "status", rename_all = "lowercase")]
+pub enum DetectResponse {
+    Found { quad: [[f64; 2]; 4] },
+    Missing,
+    Ambiguous,
+}
+
 fn encode_png_data_url(png: &[u8]) -> String {
     use base64::engine::general_purpose::STANDARD;
     use base64::Engine;
@@ -242,6 +252,19 @@ pub fn load_reference_cached(
         image_height: image.height,
         quad: quad.corners,
         preview_data_url: preview_cached(cache, &image, report, 2, 2)?,
+    })
+}
+
+/// Detect on the cached decode without rendering or returning another preview.
+pub fn detect_chart_cached(
+    cache: &ReferenceCache,
+    path: String,
+) -> Result<DetectResponse, BackendError> {
+    let image = decode_cached(cache, &path, &no_progress, 1)?;
+    Ok(match detect_chart(&image) {
+        Detection::Found(quad) => DetectResponse::Found { quad: quad.corners },
+        Detection::Missing => DetectResponse::Missing,
+        Detection::Ambiguous => DetectResponse::Ambiguous,
     })
 }
 

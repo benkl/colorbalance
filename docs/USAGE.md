@@ -88,6 +88,22 @@ colorbalance export studio.cbprofile.json --format clf -o studio.clf
 colorbalance export studio.cbprofile.json --format cube --size 33 -o studio.cube
 ```
 
+### Finding the chart in the desktop app
+
+Load a reference and the preview appears first. For images of 12 megapixels or less the app then looks for the chart on its own, in a few milliseconds. For larger images it skips that step and shows "Large image: automatic detection skipped". Press **FIND CHART** to run it anyway. After a miss the button reads **RETRY**.
+
+What a result means:
+
+- **Found.** Four corners appear on the light table. They are a proposal. Check them and drag any marker that is off. Dragging cancels a detection that is still running and keeps your edit.
+- **No chart found.** The corners stay where they were. Place them yourself.
+- **Ambiguous.** Two separate regions looked like a chart. The corners stay where they were. Place them yourself.
+
+Detection never picks the chart revision. Choose `classic-before-nov-2014` or `classic-from-nov-2014` yourself before deriving. INSPECT and DERIVE are disabled while a detection is running, so a stale proposal cannot reach the fit.
+
+The detector looks for 24 bright patch squares separated by dark gaps, laid out as a 6 by 4 grid with a descending neutral row. It works on a thumbnail of at most 512 px per side, so it needs the chart to be at least about 48 thumbnail pixels wide and the gaps between patches to be visible. Expect a miss for a small chart, heavy glare, an occluded corner, very low contrast, or patches that blur into each other. A miss costs you four manual clicks. A wrong proposal would cost a bad profile, which is why the detector refuses to guess.
+
+The CLI does not run the detector. Without `--quad`, `inspect` and `derive` sample a rectangle inset 8% from each image edge, which is only right when the chart fills the frame. Pass `--quad` for anything else, using corners read off the desktop app.
+
 ### Quality warnings in the desktop app
 
 The desktop app never blocks derivation on chart quality. It derives the profile, then shows what it found. There are no Quick & Dirty or "derive despite failures" checkboxes.

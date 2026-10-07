@@ -147,6 +147,23 @@ test('UI end-to-end: native file drop loads image, enables derive, and completes
   assert.equal(batchSummary.succeeded.length, 3);
 });
 
+test('chart detection bridge keeps status and corners separate from revision and preview', async () => {
+  const calls = [];
+  globalThis.window = {
+    __TAURI_INTERNALS__: {
+      invoke: async (command, args) => {
+        calls.push([command, args]);
+        return { status: 'ambiguous' };
+      },
+      transformCallback: (fn) => fn,
+      unregisterCallback: () => undefined,
+    },
+  };
+  const { backend } = await import('../src/tauri.ts');
+  assert.deepEqual(await backend.detectChart('ref.dng'), { status: 'ambiguous' });
+  assert.deepEqual(calls, [['detect_chart', { path: 'ref.dng' }]]);
+});
+
 test('correct image: IPC carries the output path and returns backend-rendered previews', async () => {
   const calls = [];
   globalThis.window = {

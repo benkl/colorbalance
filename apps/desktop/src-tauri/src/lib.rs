@@ -60,6 +60,7 @@ pub fn run_app() {
         })
         .invoke_handler(tauri::generate_handler![
             crate::ipc::load_reference,
+            crate::ipc::detect_chart,
             crate::ipc::inspect_reference,
             crate::ipc::derive_profile,
             crate::ipc::correct_image,

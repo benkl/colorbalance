@@ -8,7 +8,8 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use colorbalance_desktop::commands::{
-    inspect_reference_cached, load_reference, load_reference_cached, no_progress, BackendError,
+    detect_chart_cached, inspect_reference_cached, load_reference, load_reference_cached,
+    no_progress, BackendError,
 };
 use colorbalance_desktop::reference_cache::ReferenceCache;
 use colorbalance_fixtures::{render_chart_dng, ChartScene};
@@ -62,6 +63,14 @@ fn repeated_reference_workflow_decodes_once() {
     let (loaded, load_stages) =
         stages(|r| load_reference_cached(&cache, path_str.clone(), r).unwrap());
     assert_eq!(load_stages, ["Decoding image", "Rendering preview"]);
+    let detected =
+        serde_json::to_value(detect_chart_cached(&cache, path_str.clone()).unwrap()).unwrap();
+    assert!(matches!(
+        detected["status"].as_str(),
+        Some("found" | "missing" | "ambiguous")
+    ));
+    assert!(detected.get("previewDataUrl").is_none());
+    assert!(detected.get("chartRevision").is_none());
 
     let (inspected, inspect_stages) = stages(|r| {
         inspect_reference_cached(

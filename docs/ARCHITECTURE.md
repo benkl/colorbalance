@@ -1,6 +1,6 @@
 # ColorBalance architecture
 
-Status: decided, not yet implemented. This document records the platform and performance decisions behind the product. `IMPLEMENTATION_PLAN.md` defines the milestones. When a decision here changes, update the decision log at the end of this file and the affected issues in the same change.
+Status: milestones 1 to 4 are implemented (CLI, built-in DNG decoder, calibration core, batch apply, CLF and `.cube` export, Tauri 2 desktop app). Milestone 5 is open: `colorbalance-core` builds for `wasm32`, but there is no wasm-bindgen glue, worker, browser app, hosted mode, or LibRaw FFI yet. This document records the platform and performance decisions behind the product. `IMPLEMENTATION_PLAN.md` defines the milestones. When a decision here changes, update the decision log at the end of this file and the affected issues in the same change.
 
 ## Product shape
 
@@ -10,10 +10,10 @@ ColorBalance derives a color transform from one ColorChecker Classic RAW referen
 
 | Mode | Status | Role |
 | --- | --- | --- |
-| Rust CLI, native | first implementation | proves the decode contract, quality gates, fitting, and output before any UI exists |
-| Tauri 2 desktop with React UI | first released application | full local workflow, native LibRaw, unrestricted file access |
-| Browser, WebAssembly engine | measured experiment | local processing without install, gated on the LibRaw WebAssembly spike |
-| Hosted web service | optional later mode | browser access with native workers, only if uploads and operating cost are acceptable |
+| Rust CLI, native | shipped | `decode-contract`, `inspect`, `derive`, `apply`, `export`. No automatic chart detection; manual `--quad` or an 8% inset rectangle |
+| Tauri 2 desktop with React UI | shipped, unsigned, no published release | Full local workflow with built-in DNG and JPEG/PNG decode, automatic chart finding, unrestricted file access. LibRaw is not linked |
+| Browser, WebAssembly engine | not started | The core builds for `wasm32` in CI. Parity tests, worker, and RAW decode are open (issues 21 to 23). Gated on the LibRaw WebAssembly spike (issue 22) |
+| Hosted web service | not started | Optional, deferred until upload cost and demand are known (issue 24) |
 
 Tauri ships first because it reuses the web UI while keeping RAW decoding native. The browser and hosted modes are added behind the same engine API, never as a second color implementation.
 
@@ -23,7 +23,7 @@ Tauri ships first because it reuses the web UI while keeping RAW decoding native
 | --- | --- | --- |
 | Color engine, fitting, batch logic | Rust | One core compiles to native, WebAssembly, and server workers; predictable memory behavior for large images |
 | RAW decode | Built-in pure-Rust DNG decoder (shipped), LibRaw FFI planned for other camera formats | Deterministic normalize-and-flag decode now; broad camera coverage later, cross-checked against the built-in decoder |
-| Chart detection | Rust engine using OpenCV bindings | Deterministic templated detection in the shipped product |
+| Chart detection | Pure Rust in `colorbalance-core`, on a bounded thumbnail | One deterministic detector for native and potential WebAssembly use, without OpenCV; weak or competing matches return no automatic corners |
 | Matrix math | `nalgebra` | Least squares and 3x3 fitting without a hand-rolled solver |
 | Parallelism | `rayon` | Native per-image and per-tile CPU parallelism |
 | Serialization | `serde`, `serde_json`, `jsonschema` crate | Versioned `*.cbprofile.json` with schema validation |
@@ -42,13 +42,19 @@ Python is the reference and verification stack, not the production pixel path. I
 
 ```text
 crates/
-  colorbalance-core/    # color math, chart sampling, fitting, profiles, quality gates
-  colorbalance-raw/     # built-in DNG decoder now; LibRaw FFI planned (native only)
-  colorbalance-cli/     # clap CLI (native only)
+  colorbalance-core/      # color math, chart sampling and detection, fitting, profiles, batch scheduler, exports
+  colorbalance-raw/       # built-in DNG decoder, JPEG/PNG loading; LibRaw FFI planned (native only)
+  colorbalance-cli/       # clap CLI (native only)
+  colorbalance-fixtures/  # shared test fixtures
 apps/
-  desktop/              # Tauri 2 shell (native only)
-  web/                  # browser experiment (milestone 5)
-research/               # Python verification notebooks and fixture generators
+  desktop/
+    src-tauri/            # Tauri 2 shell, separate Cargo project (native only)
+    frontend/             # React, Vite, Tailwind UI
+  web/                    # planned browser experiment (milestone 5), does not exist yet
+research/                 # Python fixture generators and cross-checks (non-runtime)
+tests/                    # cross-crate fixtures
+docs/                     # plan, architecture, usage, development, packaging, release gate
+```
 
 `colorbalance-core` must compile for native and `wasm32` targets and must not depend on LibRaw, Tauri, or the CLI. Everything RAW-specific lives in `colorbalance-raw` and is injected as a trait implementation.
 
@@ -85,12 +91,17 @@ Rules that apply to every UI host:
 - Tauri commands that decode or process images are `async` and run their work on the blocking thread pool (`spawn_blocking`); native dialog commands are `async` too. Synchronous commands run on the main thread and freeze the window. Stage progress arrives as the `operation-progress` event (`{operation, stage, step, steps}`) and batch progress as `batch-progress` (`{completed, total, file}`). The frontend listens through `core:event:default`, which `capabilities/default.json` must grant: without it `listen` is rejected and the progress strip never updates.
 - The desktop backend keeps the most recent decoded reference (and its preview) in `AppState`, so `load_reference`, `inspect_reference`, `derive_profile` and `correct_image` (BEFORE / AFTER and SAVE REFERENCE) on the same file share one decode and one "before" preview. An entry is valid only for the same canonical path, byte length and modification time; failures and entries over 1 GiB are never cached; the image is shared as an immutable `Arc` with no pixel copy. `correct_image` transforms a copy of the cached pixels, so the cache is never mutated. Batch never uses it. Stage labels read "Using cached image" / "Using cached preview" on a hit.
 - Previews are downscaled before the sRGB encode: a linear-light box average to at most 1600 px on the longest side, then encode and PNG. Never encode the full frame to preview it.
+- Chart discovery samples a bounded thumbnail (roughly 512 px on the longest side), not a full-resolution detection buffer. After the preview loads, the desktop automatically detects only when `width × height <= 12_000_000`; an explicit Detect chart action runs on any image and can retry a miss. The backend uses the cached decoded reference on a hit. Return a visible quadrilateral for a clear match; a miss or competing chart candidates leave the user to place four corners. Neither automatic detection nor manual corners select the physical chart revision; that selection is explicit before fitting.
 
 ## Performance design
 
 ### Memory budget
 
 A 45-megapixel RGB image in 32-bit float is about 540 MB before demosaicing buffers, masks, and output. The engine therefore allocates and processes image buffers inside Rust and never copies them into JavaScript. The UI receives paths, measurements, and previews.
+
+### Detection cost and limits
+
+Detection work is bounded by the thumbnail after decoding, but decoding the source and collecting thumbnail samples still costs time on large files. Measured on 2026-10-07 (release build, `detect_chart` on an already decoded image, one run each): the 1398x1864 sample JPEG with a chart found in 6.7 ms; a synthetic 4200x3200 (13.4 MP) frame with that chart pasted in found it in 9.5 ms; a 1200x900 frame without a chart returned `Missing` in 10.6 ms. These are single runs on one development machine, not a latency target, and the detector has not been run on RAW fixtures. The detector finds the 24 bright patches as separate squares and fits the lattice, so a chart whose dark backing touches other dark scene content is still found. Charts below roughly 48 thumbnail pixels wide, heavy skew, glare, occlusion, low contrast, or patches that merge with the gaps may be missed. Failing closed is better than placing a plausible but wrong quad.
 
 ### Tiling
 
@@ -156,15 +167,19 @@ Rules:
 | D13 | Desktop commands never run RAW or image work on the main thread: async commands plus `spawn_blocking`, with progress events for UI feedback | Accepted | 2026-10-07 |
 | D14 | Desktop caches one decoded reference keyed on path, length and mtime, for load, inspect, derive and correct. Colour results are unchanged: a hit returns the identical decode, any file change is a miss, and correction never mutates the shared image | Accepted | 2026-10-07 |
 | D15 | Previews average the linear image down to the preview size first, then sRGB-encode only the output. Replaces encode-full-frame then Triangle resize. Release, 45 MP: 3.1-3.5 s to 0.24 s | Accepted | 2026-10-07 |
+| D16 | Replace planned OpenCV-bound chart detection with a pure-Rust detector in `colorbalance-core` over a bounded thumbnail. Automatic detection runs after preview only through 12 MP; larger images and retries use an explicit action. Misses and ambiguous candidates use manual corners; physical chart revision always requires user selection. Detector latency and limits must be measured, not assumed. | Accepted | 2026-10-07 |
+| D17 | Documentation states shipped behavior only. The CLI keeps manual `--quad` input and does not call the detector until a decision record changes that. Support-matrix tiers describe intent; the Verified column records what has actually been run. | Accepted | 2026-10-07 |
 
 ## Platform and Browser Support Matrix
 
-| Platform / Environment | Tier | Capabilities | Notes |
+Tier is the support goal. Verified is what has been run by hand or in CI as of 2026-10-07. CI builds and tests the Rust workspace on Ubuntu, macOS, and Windows. It does not build the desktop app or run the frontend tests.
+
+| Platform / Environment | Tier | Capabilities | Verified |
 | --- | --- | --- | --- |
-| Windows 10/11 x64 (Tauri Desktop) | Tier 1 | Native RAW decode (DNG), rendered image decode (JPEG/PNG), multi-threaded batch, native dialogs, native window drag-and-drop, 16-bit TIFF output | Primary release target |
-| macOS 12+ x64 / Apple Silicon (Tauri Desktop) | Tier 1 | Full native feature parity with Windows | Native build target |
-| Linux x64 (Tauri Desktop / WebKitGTK) | Tier 1 | Full native feature parity with Windows | Native build target |
-| Chrome / Edge (Browser Preview) | Tier 2 | Interactive light-table UI, 4-corner warp alignment, simulation demo, client-side preview rendering | Requires File System Access API for directory writes |
-| Firefox / Safari (Browser Preview) | Tier 2 | Interactive light-table UI, 4-corner warp alignment, simulation demo | File upload fallback for single-image inspection |
+| Windows 10/11 x64 (Tauri Desktop) | Tier 1 | Native DNG decode, JPEG/PNG decode, multi-threaded batch, native dialogs, native file drop, automatic chart finding, 16-bit TIFF output | Desktop built and driven by hand, including the chart-finding paths. Primary target |
+| macOS 12+ x64 / Apple Silicon (Tauri Desktop) | Tier 1 goal | Same feature set as Windows | Core and CLI tests only. Desktop not built |
+| Linux x64 (Tauri Desktop / WebKitGTK) | Tier 1 goal | Same feature set as Windows | Core and CLI tests only. Desktop not built |
+| Chrome / Edge (browser preview via `npm run dev`) | Tier 2 | Light-table UI, 4-corner alignment, synthetic demo, preview of formats the browser can display. No DNG decode, no automatic chart finding, no derive or apply | Not exercised in a real browser. Frontend tests mock the Tauri bridge. Directory writes through the File System Access API are not implemented (issue 23) |
+| Firefox / Safari (browser preview) | Tier 2 | Same as above | Not exercised. File upload is the only input path |
 
 Earlier planning proposed Python with PySide6. Decisions D2 through D4 supersede that stack because browser delivery became a product requirement. The milestone structure, color pipeline, quality gates, and interchange rules in `IMPLEMENTATION_PLAN.md` are unchanged.

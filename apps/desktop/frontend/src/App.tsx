@@ -49,6 +49,13 @@ export const App: React.FC = () => {
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
   const [isDropActive, setIsDropActive] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string>('');
+  const [detectionStatus, setDetectionStatus] = useState<'idle' | 'running' | 'found' | 'missing' | 'ambiguous' | 'error'>('idle');
+  const [detectionError, setDetectionError] = useState('');
+  const referenceGeneration = useRef(0);
+  const selectionGeneration = useRef(0);
+  const detectionGeneration = useRef(0);
+  const loadedReferencePath = useRef<string | null>(null);
+  const [loadedPath, setLoadedPath] = useState<string | null>(null);
   const referenceInputRef = useRef<HTMLInputElement>(null);
 
   // Batch Processing State
@@ -158,31 +165,88 @@ export const App: React.FC = () => {
     ];
   };
 
+  const detectReference = async (path: string, referenceId: number) => {
+    const detectionId = ++detectionGeneration.current;
+    setDetectionStatus('running');
+    setDetectionError('');
+    try {
+      const result = await backend.detectChart(path);
+      if (referenceId !== referenceGeneration.current || detectionId !== detectionGeneration.current || loadedReferencePath.current !== path) return;
+      setDetectionStatus(result.status);
+      if (result.status === 'found') {
+        setQuad(result.quad.map(([x, y]) => ({ x, y })) as ChartQuad);
+        setInspectResult(null);
+      }
+    } catch (error: unknown) {
+      if (referenceId !== referenceGeneration.current || detectionId !== detectionGeneration.current) return;
+      setDetectionStatus('error');
+      setDetectionError(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const adjustQuad = (next: ChartQuad) => {
+    ++detectionGeneration.current;
+    setQuad(next);
+    setDetectionStatus('idle');
+    setInspectResult(null);
+  };
+
+  const startReference = () => {
+    ++selectionGeneration.current;
+    ++detectionGeneration.current;
+    loadedReferencePath.current = null;
+    setLoadedPath(null);
+    setDetectionStatus('idle');
+    setDetectionError('');
+    return ++referenceGeneration.current;
+  };
+
   /** Native path: Rust decodes (EXIF-upright) and returns a PNG preview plus true dimensions. */
   const showReference = async (path: string) => {
+    const referenceId = startReference();
     setReferencePath(path);
+    setReferencePreview('');
     setErrorMessage('');
     setInspectResult(null);
     beginWork();
     try {
       const loaded = await backend.loadReference(path);
+      if (referenceId !== referenceGeneration.current) return;
+      loadedReferencePath.current = path;
+      setLoadedPath(path);
       setReferencePreview(loaded.previewDataUrl);
       setImageSize({ width: loaded.imageWidth, height: loaded.imageHeight });
       setQuad(loaded.quad.map(([x, y]) => ({ x, y })) as ChartQuad);
       logger.success('UI', `Preview ready: ${loaded.imageWidth}x${loaded.imageHeight}`);
+      if (loaded.imageWidth * loaded.imageHeight <= 12_000_000) {
+        // Let the preview paint before starting thumbnail analysis.
+        const cornersId = detectionGeneration.current;
+        requestAnimationFrame(() => setTimeout(() => {
+          if (referenceId === referenceGeneration.current && cornersId === detectionGeneration.current) {
+            void detectReference(path, referenceId);
+          }
+        }, 0));
+      }
     } catch (err: unknown) {
+      if (referenceId !== referenceGeneration.current) return;
       setReferencePreview('');
       setErrorMessage(`Could not load image: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
-      endWork();
+      if (referenceId === referenceGeneration.current) endWork();
     }
   };
 
   /** Browser path: the webview decodes the file, so its natural size is authoritative. */
   const showBrowserFile = (file: File) => {
+    const referenceId = startReference();
+    endWork();
     const url = URL.createObjectURL(file);
     const probe = new Image();
     probe.onload = () => {
+      if (referenceId !== referenceGeneration.current) {
+        URL.revokeObjectURL(url);
+        return;
+      }
       setReferencePath(file.name);
       setReferencePreview(url);
       setImageSize({ width: probe.naturalWidth, height: probe.naturalHeight });
@@ -191,20 +255,24 @@ export const App: React.FC = () => {
       setErrorMessage('');
     };
     probe.onerror = () => {
+      if (referenceId !== referenceGeneration.current) return;
       URL.revokeObjectURL(url);
       setErrorMessage(`The browser cannot display "${file.name}". Use the desktop app for DNG files.`);
     };
     probe.src = url;
   };
   const browseReference = async () => {
+    const selectionId = ++selectionGeneration.current;
     logger.info('UI', 'Action: Browse reference frame');
     try {
       const selected = await chooseImage();
+      if (selectionId !== selectionGeneration.current) return;
       if (selected) {
         logger.success('UI', `Reference selected via native picker: "${selected}"`);
         await showReference(selected);
       }
     } catch (err: unknown) {
+      if (selectionId !== selectionGeneration.current) return;
       logger.warn('UI', `Native dialog unavailable (${err instanceof Error ? err.message : String(err)}); falling back to HTML file input`);
       referenceInputRef.current?.click();
     }
@@ -227,26 +295,33 @@ export const App: React.FC = () => {
       setErrorMessage('Explicitly select the physical chart revision before inspecting.');
       return;
     }
+    const referenceId = referenceGeneration.current;
+    ++detectionGeneration.current;
+    setDetectionStatus('idle');
     beginWork();
     setErrorMessage('');
     try {
       const result = await backend.inspectReference(referencePath, chartRevision, quad);
+      if (referenceId !== referenceGeneration.current) return;
       setInspectResult(result);
       setQuad(result.quad.map(([x, y]) => ({ x, y })) as ChartQuad);
       if (result.previewDataUrl) {
         setReferencePreview(result.previewDataUrl);
       }
     } catch (error: unknown) {
-      setErrorMessage(error instanceof Error ? error.message : String(error));
+      if (referenceId === referenceGeneration.current) setErrorMessage(error instanceof Error ? error.message : String(error));
     } finally {
-      endWork();
+      if (referenceId === referenceGeneration.current) endWork();
     }
   };
 
   const loadSyntheticDemo = () => {
+    const referenceId = startReference();
+    endWork();
     // Measure the displayed size (EXIF-upright) rather than assuming the stored one.
     const probe = new Image();
     probe.onload = () => {
+      if (referenceId !== referenceGeneration.current) return;
       setReferencePath('20261003_183314.jpg');
       setReferencePreview(probe.src);
       setImageSize({ width: probe.naturalWidth, height: probe.naturalHeight });
@@ -514,7 +589,8 @@ export const App: React.FC = () => {
               imageWidth={imageSize.width}
               imageHeight={imageSize.height}
               quad={quad}
-              onQuadChange={setQuad}
+              onQuadChange={adjustQuad}
+              onQuadInteractionStart={() => { ++detectionGeneration.current; setDetectionStatus('idle'); }}
               onBrowse={browseReference}
               disabled={isProcessing}
             />
@@ -551,7 +627,7 @@ export const App: React.FC = () => {
                   <input
                     type="text"
                     value={referencePath}
-                    onChange={(e) => setReferencePath(e.target.value)}
+                    onChange={(e) => { startReference(); setReferencePath(e.target.value); setReferencePreview(''); setInspectResult(null); }}
                     placeholder="CLICK BROWSE OR DROP FILE…"
                     className="flex-1 bg-[var(--bb-vacuum)] border border-[var(--bb-border)] px-2.5 py-1 text-[11px] text-[var(--bb-sand)] focus:border-[var(--bb-gold)] outline-none min-w-0"
                   />
@@ -559,11 +635,28 @@ export const App: React.FC = () => {
                     <FolderOpen className="w-3 h-3" /> BROWSE
                   </button>
                 </div>
+                <button
+                  type="button"
+                  onClick={() => { if (loadedPath) void detectReference(loadedPath, referenceGeneration.current); }}
+                  disabled={!loadedPath || detectionStatus === 'running' || isProcessing}
+                  className="ui-btn ui-btn-secondary w-full"
+                >
+                  <SearchCheck className="w-3 h-3" /> {detectionStatus === 'running' ? 'FINDING CHART…' : 'FIND CHART / RETRY'}
+                </button>
+                <p role="status" className="text-[10px] text-[var(--bb-smoke)]">
+                  {detectionStatus === 'found' && 'Chart corners proposed on the light table. Check and drag them if needed; select the physical chart revision yourself.'}
+                  {detectionStatus === 'missing' && 'No chart found. Set the corners manually or retry.'}
+                  {detectionStatus === 'ambiguous' && 'Multiple possible charts found. Set the corners manually; no chart was chosen.'}
+                  {detectionStatus === 'error' && `Detection failed: ${detectionError}. Set the corners manually or retry.`}
+                  {detectionStatus === 'running' && 'Looking for a chart; the corners remain editable.'}
+                  {detectionStatus === 'idle' && loadedPath && imageSize.width * imageSize.height > 12_000_000 && 'Large image: automatic detection skipped. Use Find Chart to start it.'}
+                  {detectionStatus === 'idle' && referencePreview && !loadedPath && 'Detection needs a desktop-loaded file. Set corners manually in browser preview mode.'}
+                </p>
                 <div className="grid grid-cols-2 gap-1.5 pt-0.5">
                   <button
                     type="button"
                     onClick={inspectReference}
-                    disabled={isProcessing || !referencePath || !chartRevision}
+                    disabled={isProcessing || detectionStatus === 'running' || !referencePath || !chartRevision}
                     className="ui-btn ui-btn-secondary w-full"
                   >
                     <SearchCheck className="w-3 h-3" /> {isProcessing ? 'SCANNING…' : 'INSPECT CHART'}
@@ -610,7 +703,7 @@ export const App: React.FC = () => {
                 <button
                   type="button"
                   onClick={handleRunDerive}
-                  disabled={isProcessing || !referencePath || !chartRevision}
+                  disabled={isProcessing || detectionStatus === 'running' || !referencePath || !chartRevision}
                   className="ui-btn ui-btn-primary w-full h-9 text-xs"
                 >
                   <Play className="w-3.5 h-3.5 fill-current" />
