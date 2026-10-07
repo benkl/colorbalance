@@ -11,6 +11,7 @@ use colorbalance_desktop::commands::{
     detect_chart_cached, inspect_reference_cached, load_reference, load_reference_cached,
     no_progress, BackendError,
 };
+use colorbalance_desktop::preview_files::PreviewFiles;
 use colorbalance_desktop::reference_cache::ReferenceCache;
 use colorbalance_fixtures::{render_chart_dng, ChartScene};
 
@@ -59,9 +60,23 @@ fn repeated_reference_workflow_decodes_once() {
     render_chart_dng(&path, &scene(480, 320)).unwrap();
     let path_str = path.to_string_lossy().into_owned();
     let cache = ReferenceCache::default();
+    let previews = PreviewFiles::default();
 
     let (loaded, load_stages) =
-        stages(|r| load_reference_cached(&cache, path_str.clone(), r).unwrap());
+        stages(|r| load_reference_cached(&cache, &previews, path_str.clone(), r).unwrap());
+    let (loaded_again, repeated_stages) =
+        stages(|r| load_reference_cached(&cache, &previews, path_str.clone(), r).unwrap());
+    assert_eq!(
+        repeated_stages,
+        ["Using cached image", "Using cached preview"]
+    );
+    assert_eq!(loaded.preview_path, loaded_again.preview_path);
+    assert_eq!(
+        std::fs::read_dir(previews.directory().unwrap())
+            .unwrap()
+            .count(),
+        1
+    );
     assert_eq!(load_stages, ["Decoding image", "Rendering preview"]);
     let detected =
         serde_json::to_value(detect_chart_cached(&cache, path_str.clone()).unwrap()).unwrap();
@@ -69,12 +84,13 @@ fn repeated_reference_workflow_decodes_once() {
         detected["status"].as_str(),
         Some("found" | "missing" | "ambiguous")
     ));
-    assert!(detected.get("previewDataUrl").is_none());
+    assert!(detected.get("previewPath").is_none());
     assert!(detected.get("chartRevision").is_none());
 
     let (inspected, inspect_stages) = stages(|r| {
         inspect_reference_cached(
             &cache,
+            &previews,
             path_str.clone(),
             "classic-before-nov-2014".to_owned(),
             None,
@@ -92,8 +108,40 @@ fn repeated_reference_workflow_decodes_once() {
 
     let loaded = serde_json::to_value(&loaded).unwrap();
     let inspected = serde_json::to_value(&inspected).unwrap();
-    assert_eq!(loaded["previewDataUrl"], inspected["previewDataUrl"]);
+    assert_eq!(loaded["previewPath"], inspected["previewPath"]);
     assert_eq!(loaded["imageWidth"], inspected["imageWidth"]);
+    let _ = std::fs::remove_dir_all(work);
+}
+
+#[test]
+fn released_preview_is_rendered_again_without_decoding() {
+    let work = temp_dir("released-preview");
+    let path = work.join("ref.dng");
+    render_chart_dng(&path, &scene(480, 320)).unwrap();
+    let path_str = path.to_string_lossy().into_owned();
+    let cache = ReferenceCache::default();
+    let previews = PreviewFiles::default();
+
+    let first = load_reference_cached(&cache, &previews, path_str.clone(), &no_progress).unwrap();
+    assert!(Path::new(&first.preview_path).is_file());
+
+    previews
+        .release(std::slice::from_ref(&first.preview_path))
+        .unwrap();
+    assert!(!Path::new(&first.preview_path).exists());
+
+    let (second, seen) = stages(|report| {
+        load_reference_cached(&cache, &previews, path_str.clone(), report).unwrap()
+    });
+    assert_eq!(seen, ["Using cached image", "Rendering preview"]);
+    assert_ne!(second.preview_path, first.preview_path);
+    assert!(Path::new(&second.preview_path).is_file());
+
+    let (third, seen) = stages(|report| {
+        load_reference_cached(&cache, &previews, path_str.clone(), report).unwrap()
+    });
+    assert_eq!(seen, ["Using cached image", "Using cached preview"]);
+    assert_eq!(third.preview_path, second.preview_path);
     let _ = std::fs::remove_dir_all(work);
 }
 
@@ -103,9 +151,10 @@ fn plain_commands_never_use_a_cache() {
     let path = work.join("ref.dng");
     render_chart_dng(&path, &scene(480, 320)).unwrap();
     let path_str = path.to_string_lossy().into_owned();
+    let previews = PreviewFiles::default();
 
     for _ in 0..2 {
-        let (_, seen) = stages(|r| load_reference(path_str.clone(), r).unwrap());
+        let (_, seen) = stages(|r| load_reference(&previews, path_str.clone(), r).unwrap());
         assert_eq!(seen, ["Decoding image", "Rendering preview"]);
     }
     let _ = std::fs::remove_dir_all(work);
@@ -117,20 +166,28 @@ fn replaced_file_reloads_with_new_pixels_and_preview() {
     let path = work.join("ref.dng");
     let path_str = path.to_string_lossy().into_owned();
     let cache = ReferenceCache::default();
+    let previews = PreviewFiles::default();
 
     render_chart_dng(&path, &scene(480, 320)).unwrap();
-    let first = load_reference_cached(&cache, path_str.clone(), &no_progress).unwrap();
+    let first = load_reference_cached(&cache, &previews, path_str.clone(), &no_progress).unwrap();
     let first = serde_json::to_value(&first).unwrap();
 
     render_chart_dng(&path, &scene(640, 400)).unwrap();
-    let (second, seen) = stages(|r| load_reference_cached(&cache, path_str.clone(), r).unwrap());
+    let (second, seen) =
+        stages(|r| load_reference_cached(&cache, &previews, path_str.clone(), r).unwrap());
     let second = serde_json::to_value(&second).unwrap();
 
     assert_eq!(seen, ["Decoding image", "Rendering preview"]);
     assert_eq!(first["imageWidth"], 480);
     assert_eq!(second["imageWidth"], 640);
     assert_eq!(second["imageHeight"], 400);
-    assert_ne!(first["previewDataUrl"], second["previewDataUrl"]);
+    assert_ne!(first["previewPath"], second["previewPath"]);
+    assert!(Path::new(first["previewPath"].as_str().unwrap()).exists());
+    previews
+        .release(&[first["previewPath"].as_str().unwrap().to_owned()])
+        .unwrap();
+    assert!(!Path::new(first["previewPath"].as_str().unwrap()).exists());
+    assert!(Path::new(second["previewPath"].as_str().unwrap()).exists());
     let _ = std::fs::remove_dir_all(work);
 }
 
@@ -303,7 +360,8 @@ fn correct_after_load_reuses_the_decode_and_leaves_the_cached_image_untouched() 
     .unwrap();
 
     let cache = ReferenceCache::default();
-    load_reference_cached(&cache, path_str.clone(), &no_progress).unwrap();
+    let previews = PreviewFiles::default();
+    load_reference_cached(&cache, &previews, path_str.clone(), &no_progress).unwrap();
     let before = cache.get_or_decode(&path, || {}, decode).unwrap().image;
     let pixels_before = before.rgb.clone();
 
@@ -311,6 +369,7 @@ fn correct_after_load_reuses_the_decode_and_leaves_the_cached_image_untouched() 
         stages(|r| {
             correct_image_cached(
                 &cache,
+                &previews,
                 profile.to_string_lossy().into_owned(),
                 path_str.clone(),
                 output,
@@ -321,6 +380,12 @@ fn correct_after_load_reuses_the_decode_and_leaves_the_cached_image_untouched() 
         })
     };
     let (first, first_stages) = run(None);
+    let first_after = std::fs::read(
+        serde_json::to_value(&first).unwrap()["afterPath"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(first_stages[0], "Using cached image");
     assert_eq!(first_stages[1], "Using cached preview");
     assert!(!first_stages.iter().any(|s| s == "Decoding image"));
@@ -334,6 +399,7 @@ fn correct_after_load_reuses_the_decode_and_leaves_the_cached_image_untouched() 
     let (uncached, _) = stages(|r| {
         correct_image_cached(
             &ReferenceCache::disabled(),
+            &previews,
             profile.to_string_lossy().into_owned(),
             path_str.clone(),
             None,
@@ -344,10 +410,11 @@ fn correct_after_load_reuses_the_decode_and_leaves_the_cached_image_untouched() 
     });
     let json = |v: &_| serde_json::to_value(v).unwrap();
     assert_eq!(
-        json(&first)["afterDataUrl"],
-        json(&uncached)["afterDataUrl"]
+        first_after,
+        std::fs::read(json(&uncached)["afterPath"].as_str().unwrap()).unwrap()
     );
-    assert_eq!(json(&first)["beforeDataUrl"], json(&saved)["beforeDataUrl"]);
+    assert_eq!(json(&first)["beforePath"], json(&saved)["beforePath"]);
+    assert!(Path::new(json(&first)["beforePath"].as_str().unwrap()).exists());
 
     let after = cache.get_or_decode(&path, || {}, decode).unwrap();
     assert!(after.hit && Arc::ptr_eq(&after.image, &before));

@@ -8,6 +8,8 @@ description = "ColorBalance image and RAW decode layer"
 
 [dependencies]
 colorbalance-core = { workspace = true, features = ["parallel"] }
+fast_image_resize = "6.1.0"
+rayon = { workspace = true }
 image = { workspace = true }
 rawler = "=0.8.0"
 thiserror = { workspace = true }

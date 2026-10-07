@@ -1,8 +1,25 @@
-import { invoke } from '@tauri-apps/api/core';
+import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 import { logger } from './logger.ts';
 import type { BatchSummary, ChartQuad, ChartRevision, CorrectResult, DeriveResult, DetectResult, InspectResult, LoadedReference } from './types';
+type NativeLoadedReference = Omit<LoadedReference, 'previewUrl'> & { previewPath: string };
+type NativeInspectResult = Omit<InspectResult, 'previewUrl'> & { previewPath?: string };
+type NativeCorrectResult = Omit<CorrectResult, 'beforeUrl' | 'afterUrl'> & { beforePath: string; afterPath: string };
+const assetPaths = new Map<string, string>();
+
+function assetUrl(path: string): string {
+  const url = convertFileSrc(path);
+  assetPaths.set(url, path);
+  return url;
+}
+
+export async function releasePreviewUrls(urls: string[]): Promise<void> {
+  const paths = urls.map((url) => assetPaths.get(url)).filter((path): path is string => Boolean(path));
+  if (!paths.length) return;
+  await invoke('release_previews', { paths });
+  urls.forEach((url) => assetPaths.delete(url));
+}
 
 export type { UnlistenFn };
 
@@ -40,9 +57,9 @@ export const backend: BackendBridge = {
   loadReference: async (path) => {
     logger.ipc('IPC', `Invoking load_reference on "${path}"`);
     try {
-      const result = await invoke<LoadedReference>('load_reference', { path });
+      const { previewPath, ...result } = await invoke<NativeLoadedReference>('load_reference', { path });
       logger.success('IPC', `load_reference succeeded: ${result.imageWidth}x${result.imageHeight}`);
-      return result;
+      return { ...result, previewUrl: assetUrl(previewPath) };
     } catch (err: unknown) {
       logger.error('IPC', `load_reference failed: ${err instanceof Error ? err.message : String(err)}`);
       throw err;
@@ -52,13 +69,13 @@ export const backend: BackendBridge = {
   inspectReference: async (path, revision, quad) => {
     logger.ipc('IPC', `Invoking inspect_reference on "${path}" [${revision}]`);
     try {
-      const result = await invoke<InspectResult>('inspect_reference', {
+      const { previewPath, ...result } = await invoke<NativeInspectResult>('inspect_reference', {
         path,
         chartRevision: revision,
         quad: quad ? { corners: quad.map(({ x, y }) => [x, y]) } : undefined,
       });
       logger.success('IPC', `inspect_reference succeeded: ${result.imageWidth}x${result.imageHeight} (${result.qualityPassed ? 'PASS' : 'WARN'})`);
-      return result;
+      return { ...result, previewUrl: previewPath ? assetUrl(previewPath) : undefined };
     } catch (err: unknown) {
       logger.error('IPC', `inspect_reference failed: ${err instanceof Error ? err.message : String(err)}`);
       throw err;
@@ -84,14 +101,14 @@ export const backend: BackendBridge = {
   correctImage: async (profilePath, inputPath, outputPath, overwrite) => {
     logger.ipc('IPC', `Invoking correct_image: "${inputPath}"${outputPath ? ` -> "${outputPath}"` : ' (preview only)'}`);
     try {
-      const result = await invoke<CorrectResult>('correct_image', {
+      const { beforePath, afterPath, ...result } = await invoke<NativeCorrectResult>('correct_image', {
         profilePath,
         inputPath,
         outputPath,
         overwrite: Boolean(overwrite),
       });
       logger.success('IPC', `correct_image complete${result.outputPath ? `: wrote "${result.outputPath}"` : ''}`);
-      return result;
+      return { ...result, beforeUrl: assetUrl(beforePath), afterUrl: assetUrl(afterPath) };
     } catch (err: unknown) {
       logger.error('IPC', `correct_image failed: ${err instanceof Error ? err.message : String(err)}`);
       throw err;

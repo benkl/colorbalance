@@ -130,6 +130,8 @@ The **BEFORE / AFTER** button on VALIDATE reloads the comparison without saving 
 
 Both previews are rendered in Rust and downscaled to 1600 px on the long side. The TIFF is full resolution. The writer uses a temporary file in the destination folder, flushes it, then renames it, so a failed write leaves no partial output. The save dialog confirms replacing an existing file. The camera must match the profile. A mismatch fails with both camera names and writes nothing, so a profile derived from a rendered JPEG cannot correct a RAW file.
 
+The desktop app keeps downscaled PNG previews in a private temporary directory and displays them through Tauri's asset protocol. It waits for replacement images to decode and for subsequent animation frames before removing previews it no longer needs; failed replacements leave the old image available. Closing the app removes any remaining files. Original images and saved TIFFs are not webview asset files.
+
 #### Comparison viewer controls
 
 A toolbar above the image controls what the viewport shows. Both images always share one zoom and pan, so the same pixels stay aligned.
@@ -142,7 +144,7 @@ A toolbar above the image controls what the viewport shows. Both images always s
 | Left-right or top-bottom | Direction of the split line. Arrow keys nudge it by 2%. | arrows |
 | Zoom `-` `+`, Fit, 100% | The readout is display pixels per preview pixel, up to 800%. From 200% up, pixels render unsmoothed. | `-` `+` |
 | Mouse wheel, double-click | Zoom at the cursor. Double-click toggles between fit and 2x. | |
-| Drag | Pans while zoomed. At least 48 px of the image stays in view. | |
+| Drag | Pans while zoomed; the image stays in view. | |
 | Hold: Before | Shows the original while held. | Space |
 | Backdrop | Dark, mid-gray, or light surround for judging color. | |
 | Reset | Fit zoom, no pan, split at 50%. | `0` |

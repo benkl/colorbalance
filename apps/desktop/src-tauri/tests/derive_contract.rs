@@ -2,7 +2,12 @@
 //! the real command and pin that JSON shape, so a Rust-side rename or a missing
 //! field fails here instead of surfacing as `undefined.toFixed` in the window.
 
-use colorbalance_desktop::commands::{correct_image, derive_profile, load_reference, no_progress};
+use colorbalance_desktop::commands::{
+    correct_image, correct_image_cached, derive_profile, load_reference, load_reference_cached,
+    no_progress,
+};
+use colorbalance_desktop::preview_files::PreviewFiles;
+use colorbalance_desktop::reference_cache::{ReferenceCache, DEFAULT_LIMIT_BYTES};
 use colorbalance_fixtures::{render_chart_dng, ChartScene};
 
 fn temp_dir(name: &str) -> std::path::PathBuf {
@@ -83,20 +88,20 @@ fn load_reference_returns_a_png_with_the_true_size() {
     let reference = work.join("reference.dng");
     render_chart_dng(&reference, &scene).unwrap();
 
-    let loaded =
-        load_reference(reference.to_string_lossy().into_owned(), &no_progress).expect("loads");
+    let previews = PreviewFiles::default();
+    let loaded = load_reference(
+        &previews,
+        reference.to_string_lossy().into_owned(),
+        &no_progress,
+    )
+    .expect("loads");
     let json = serde_json::to_value(&loaded).unwrap();
     let _ = std::fs::remove_dir_all(work);
 
     assert_eq!(json["imageWidth"], scene.width);
     assert_eq!(json["imageHeight"], scene.height);
-    assert!(
-        json["previewDataUrl"]
-            .as_str()
-            .unwrap()
-            .starts_with("data:image/png;base64,"),
-        "the webview can only render formats like PNG, not PPM"
-    );
+    let path = json["previewPath"].as_str().unwrap();
+    assert_eq!(&std::fs::read(path).unwrap()[..8], b"\x89PNG\r\n\x1a\n");
     assert_eq!(json["quad"].as_array().map(Vec::len), Some(4));
 }
 
@@ -177,8 +182,10 @@ fn correct_image_returns_previews_writes_a_tiff_and_protects_existing_output() {
     let work = temp_dir("correct");
     let (reference, profile_path) = derive_clean_profile(&work);
     let output = work.join("out.tiff");
+    let previews = PreviewFiles::default();
     let call = |overwrite| {
         correct_image(
+            &previews,
             profile_path.to_string_lossy().into_owned(),
             reference.to_string_lossy().into_owned(),
             Some(output.to_string_lossy().into_owned()),
@@ -189,14 +196,15 @@ fn correct_image_returns_previews_writes_a_tiff_and_protects_existing_output() {
 
     let response = call(false).expect("corrects the reference");
     let json = serde_json::to_value(&response).unwrap();
-    for key in ["beforeDataUrl", "afterDataUrl"] {
-        assert!(json[key]
-            .as_str()
-            .unwrap()
-            .starts_with("data:image/png;base64,"));
+    for key in ["beforePath", "afterPath"] {
+        assert_eq!(
+            &std::fs::read(json[key].as_str().unwrap()).unwrap()[..8],
+            b"\x89PNG\r\n\x1a\n"
+        );
     }
     assert_ne!(
-        json["beforeDataUrl"], json["afterDataUrl"],
+        std::fs::read(json["beforePath"].as_str().unwrap()).unwrap(),
+        std::fs::read(json["afterPath"].as_str().unwrap()).unwrap(),
         "the transform changed pixels"
     );
     let first = std::fs::read(&output).unwrap();
@@ -209,6 +217,15 @@ fn correct_image_returns_previews_writes_a_tiff_and_protects_existing_output() {
     assert!(error.contains("already exists"), "{error}");
     assert_eq!(std::fs::read(&output).unwrap(), first);
     assert_eq!(leftover_temp_files(&work), 0);
+    for key in ["beforePath", "afterPath"] {
+        assert!(std::path::Path::new(json[key].as_str().unwrap()).exists());
+    }
+    assert_eq!(
+        std::fs::read_dir(previews.directory().unwrap())
+            .unwrap()
+            .count(),
+        2
+    );
 
     call(true).expect("explicit overwrite succeeds");
     assert_eq!(leftover_temp_files(&work), 0);
@@ -229,7 +246,9 @@ fn correct_image_refuses_a_camera_mismatch_without_writing_anything() {
     std::fs::write(&profile_path, profile::to_json(&other)).unwrap();
 
     let output = work.join("out.tiff");
+    let previews = PreviewFiles::default();
     let error = correct_image(
+        &previews,
         profile_path.to_string_lossy().into_owned(),
         reference.to_string_lossy().into_owned(),
         Some(output.to_string_lossy().into_owned()),
@@ -245,6 +264,73 @@ fn correct_image_refuses_a_camera_mismatch_without_writing_anything() {
     assert!(error.contains("camera mismatch"), "{error}");
     assert!(!wrote);
     assert_eq!(temps, 0);
+}
+
+fn preview_names(previews: &PreviewFiles) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(previews.directory().unwrap())
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn failed_correction_removes_its_new_before_preview_and_keeps_a_prior_one() {
+    let work = temp_dir("failed-correct");
+    let (reference, profile_path) = derive_clean_profile(&work);
+    // The parent directory is missing, so the TIFF write fails after both
+    // previews were rendered.
+    let bad_output = work.join("missing").join("out.tiff");
+    let profile = profile_path.to_string_lossy().into_owned();
+    let input = reference.to_string_lossy().into_owned();
+    let fail = |cache: &ReferenceCache, previews: &PreviewFiles| {
+        correct_image_cached(
+            cache,
+            previews,
+            profile.clone(),
+            input.clone(),
+            Some(bad_output.to_string_lossy().into_owned()),
+            false,
+            &no_progress,
+        )
+        .expect_err("the unwritable output fails the correction")
+    };
+
+    // No cache, so the before preview is created by the failing call.
+    let previews = PreviewFiles::default();
+    fail(&ReferenceCache::disabled(), &previews);
+    assert_eq!(preview_names(&previews), Vec::<String>::new());
+
+    // A preview the UI already shows must survive a failed correction.
+    let cache = ReferenceCache::with_limit(DEFAULT_LIMIT_BYTES);
+    let previews = PreviewFiles::default();
+    let loaded = load_reference_cached(&cache, &previews, input.clone(), &no_progress).unwrap();
+    let loaded = serde_json::to_value(&loaded).unwrap();
+    let visible = loaded["previewPath"].as_str().unwrap().to_owned();
+    let before = std::fs::read(&visible).unwrap();
+    fail(&cache, &previews);
+    assert_eq!(std::fs::read(&visible).unwrap(), before);
+    assert_eq!(preview_names(&previews).len(), 1);
+    assert!(preview_names(&previews)
+        .iter()
+        .all(|name| name.ends_with(".png") && !name.contains("partial")));
+
+    // The kept preview is still the cache's, so the next correction reuses it.
+    let response = correct_image_cached(
+        &cache,
+        &previews,
+        profile.clone(),
+        input.clone(),
+        None,
+        false,
+        &no_progress,
+    )
+    .unwrap();
+    let response = serde_json::to_value(&response).unwrap();
+    assert_eq!(response["beforePath"].as_str().unwrap(), visible);
+    let _ = std::fs::remove_dir_all(work);
 }
 
 #[test]
@@ -273,7 +359,9 @@ fn derive_and_correct_report_their_stages_in_order() {
     .unwrap();
 
     let correct_stages = RefCell::new(Vec::new());
+    let previews = PreviewFiles::default();
     correct_image(
+        &previews,
         profile_path.to_string_lossy().into_owned(),
         reference.to_string_lossy().into_owned(),
         Some(work.join("out.tiff").to_string_lossy().into_owned()),

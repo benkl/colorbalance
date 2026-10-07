@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import type { ChartQuad, ChartRevision, CorrectResult, DeriveResult, BatchSummary, InspectResult } from './types';
-import { backend, chooseDirectory, chooseImage, chooseSavePath, listenForBatchProgress, listenForFileDrop, listenForFileDropHover, listenForOperationProgress } from './tauri';
+import { backend, releasePreviewUrls, chooseDirectory, chooseImage, chooseSavePath, listenForBatchProgress, listenForFileDrop, listenForFileDropHover, listenForOperationProgress } from './tauri';
 import type { BatchProgress, OperationProgress } from './tauri';
 import { referenceFromDrop } from './interaction';
 import { LightTableOverlay } from './components/LightTableOverlay';
@@ -24,6 +24,12 @@ import {
 } from 'lucide-react';
 
 type Tab = 'reference' | 'validate' | 'export';
+const decodePreview = async (url: string): Promise<void> => {
+  const image = new Image();
+  image.src = url;
+  await image.decode();
+};
+
 
 const TABS: { id: Tab; label: string; icon: typeof Layers }[] = [
   { id: 'reference', label: 'REFERENCE', icon: Layers },
@@ -41,6 +47,26 @@ export const App: React.FC = () => {
   const [imageSize, setImageSize] = useState<{ width: number; height: number }>({ width: 480, height: 320 });
   const [chartRevision, setChartRevision] = useState<ChartRevision | ''>('');
   const [compare, setCompare] = useState<(CorrectResult & { source: string }) | null>(null);
+  const retainedPreviews = useRef(new Set<string>());
+  const visiblePreviews = useRef(new Set<string>());
+  useEffect(() => {
+    const active = new Set([referencePreview, ...(compare ? [compare.beforeUrl, compare.afterUrl] : [])].filter((url): url is string => Boolean(url)));
+    visiblePreviews.current = active;
+    active.forEach((url) => retainedPreviews.current.add(url));
+    let cancelled = false;
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      if (cancelled) return;
+      const retired = [...retainedPreviews.current].filter((url) => !visiblePreviews.current.has(url));
+      if (retired.length) {
+        void releasePreviewUrls(retired).then(() => {
+          retired.forEach((url) => {
+            if (!visiblePreviews.current.has(url)) retainedPreviews.current.delete(url);
+          });
+        }).catch((error: unknown) => logger.warn('IPC', `Preview cleanup failed: ${String(error)}`));
+      }
+    }));
+    return () => { cancelled = true; };
+  });
 
   // Chart Quadrilateral State
   const [quad, setQuad] = useState<ChartQuad>([
@@ -203,6 +229,7 @@ export const App: React.FC = () => {
     ++detectionGeneration.current;
     loadedReferencePath.current = null;
     setLoadedPath(null);
+    setCompare(null);
     setDetectionStatus('idle');
     setDetectionError('');
     return ++referenceGeneration.current;
@@ -212,16 +239,29 @@ export const App: React.FC = () => {
   const showReference = async (path: string) => {
     const referenceId = startReference();
     setReferencePath(path);
-    setReferencePreview('');
     setErrorMessage('');
     setInspectResult(null);
     beginWork();
     try {
       const loaded = await backend.loadReference(path);
-      if (referenceId !== referenceGeneration.current) return;
+      if (referenceId !== referenceGeneration.current) {
+        if (!visiblePreviews.current.has(loaded.previewUrl)) void releasePreviewUrls([loaded.previewUrl]);
+        return;
+      }
+      try {
+        await decodePreview(loaded.previewUrl);
+      } catch (error) {
+        if (!visiblePreviews.current.has(loaded.previewUrl)) void releasePreviewUrls([loaded.previewUrl]);
+        throw error;
+      }
+      if (referenceId !== referenceGeneration.current) {
+        if (!visiblePreviews.current.has(loaded.previewUrl)) void releasePreviewUrls([loaded.previewUrl]);
+        return;
+      }
+      retainedPreviews.current.add(loaded.previewUrl);
       loadedReferencePath.current = path;
       setLoadedPath(path);
-      setReferencePreview(loaded.previewDataUrl);
+      setReferencePreview(loaded.previewUrl);
       setImageSize({ width: loaded.imageWidth, height: loaded.imageHeight });
       setQuad(loaded.quad.map(([x, y]) => ({ x, y })) as ChartQuad);
       logger.success('UI', `Preview ready: ${loaded.imageWidth}x${loaded.imageHeight}`);
@@ -236,7 +276,6 @@ export const App: React.FC = () => {
       }
     } catch (err: unknown) {
       if (referenceId !== referenceGeneration.current) return;
-      setReferencePreview('');
       setErrorMessage(`Could not load image: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       if (referenceId === referenceGeneration.current) endWork();
@@ -309,12 +348,26 @@ export const App: React.FC = () => {
     setErrorMessage('');
     try {
       const result = await backend.inspectReference(referencePath, chartRevision, quad);
-      if (referenceId !== referenceGeneration.current) return;
+      if (referenceId !== referenceGeneration.current) {
+        if (result.previewUrl && !visiblePreviews.current.has(result.previewUrl)) void releasePreviewUrls([result.previewUrl]);
+        return;
+      }
+      if (result.previewUrl) {
+        try {
+          await decodePreview(result.previewUrl);
+        } catch (error) {
+          if (!visiblePreviews.current.has(result.previewUrl)) void releasePreviewUrls([result.previewUrl]);
+          throw error;
+        }
+        if (referenceId !== referenceGeneration.current) {
+          if (!visiblePreviews.current.has(result.previewUrl)) void releasePreviewUrls([result.previewUrl]);
+          return;
+        }
+        retainedPreviews.current.add(result.previewUrl);
+        setReferencePreview(result.previewUrl);
+      }
       setInspectResult(result);
       setQuad(result.quad.map(([x, y]) => ({ x, y })) as ChartQuad);
-      if (result.previewDataUrl) {
-        setReferencePreview(result.previewDataUrl);
-      }
     } catch (error: unknown) {
       if (referenceId === referenceGeneration.current) setErrorMessage(error instanceof Error ? error.message : String(error));
     } finally {
@@ -425,6 +478,15 @@ export const App: React.FC = () => {
         output = chosen;
       }
       const result = await backend.correctImage(deriveResult.profilePath, input, output, true);
+      try {
+        await Promise.all([decodePreview(result.beforeUrl), decodePreview(result.afterUrl)]);
+      } catch (error) {
+        const unmounted = [result.beforeUrl, result.afterUrl].filter((url) => !visiblePreviews.current.has(url));
+        void releasePreviewUrls(unmounted);
+        throw error;
+      }
+      retainedPreviews.current.add(result.beforeUrl);
+      retainedPreviews.current.add(result.afterUrl);
       setCompare({ ...result, source: input });
     } catch (error: unknown) {
       setErrorMessage(error instanceof Error ? error.message : String(error));
@@ -593,8 +655,8 @@ export const App: React.FC = () => {
           {tab !== 'reference' && compare ? (
             <BeforeAfter
               key={compare.source}
-              beforeSrc={compare.beforeDataUrl}
-              afterSrc={compare.afterDataUrl}
+              beforeSrc={compare.beforeUrl}
+              afterSrc={compare.afterUrl}
               onClose={() => { setCompare(null); setTab('reference'); }}
             />
           ) : (

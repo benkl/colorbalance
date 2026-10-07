@@ -3,7 +3,7 @@
 //! The light-table calls `load_reference`, then `inspect_reference` on every
 //! chart-corner change, then `derive_profile`, all on the same file. Each call
 //! used to re-decode a multi-megapixel RAW. This cache keeps the most recent
-//! decode (and its rendered preview) so those calls share one decode.
+//! decode and its on-disk preview path so those calls share one decode.
 //!
 //! Rules:
 //! - An entry is valid only for the same canonical path, byte length and
@@ -14,6 +14,8 @@
 //!   result is returned to the caller but not cached.
 //! - Failures are never cached. Entries over the byte limit are never cached.
 //! - The image is shared as an immutable [`Arc`]; hits do not copy pixels.
+//! - Preview PNG bytes live in the session directory, outside this memory limit.
+//! - A released preview path is a miss even when the decoded image still hits.
 //!
 //! The cache lives in `AppState`, not in a global, and plain `commands` calls
 //! pass a [`ReferenceCache::disabled`] one.
@@ -27,7 +29,7 @@ use colorbalance_core::decode::DecodedImage;
 
 use crate::commands::BackendError;
 
-/// Default budget for one cached reference: pixels, clip flags and preview.
+/// Default budget for one cached reference's pixels and clip flags.
 /// One entry only. 1 GiB holds a 45-megapixel decode (~585 MB with flags); a
 /// smaller limit would silently exclude the large RAW frames this exists for.
 pub const DEFAULT_LIMIT_BYTES: usize = 1024 * 1024 * 1024;
@@ -90,6 +92,13 @@ impl ReferenceCache {
             limit,
             slot: Mutex::new(None),
         }
+    }
+    /// Compare the canonical file identity, size and modification time to the cached decode.
+    pub fn matches(&self, path: &Path) -> bool {
+        let key = FileKey::of(path);
+        self.slot()
+            .as_ref()
+            .is_some_and(|entry| Some(&entry.key) == key.as_ref())
     }
 
     /// A cache that never stores anything: every lookup decodes.
@@ -162,16 +171,15 @@ impl ReferenceCache {
         if let Some(entry) = self.slot().as_ref() {
             if Arc::ptr_eq(&entry.image, image) {
                 if let Some(preview) = &entry.preview {
-                    return Ok((preview.clone(), true));
+                    if Path::new(preview).is_file() {
+                        return Ok((preview.clone(), true));
+                    }
                 }
             }
         }
         let preview = render(image.as_ref())?;
         if let Some(entry) = self.slot().as_mut() {
-            if Arc::ptr_eq(&entry.image, image)
-                && entry.preview.is_none()
-                && image_bytes(image) + preview.len() <= self.limit
-            {
+            if Arc::ptr_eq(&entry.image, image) && image_bytes(image) <= self.limit {
                 entry.preview = Some(preview.clone());
             }
         }

@@ -1,10 +1,11 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { TransformComponent, TransformWrapper, type ReactZoomPanPinchContentRef } from 'react-zoom-pan-pinch';
 import { Minus, Plus, X } from 'lucide-react';
 
 interface Props {
-  /** `data:image/png` of the image as decoded. Rendered by the backend. */
+  /** Backend preview URL for the decoded image. */
   beforeSrc: string;
-  /** `data:image/png` of the corrected image. Rendered by the backend. */
+  /** Backend preview URL for the corrected image. */
   afterSrc: string;
   onClose: () => void;
 }
@@ -24,8 +25,6 @@ const MODES: { id: Mode; label: string; key: string; testId: string }[] = [
 const BACKDROP: Record<Backdrop, string> = { dark: '#0a0a0a', gray: '#808080', light: '#f2f2f2' };
 
 const GAP = 8;
-/** Pixels of the image that must stay inside the viewport while panning. */
-const PAN_MARGIN = 48;
 const ZOOM_STEP = 1.25;
 /** Highest zoom is this many display pixels per preview pixel. */
 const MAX_PIXEL_SCALE = 8;
@@ -49,15 +48,14 @@ export const BeforeAfter: React.FC<Props> = ({ beforeSrc, afterSrc, onClose }) =
   const [mode, setMode] = useState<Mode>('split');
   const [orientation, setOrientation] = useState<Orientation>('vertical');
   const [split, setSplit] = useState(50);
-  const [zoom, setZoom] = useState(1);
-  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [view, setView] = useState({ scale: 1, positionX: 0, positionY: 0 });
   const [backdrop, setBackdrop] = useState<Backdrop>('dark');
   const [peek, setPeek] = useState(false);
   const [natural, setNatural] = useState<{ w: number; h: number } | null>(null);
   const [stage, setStage] = useState({ w: 0, h: 0 });
   const rootRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
-  const drag = useRef<{ x: number; y: number; pan: { x: number; y: number } } | null>(null);
+  const controls = useRef<(ReactZoomPanPinchContentRef | null)[]>([]);
 
   // Holding the peek key or button shows the original, whatever the view.
   const shown: Mode = peek ? 'before' : mode;
@@ -70,7 +68,7 @@ export const BeforeAfter: React.FC<Props> = ({ beforeSrc, afterSrc, onClose }) =
   const maxZoom = natural && fitW > 0 ? Math.max(1, (MAX_PIXEL_SCALE * natural.w) / fitW) : 1;
   const originX = (areaW - fitW) / 2;
   const originY = (areaH - fitH) / 2;
-  const pixelScale = natural && fitW > 0 ? (zoom * fitW) / natural.w : 0;
+  const pixelScale = natural && fitW > 0 ? (view.scale * fitW) / natural.w : 0;
 
   useEffect(() => {
     let live = true;
@@ -98,49 +96,82 @@ export const BeforeAfter: React.FC<Props> = ({ beforeSrc, afterSrc, onClose }) =
     rootRef.current?.focus();
   }, []);
 
-  const clampPan = (next: { x: number; y: number }, z: number) => {
-    if (z <= 1) return { x: 0, y: 0 };
-    return {
-      x: clamp(next.x, -(originX + fitW * z - PAN_MARGIN), areaW - originX - PAN_MARGIN),
-      y: clamp(next.y, -(originY + fitH * z - PAN_MARGIN), areaH - originY - PAN_MARGIN),
-    };
+
+  const zoomBy = (factor: number) => {
+    const control = controls.current[0];
+    if (control) void control.centerView(clamp(control.state.scale * factor, 1, maxZoom), 0);
   };
 
-  /** Zoom keeping the image point under (px, py) fixed; coordinates are relative to one pane. */
-  const zoomAt = (target: number, px: number, py: number) => {
-    const next = clamp(target, 1, maxZoom);
-    if (next <= 1) {
-      setZoom(1);
-      setPan({ x: 0, y: 0 });
-      return;
-    }
-    const contentX = (px - originX - pan.x) / zoom;
-    const contentY = (py - originY - pan.y) / zoom;
-    setZoom(next);
-    setPan(clampPan({ x: px - originX - contentX * next, y: py - originY - contentY * next }, next));
+  const fitView = () => {
+    controls.current.forEach((control) => {
+      if (control) void control.setTransform(originX, originY, 1, 0);
+    });
   };
-
-  const zoomBy = (factor: number) => zoomAt(zoom * factor, areaW / 2, areaH / 2);
 
   const resetView = () => {
-    setZoom(1);
-    setPan({ x: 0, y: 0 });
+    fitView();
     setSplit(50);
   };
 
-  // Native listener: React registers wheel passively, which forbids preventDefault.
-  useEffect(() => {
-    const node = stageRef.current;
-    if (!node) return;
-    const onWheel = (event: WheelEvent) => {
-      event.preventDefault();
-      const pane = (event.target as Element).closest('[data-pane]') as HTMLElement | null;
-      const rect = (pane ?? node).getBoundingClientRect();
-      zoomAt(zoom * Math.exp(-event.deltaY * 0.0015), event.clientX - rect.left, event.clientY - rect.top);
-    };
-    node.addEventListener('wheel', onWheel, { passive: false });
-    return () => node.removeEventListener('wheel', onWheel);
-  });
+  const zoomTo100 = () => {
+    const control = controls.current[0];
+    if (control) void control.centerView(clamp(1 / fit, 1, maxZoom), 0);
+  };
+
+  const onDoubleClick = (index: number, event: React.MouseEvent<HTMLDivElement>) => {
+    const control = controls.current[index];
+    if (!control) return;
+    if (control.state.scale > 1) {
+      resetView();
+    } else {
+      void control.zoomToPoint(clamp(Math.max(2, 1 / fit), 1, maxZoom), event.clientX, event.clientY, 0);
+    }
+  };
+
+  const onTransform = (index: number, state: { scale: number; positionX: number; positionY: number }) => {
+    setView((current) =>
+      current.scale === state.scale && current.positionX === state.positionX && current.positionY === state.positionY
+        ? current
+        : state,
+    );
+    const other = controls.current[1 - index];
+    if (shown === 'side' && other &&
+      (other.state.scale !== state.scale || other.state.positionX !== state.positionX || other.state.positionY !== state.positionY)) {
+      void other.setTransform(state.positionX, state.positionY, state.scale, 0);
+    }
+  };
+
+  // Each side pane gets a cursor-relative wheel and pinch surface; images stay outside the transformed node.
+  const pane = (children: React.ReactNode, index = 0) => (
+    <div key={index} data-pane className="relative overflow-hidden" style={{ width: areaW, height: areaH }}>
+      <TransformWrapper
+        key={`${areaW}-${areaH}-${fitW}-${fitH}`}
+        ref={(control) => { controls.current[index] = control; }}
+        minScale={1}
+        maxScale={maxZoom}
+        initialScale={clamp(view.scale, 1, maxZoom)}
+        initialPositionX={originX}
+        initialPositionY={originY}
+        limitToBounds
+        centerZoomedOut
+        centerOnInit
+        wheel={{ step: 0.0015 }}
+        panning={{ disabled: view.scale <= 1, velocityDisabled: true }}
+        doubleClick={{ disabled: true }}
+        zoomAnimation={{ disabled: true }}
+        onTransform={(_, state) => onTransform(index, state)}
+      >
+        <TransformComponent
+          wrapperClass="!absolute !inset-0 !w-full !h-full"
+          contentStyle={{ width: fitW, height: fitH }}
+          wrapperProps={{ onPointerDown: () => rootRef.current?.focus(), onDoubleClick: (event) => onDoubleClick(index, event) }}
+        >
+          <div style={{ width: fitW, height: fitH }} />
+        </TransformComponent>
+      </TransformWrapper>
+      {children}
+    </div>
+  );
 
   const onKeyDown = (event: React.KeyboardEvent) => {
     if (event.metaKey || event.ctrlKey || event.altKey) return;
@@ -164,34 +195,6 @@ export const BeforeAfter: React.FC<Props> = ({ beforeSrc, afterSrc, onClose }) =
     }
   };
 
-  const onStagePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
-    rootRef.current?.focus();
-    if (event.button !== 0 || zoom <= 1) return;
-    event.currentTarget.setPointerCapture(event.pointerId);
-    drag.current = { x: event.clientX, y: event.clientY, pan };
-  };
-
-  const onStagePointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
-    const start = drag.current;
-    if (!start) return;
-    setPan(
-      clampPan(
-        { x: start.pan.x + event.clientX - start.x, y: start.pan.y + event.clientY - start.y },
-        zoom,
-      ),
-    );
-  };
-
-  const onStageDoubleClick = (event: React.MouseEvent<HTMLDivElement>) => {
-    if (!natural) return;
-    if (zoom > 1) {
-      resetView();
-      return;
-    }
-    const pane = (event.target as Element).closest('[data-pane]') as HTMLElement | null;
-    const rect = (pane ?? event.currentTarget).getBoundingClientRect();
-    zoomAt(Math.max(2, natural.w / Math.max(fitW, 1)), event.clientX - rect.left, event.clientY - rect.top);
-  };
 
   const moveSplit = (event: React.PointerEvent<HTMLDivElement>) => {
     const rect = stageRef.current?.getBoundingClientRect();
@@ -204,14 +207,11 @@ export const BeforeAfter: React.FC<Props> = ({ beforeSrc, afterSrc, onClose }) =
   };
 
   const imageStyle: React.CSSProperties = { imageRendering: pixelScale >= 2 ? 'pixelated' : 'auto' };
-  const transform = `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`;
+  const transform = `translate(${view.positionX}px, ${view.positionY}px) scale(${view.scale})`;
 
   const layer = (src: string, label: string, testId: string, clip?: string) => (
-    <div className="absolute inset-0" style={clip ? { clipPath: clip } : undefined}>
-      <div
-        className="absolute"
-        style={{ left: originX, top: originY, width: fitW, height: fitH, transform, transformOrigin: '0 0' }}
-      >
+    <div className="absolute inset-0 pointer-events-none" style={clip ? { clipPath: clip } : undefined}>
+      <div className="absolute" style={{ width: fitW, height: fitH, transform, transformOrigin: '0 0' }}>
         <img src={src} alt={label} draggable={false} className="block w-full h-full" style={imageStyle} data-testid={testId} />
       </div>
     </div>
@@ -223,11 +223,6 @@ export const BeforeAfter: React.FC<Props> = ({ beforeSrc, afterSrc, onClose }) =
     </span>
   );
 
-  const pane = (children: React.ReactNode, key?: string) => (
-    <div key={key} data-pane className="relative overflow-hidden" style={{ width: areaW, height: areaH }}>
-      {children}
-    </div>
-  );
 
   const renderStage = () => {
     if (!natural || stage.w <= 0 || stage.h <= 0) return null;
@@ -239,14 +234,14 @@ export const BeforeAfter: React.FC<Props> = ({ beforeSrc, afterSrc, onClose }) =
               {layer(beforeSrc, 'Before', 'before-image')}
               {tag('BEFORE', 'top-1 left-1')}
             </>,
-            'before',
+            0,
           )}
           {pane(
             <>
               {layer(afterSrc, 'After', 'after-image')}
               {tag('AFTER', 'top-1 left-1')}
             </>,
-            'after',
+            1,
           )}
         </div>
       );
@@ -280,6 +275,13 @@ export const BeforeAfter: React.FC<Props> = ({ beforeSrc, afterSrc, onClose }) =
             vertical ? 'top-0 bottom-0 w-6 -ml-3 cursor-ew-resize' : 'left-0 right-0 h-6 -mt-3 cursor-ns-resize'
           }`}
           style={vertical ? { left: `${split}%` } : { top: `${split}%` }}
+          role="slider"
+          tabIndex={0}
+          aria-label="Before and after split"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={Math.round(split)}
+          aria-orientation={vertical ? 'horizontal' : 'vertical'}
           onPointerDown={(event) => {
             event.stopPropagation();
             event.currentTarget.setPointerCapture(event.pointerId);
@@ -359,11 +361,8 @@ export const BeforeAfter: React.FC<Props> = ({ beforeSrc, afterSrc, onClose }) =
             type="button"
             tabIndex={-1}
             title="Fit the image in the viewport"
-            onClick={() => {
-              setZoom(1);
-              setPan({ x: 0, y: 0 });
-            }}
-            className={chip(zoom === 1)}
+            onClick={fitView}
+            className={chip(view.scale === 1)}
             data-testid="zoom-fit"
           >
             FIT
@@ -372,7 +371,7 @@ export const BeforeAfter: React.FC<Props> = ({ beforeSrc, afterSrc, onClose }) =
             type="button"
             tabIndex={-1}
             title="One display pixel per preview pixel"
-            onClick={() => natural && zoomAt(natural.w / Math.max(fitW, 1), areaW / 2, areaH / 2)}
+            onClick={zoomTo100}
             className={chip(Math.abs(pixelScale - 1) < 0.005)}
             data-testid="zoom-100"
           >
@@ -427,16 +426,7 @@ export const BeforeAfter: React.FC<Props> = ({ beforeSrc, afterSrc, onClose }) =
       <div
         ref={stageRef}
         className="relative flex-1 min-h-0 overflow-hidden select-none touch-none"
-        style={{ background: BACKDROP[backdrop], cursor: zoom > 1 ? 'grab' : 'default' }}
-        onPointerDown={onStagePointerDown}
-        onPointerMove={onStagePointerMove}
-        onPointerUp={() => {
-          drag.current = null;
-        }}
-        onPointerCancel={() => {
-          drag.current = null;
-        }}
-        onDoubleClick={onStageDoubleClick}
+        style={{ background: BACKDROP[backdrop], cursor: view.scale > 1 ? 'grab' : 'default' }}
         data-testid="compare-frame"
       >
         {renderStage()}
@@ -447,7 +437,7 @@ export const BeforeAfter: React.FC<Props> = ({ beforeSrc, afterSrc, onClose }) =
           {shown.toUpperCase()}
           {shown === 'split' ? ` ${Math.round(split)}%` : ''} · {Math.round(pixelScale * 100)}%
         </span>
-        <span>SCROLL ZOOM · DRAG PAN · DOUBLE-CLICK ZOOM · SPACE HOLD BEFORE · 1-4 VIEW · 0 RESET</span>
+        <span>SCROLL/PINCH ZOOM · DRAG PAN · DOUBLE-CLICK ZOOM · SPACE HOLD BEFORE · 1-4 VIEW · ARROWS SPLIT · 0 RESET</span>
       </div>
     </div>
   );

@@ -12,6 +12,7 @@ use colorbalance_core::profile::{self, Profile, ValidationSummary};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::preview_files::PreviewFiles;
 use crate::reference_cache::ReferenceCache;
 
 /// Stage reporter for long commands: `(label, step, steps)`, called as each
@@ -41,7 +42,7 @@ pub struct InspectResponse {
     quality_passed: bool,
     gate_failures: Vec<GateFailureResponse>,
     quad: [[f64; 2]; 4],
-    preview_data_url: Option<String>,
+    preview_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -177,8 +178,8 @@ pub struct LoadedReference {
     pub image_height: u32,
     /// Default chart quad (TL, TR, BR, BL) in full-resolution pixels.
     pub quad: [[f64; 2]; 4],
-    /// `data:image/png;base64,...` preview that keeps the image aspect ratio.
-    pub preview_data_url: String,
+    /// App-owned PNG preview file for the asset protocol.
+    pub preview_path: String,
 }
 
 /// Chart geometry only; the physical chart revision must be selected by the user.
@@ -190,22 +191,19 @@ pub enum DetectResponse {
     Ambiguous,
 }
 
-fn encode_png_data_url(png: &[u8]) -> String {
-    use base64::engine::general_purpose::STANDARD;
-    use base64::Engine;
-    format!("data:image/png;base64,{}", STANDARD.encode(png))
-}
-
-fn preview_data_url(image: &DecodedImage) -> Result<String, BackendError> {
-    let png = colorbalance_raw::render_preview_png(image, PREVIEW_MAX_DIM)
-        .map_err(|error| BackendError::Message(error.to_string()))?;
-    Ok(encode_png_data_url(&png))
+fn preview_png(image: &DecodedImage) -> Result<Vec<u8>, BackendError> {
+    colorbalance_raw::render_preview_png(image, PREVIEW_MAX_DIM)
+        .map_err(|error| BackendError::Message(error.to_string()))
 }
 
 /// Decode a reference image and return a displayable preview with its true
 /// dimensions, so the light-table can show it before any calibration step.
-pub fn load_reference(path: String, report: Report) -> Result<LoadedReference, BackendError> {
-    load_reference_cached(&ReferenceCache::disabled(), path, report)
+pub fn load_reference(
+    previews: &PreviewFiles,
+    path: String,
+    report: Report,
+) -> Result<LoadedReference, BackendError> {
+    load_reference_cached(&ReferenceCache::disabled(), previews, path, report)
 }
 
 /// Decode `path` through `cache`, reporting step 1 as a decode only when one
@@ -228,27 +226,29 @@ fn decode_cached(
 }
 
 /// Render the preview for `image` through `cache`, reporting the stage as a
-/// render or a cache hit.
+/// render or a cache hit. The flag is true when this call published the file,
+/// so a caller that later fails can release it; a cache hit is already visible.
 fn preview_cached(
     cache: &ReferenceCache,
+    previews: &PreviewFiles,
     image: &std::sync::Arc<DecodedImage>,
     report: Report,
     step: usize,
     steps: usize,
-) -> Result<String, BackendError> {
+) -> Result<(String, bool), BackendError> {
     let (preview, hit) = cache.preview(image, |image| {
         report("Rendering preview", step, steps);
-        preview_data_url(image)
+        previews.replace_reference(&preview_png(image)?)
     })?;
     if hit {
         report("Using cached preview", step, steps);
     }
-    Ok(preview)
+    Ok((preview, !hit))
 }
-
 /// [`load_reference`] that reuses the cache's decode and preview.
 pub fn load_reference_cached(
     cache: &ReferenceCache,
+    previews: &PreviewFiles,
     path: String,
     report: Report,
 ) -> Result<LoadedReference, BackendError> {
@@ -258,7 +258,7 @@ pub fn load_reference_cached(
         image_width: image.width,
         image_height: image.height,
         quad: quad.corners,
-        preview_data_url: preview_cached(cache, &image, report, 2, 2)?,
+        preview_path: preview_cached(cache, previews, &image, report, 2, 2)?.0,
     })
 }
 
@@ -276,6 +276,7 @@ pub fn detect_chart_cached(
 }
 
 pub fn inspect_reference(
+    previews: &PreviewFiles,
     path: String,
     chart_revision: String,
     quad: Option<QuadPayload>,
@@ -283,6 +284,7 @@ pub fn inspect_reference(
 ) -> Result<InspectResponse, BackendError> {
     inspect_reference_cached(
         &ReferenceCache::disabled(),
+        previews,
         path,
         chart_revision,
         quad,
@@ -293,6 +295,7 @@ pub fn inspect_reference(
 /// [`inspect_reference`] that reuses the cache's decode and preview.
 pub fn inspect_reference_cached(
     cache: &ReferenceCache,
+    previews: &PreviewFiles,
     path: String,
     chart_revision: String,
     quad: Option<QuadPayload>,
@@ -309,7 +312,7 @@ pub fn inspect_reference_cached(
     let failures = calibration::evaluate_quality(&samples, &gate_config)
         .err()
         .unwrap_or_default();
-    let preview = Some(preview_cached(cache, &image, report, 4, 4)?);
+    let preview = Some(preview_cached(cache, previews, &image, report, 4, 4)?.0);
     Ok(InspectResponse {
         camera: image.camera.clone(),
         image_width: image.width,
@@ -325,7 +328,7 @@ pub fn inspect_reference_cached(
             })
             .collect(),
         quad: chart_quad.corners,
-        preview_data_url: preview,
+        preview_path: preview,
     })
 }
 
@@ -740,10 +743,10 @@ fn write_atomically(output: &Path, data: &[u8]) -> std::io::Result<()> {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CorrectResponse {
-    /// Downscaled PNG of the image as decoded, for the "before" half.
-    before_data_url: String,
-    /// Downscaled PNG of the corrected image, for the "after" half.
-    after_data_url: String,
+    /// App-owned PNG of the uncorrected image.
+    before_path: String,
+    /// App-owned PNG of the corrected image.
+    after_path: String,
     /// Where the corrected TIFF was written, when an output path was given.
     output_path: Option<String>,
     warnings: Vec<String>,
@@ -755,6 +758,7 @@ pub struct CorrectResponse {
 /// resolution 16-bit TIFF is also written atomically; an existing file is an
 /// error unless `overwrite` is set. Camera mismatch fails closed.
 pub fn correct_image(
+    previews: &PreviewFiles,
     profile_path: String,
     input_path: String,
     output_path: Option<String>,
@@ -763,6 +767,7 @@ pub fn correct_image(
 ) -> Result<CorrectResponse, BackendError> {
     correct_image_cached(
         &ReferenceCache::disabled(),
+        previews,
         profile_path,
         input_path,
         output_path,
@@ -777,6 +782,7 @@ pub fn correct_image(
 /// themselves when nothing else holds the image, as with a disabled cache).
 pub fn correct_image_cached(
     cache: &ReferenceCache,
+    previews: &PreviewFiles,
     profile_path: String,
     input_path: String,
     output_path: Option<String>,
@@ -795,50 +801,59 @@ pub fn correct_image_cached(
     }
     let image = decode_cached(cache, &input_path, report, steps)?;
     let version_warning = check_camera(&profile, &image).map_err(BackendError::Message)?;
-    let before_data_url = preview_cached(cache, &image, report, 2, steps)?;
-    report("Applying the transform", 3, steps);
-    let (width, height) = (image.width, image.height);
-    let mut rgb = match std::sync::Arc::try_unwrap(image) {
-        Ok(owned) => owned.rgb,
-        Err(shared) => shared.rgb.clone(),
-    };
-    let (pixels, out_of_gamut) = correct_buffer(&profile, &mut rgb);
-    report("Rendering corrected preview", 4, steps);
-    let after_data_url =
-        colorbalance_raw::render_preview_rgb(&rgb, width, height, None, PREVIEW_MAX_DIM)
-            .map(|png| encode_png_data_url(&png))
-            .map_err(|error| BackendError::Message(error.to_string()))?;
-    drop(rgb);
-    if let Some(output) = &output_path {
-        report("Writing 16-bit TIFF", 5, steps);
-        let data = encode_tiff_rgb_u16(width, height, &pixels);
-        write_atomically(Path::new(output), &data)?;
-    }
+    let (before_path, before_is_new) = preview_cached(cache, previews, &image, report, 2, steps)?;
+    let rendered = (|| -> Result<CorrectResponse, BackendError> {
+        report("Applying the transform", 3, steps);
+        let (width, height) = (image.width, image.height);
+        let mut rgb = match std::sync::Arc::try_unwrap(image) {
+            Ok(owned) => owned.rgb,
+            Err(shared) => shared.rgb.clone(),
+        };
+        let (pixels, out_of_gamut) = correct_buffer(&profile, &mut rgb);
+        report("Rendering corrected preview", 4, steps);
+        let after_png =
+            colorbalance_raw::render_preview_rgb(&rgb, width, height, None, PREVIEW_MAX_DIM)
+                .map_err(|error| BackendError::Message(error.to_string()))?;
+        drop(rgb);
+        if let Some(output) = &output_path {
+            report("Writing 16-bit TIFF", 5, steps);
+            let data = encode_tiff_rgb_u16(width, height, &pixels);
+            write_atomically(Path::new(output), &data)?;
+        }
 
-    let mut warnings = Vec::new();
-    if let Some(warning) = version_warning {
-        warnings.push(warning);
-    }
-    if let Some(quality) = &profile.quality {
-        if quality.quick_and_dirty {
-            warnings.push("Profile came from a rendered image: approximate.".to_owned());
+        let mut warnings = Vec::new();
+        if let Some(warning) = version_warning {
+            warnings.push(warning);
         }
-        if !quality.failures.is_empty() {
-            warnings.push("Profile was derived despite failed quality checks.".to_owned());
+        if let Some(quality) = &profile.quality {
+            if quality.quick_and_dirty {
+                warnings.push("Profile came from a rendered image: approximate.".to_owned());
+            }
+            if !quality.failures.is_empty() {
+                warnings.push("Profile was derived despite failed quality checks.".to_owned());
+            }
         }
+        if out_of_gamut > 0.01 {
+            warnings.push(format!(
+                "{:.1}% of pixels fall outside sRGB and were clipped.",
+                out_of_gamut * 100.0
+            ));
+        }
+        let (before_path, after_path) =
+            previews.replace_comparison(Path::new(&before_path), &after_png)?;
+        Ok(CorrectResponse {
+            before_path,
+            after_path,
+            output_path,
+            warnings,
+        })
+    })();
+    if rendered.is_err() && before_is_new {
+        // Nothing was handed to the UI, so the preview this call published
+        // would never be released. A cache-hit before preview is still visible.
+        let _ = previews.release(&[before_path]);
     }
-    if out_of_gamut > 0.01 {
-        warnings.push(format!(
-            "{:.1}% of pixels fall outside sRGB and were clipped.",
-            out_of_gamut * 100.0
-        ));
-    }
-    Ok(CorrectResponse {
-        before_data_url,
-        after_data_url,
-        output_path,
-        warnings,
-    })
+    rendered
 }
 
 /// Write the profile as CLF or `.cube`.

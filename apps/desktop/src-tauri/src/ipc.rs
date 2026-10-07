@@ -69,9 +69,12 @@ pub async fn load_reference(
     path: String,
 ) -> Result<LoadedReference, BackendError> {
     let cache = state.reference.clone();
+    let previews = state.previews.clone();
     background(move || {
-        commands::load_reference_cached(&cache, path, &|stage, step, steps| {
-            emit_stage(&window, "load", stage, step, steps)
+        previews.with_operation(|| {
+            commands::load_reference_cached(&cache, &previews, path, &|stage, step, steps| {
+                emit_stage(&window, "load", stage, step, steps)
+            })
         })
     })
     .await
@@ -95,14 +98,18 @@ pub async fn inspect_reference(
     quad: Option<QuadPayload>,
 ) -> Result<InspectResponse, BackendError> {
     let cache = state.reference.clone();
+    let previews = state.previews.clone();
     background(move || {
-        commands::inspect_reference_cached(
-            &cache,
-            path,
-            chart_revision,
-            quad,
-            &|stage, step, steps| emit_stage(&window, "inspect", stage, step, steps),
-        )
+        previews.with_operation(|| {
+            commands::inspect_reference_cached(
+                &cache,
+                &previews,
+                path,
+                chart_revision,
+                quad,
+                &|stage, step, steps| emit_stage(&window, "inspect", stage, step, steps),
+            )
+        })
     })
     .await
 }
@@ -142,17 +149,31 @@ pub async fn correct_image(
     overwrite: bool,
 ) -> Result<CorrectResponse, BackendError> {
     let cache = state.reference.clone();
+    let previews = state.previews.clone();
     background(move || {
-        commands::correct_image_cached(
-            &cache,
-            profile_path,
-            input_path,
-            output_path,
-            overwrite,
-            &|stage, step, steps| emit_stage(&window, "correct", stage, step, steps),
-        )
+        previews.with_operation(|| {
+            commands::correct_image_cached(
+                &cache,
+                &previews,
+                profile_path,
+                input_path,
+                output_path,
+                overwrite,
+                &|stage, step, steps| emit_stage(&window, "correct", stage, step, steps),
+            )
+        })
     })
     .await
+}
+
+#[tauri::command]
+pub fn release_previews(
+    state: State<'_, AppState>,
+    paths: Vec<String>,
+) -> Result<(), BackendError> {
+    state
+        .previews
+        .with_operation(|| state.previews.release(&paths))
 }
 
 #[tauri::command]

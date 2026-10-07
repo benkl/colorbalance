@@ -9,6 +9,7 @@ pub struct AppState {
     pub cancellation: colorbalance_core::CancelFlag,
     /// Most recent decoded reference, shared by load, inspect and derive.
     pub reference: std::sync::Arc<reference_cache::ReferenceCache>,
+    pub previews: std::sync::Arc<preview_files::PreviewFiles>,
 }
 
 impl Default for AppState {
@@ -16,6 +17,7 @@ impl Default for AppState {
         Self {
             cancellation: std::sync::Arc::new(AtomicBool::new(false)),
             reference: std::sync::Arc::default(),
+            previews: std::sync::Arc::default(),
         }
     }
 }
@@ -55,6 +57,10 @@ pub fn run_app() {
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::default())
         .setup(|app| {
+            let previews = &app.state::<AppState>().previews;
+            let directory = previews.directory()?;
+            app.asset_protocol_scope()
+                .allow_directory(&directory, false)?;
             register_native_drag_drop(app);
             Ok(())
         })
@@ -64,6 +70,7 @@ pub fn run_app() {
             crate::ipc::inspect_reference,
             crate::ipc::derive_profile,
             crate::ipc::correct_image,
+            crate::ipc::release_previews,
             crate::ipc::apply_batch,
             crate::ipc::cancel_batch,
             crate::ipc::export_profile,
@@ -71,8 +78,13 @@ pub fn run_app() {
             choose_directory,
             choose_save_path,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running ColorBalance desktop application");
+        .build(tauri::generate_context!())
+        .expect("error while building ColorBalance desktop application")
+        .run(|app, event| {
+            if let tauri::RunEvent::Exit = event {
+                app.state::<AppState>().previews.cleanup();
+            }
+        });
 }
 
 fn register_native_drag_drop(app: &mut App) {
@@ -134,6 +146,7 @@ async fn choose_save_path(
 
 pub mod commands;
 pub mod ipc;
+pub mod preview_files;
 pub mod reference_cache;
 
 #[cfg(test)]

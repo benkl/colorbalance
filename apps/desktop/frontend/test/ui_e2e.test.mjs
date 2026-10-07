@@ -173,11 +173,12 @@ test('correct image: IPC carries the output path and returns backend-rendered pr
   globalThis.window = {
     __TAURI_INTERNALS__: {
       invoke: async (cmd, args) => {
+        calls.push([cmd, args]);
+        if (cmd === 'release_previews') return undefined;
         assert.equal(cmd, 'correct_image');
-        calls.push(args);
         return {
-          beforeDataUrl: 'data:image/png;base64,AAAA',
-          afterDataUrl: 'data:image/png;base64,BBBB',
+          beforePath: '/session/before.png',
+          afterPath: '/session/after.png',
           outputPath: args.outputPath ?? null,
           warnings: [],
         };
@@ -189,14 +190,17 @@ test('correct image: IPC carries the output path and returns backend-rendered pr
   };
   const tauri = await import('../src/tauri.ts');
   const saved = await tauri.backend.correctImage('p.cbprofile.json', 'in.dng', 'out.tiff', false);
-  assert.deepEqual(calls[0], {
+  assert.deepEqual(calls[0], ['correct_image', {
     profilePath: 'p.cbprofile.json',
     inputPath: 'in.dng',
     outputPath: 'out.tiff',
     overwrite: false,
-  });
+  }]);
   assert.equal(saved.outputPath, 'out.tiff');
   const preview = await tauri.backend.correctImage('p.cbprofile.json', 'in.dng');
   assert.equal(preview.outputPath, null);
-  assert.notEqual(preview.beforeDataUrl, preview.afterDataUrl);
+  assert.equal(preview.beforeUrl, 'asset:///session/before.png');
+  assert.equal(preview.afterUrl, 'asset:///session/after.png');
+  await tauri.releasePreviewUrls([preview.afterUrl, 'asset:///outside.png']);
+  assert.deepEqual(calls[2], ['release_previews', { paths: ['/session/after.png'] }]);
 });

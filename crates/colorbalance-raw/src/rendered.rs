@@ -12,7 +12,14 @@ use colorbalance_core::color::srgb_decode;
 use colorbalance_core::decode::{
     CameraIdentity, DecodeError, DecodedImage, RawDecoder, SensorLayout,
 };
+use fast_image_resize::images::{TypedImage, TypedImageRef};
+use fast_image_resize::pixels::F32x3;
+use fast_image_resize::{FilterType, ResizeAlg, ResizeOptions, Resizer};
 use image::{DynamicImage, ImageDecoder};
+use rayon::prelude::*;
+
+/// Output rows resized per parallel work item in [`render_preview_rgb`].
+const BAND_OUTPUT_ROWS: usize = 16;
 
 /// Decoder identity for rendered image sources.
 pub const JPEG_DECODER_NAME: &str = "colorbalance-rendered-jpeg";
@@ -100,44 +107,72 @@ pub fn render_preview_rgb(
         (width, height)
     };
 
-    // Source span [start, end) of every output column and row; never empty.
-    let spans = |source: usize, target: usize| -> Vec<(usize, usize)> {
-        (0..target)
-            .map(|i| {
-                let start = i * source / target;
-                let end = ((i + 1) * source / target).max(start + 1).min(source);
-                (start, end)
-            })
-            .collect()
-    };
-    let columns = spans(width, out_w);
-    let rows = spans(height, out_h);
-
-    let mut bytes = Vec::with_capacity(out_w * out_h * 3);
-    let mut sums = vec![0.0_f32; out_w * 3];
-    for &(row_start, row_end) in &rows {
-        sums.fill(0.0);
-        for y in row_start..row_end {
-            let line = &rgb[y * width * 3..(y + 1) * width * 3];
-            for (&(col_start, col_end), sum) in
-                columns.iter().zip(sums.as_chunks_mut::<3>().0.iter_mut())
-            {
-                for pixel in line[col_start * 3..col_end * 3].as_chunks::<3>().0 {
-                    sum[0] += (pixel[0] * gain[0]).clamp(0.0, 1.0);
-                    sum[1] += (pixel[1] * gain[1]).clamp(0.0, 1.0);
-                    sum[2] += (pixel[2] * gain[2]).clamp(0.0, 1.0);
+    // Area-average the linear, gain-corrected, clamped image down to the
+    // output size (D15). Each band of output rows copies only the source rows
+    // it covers into a small f32 buffer, so no full-frame copy is made, and
+    // bands run in parallel. The resize itself is exact for the band because
+    // its crop box is the band's fractional source extent.
+    let mut resized = vec![F32x3::new([0.0; 3]); out_w * out_h];
+    let band_rows = BAND_OUTPUT_ROWS.min(out_h);
+    let failure = std::sync::Mutex::new(None::<String>);
+    resized
+        .par_chunks_mut(band_rows * out_w)
+        .enumerate()
+        .for_each(|(band, destination)| {
+            let first = band * band_rows;
+            let rows = destination.len() / out_w;
+            let last = first + rows;
+            // Source rows [start, end) cover output rows [first, last).
+            let start = first * height / out_h;
+            let end = (last * height).div_ceil(out_h);
+            let source: Vec<F32x3> = rgb[start * width * 3..end * width * 3]
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .map(|pixel| {
+                    F32x3::new([
+                        (pixel[0] * gain[0]).clamp(0.0, 1.0),
+                        (pixel[1] * gain[1]).clamp(0.0, 1.0),
+                        (pixel[2] * gain[2]).clamp(0.0, 1.0),
+                    ])
+                })
+                .collect();
+            let result = (|| -> Result<(), String> {
+                let source = TypedImageRef::new(width as u32, (end - start) as u32, &source)
+                    .map_err(|e| e.to_string())?;
+                let mut target =
+                    TypedImage::from_pixels_slice(out_w as u32, rows as u32, destination)
+                        .map_err(|e| e.to_string())?;
+                let top = (first * height) as f64 / out_h as f64 - start as f64;
+                let extent = (rows * height) as f64 / out_h as f64;
+                let options = ResizeOptions::new()
+                    .resize_alg(ResizeAlg::Convolution(FilterType::Box))
+                    .crop(0.0, top, width as f64, extent);
+                Resizer::new()
+                    .resize_typed(&source, &mut target, &options)
+                    .map_err(|e| e.to_string())
+            })();
+            if let Err(message) = result {
+                *failure.lock().expect("preview failure lock") = Some(message);
+            }
+        });
+    if let Some(message) = failure.into_inner().expect("preview failure lock") {
+        return Err(DecodeError::CorruptFile(format!(
+            "preview resize failed: {message}"
+        )));
+    }
+    let mut bytes = vec![0_u8; out_w * out_h * 3];
+    bytes
+        .par_chunks_mut(out_w * 3)
+        .zip(resized.par_chunks(out_w))
+        .for_each(|(line, pixels)| {
+            for (out, pixel) in line.as_chunks_mut::<3>().0.iter_mut().zip(pixels) {
+                for (byte, &value) in out.iter_mut().zip(&pixel.0) {
+                    let encoded = colorbalance_core::color::srgb_encode(f64::from(value));
+                    *byte = (encoded * 255.0).round().clamp(0.0, 255.0) as u8;
                 }
             }
-        }
-        let rows_in_span = (row_end - row_start) as f32;
-        for (&(col_start, col_end), sum) in columns.iter().zip(sums.as_chunks::<3>().0) {
-            let count = rows_in_span * (col_end - col_start) as f32;
-            for &total in sum {
-                let encoded = colorbalance_core::color::srgb_encode(f64::from(total / count));
-                bytes.push((encoded * 255.0).round().clamp(0.0, 255.0) as u8);
-            }
-        }
-    }
+        });
     let preview =
         image::RgbImage::from_raw(out_w as u32, out_h as u32, bytes).ok_or_else(|| {
             DecodeError::CorruptFile("pixel buffer does not match dimensions".to_owned())
@@ -358,6 +393,33 @@ mod tests {
         assert_eq!((out.width(), out.height()), (2, 2));
         for pixel in out.pixels() {
             assert_eq!(pixel.0, [188, 188, 188]);
+        }
+    }
+
+    #[test]
+    fn preview_bands_agree_with_the_closed_form_box_average() {
+        // 40x4000 grey ramp down to 1x100: output row i averages source rows
+        // 40i..40i+40, whose linear mean is (40i + 19.5) / 4000. 100 rows span
+        // several parallel bands, so a seam error shows up as a step.
+        let (w, h) = (40usize, 4000usize);
+        let mut rgb = Vec::with_capacity(w * h * 3);
+        for y in 0..h {
+            for _ in 0..w {
+                rgb.extend_from_slice(&[y as f32 / h as f32; 3]);
+            }
+        }
+        let png = render_preview_rgb(&rgb, w as u32, h as u32, None, 100).unwrap();
+        let out = decoded_png(&png);
+        assert_eq!((out.width(), out.height()), (1, 100));
+        for (i, pixel) in out.pixels().enumerate() {
+            let linear = (40.0 * i as f64 + 19.5) / h as f64;
+            let expected = (colorbalance_core::color::srgb_encode(linear) * 255.0).round() as i32;
+            for channel in pixel.0 {
+                assert!(
+                    (i32::from(channel) - expected).abs() <= 1,
+                    "row {i}: got {channel}, expected {expected}"
+                );
+            }
         }
     }
 

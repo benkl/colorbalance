@@ -29,7 +29,7 @@ export interface InspectResult {
   qualityPassed: boolean;
   gateFailures: InspectGateFailure[];
   quad: [[number, number], [number, number], [number, number], [number, number]];
-  previewDataUrl?: string;
+  previewUrl?: string;
 }
 
 /** Result of decoding a reference image for display, before any calibration. */
@@ -37,7 +37,7 @@ export interface LoadedReference {
   imageWidth: number;
   imageHeight: number;
   quad: [[number, number], [number, number], [number, number], [number, number]];
-  previewDataUrl: string;
+  previewUrl: string;
 }
 
 /** Detection proposes corners only. It cannot identify the physical chart revision. */
@@ -79,8 +79,8 @@ export interface DeriveResult {
 
 /** Result of correcting one image: downscaled PNG previews rendered by the backend. */
 export interface CorrectResult {
-  beforeDataUrl: string;
-  afterDataUrl: string;
+  beforeUrl: string;
+  afterUrl: string;
   /** Path of the written TIFF, or null for a preview-only run. */
   outputPath: string | null;
   warnings: string[];
