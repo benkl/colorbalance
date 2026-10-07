@@ -11,15 +11,16 @@
 //! - `batch-progress` `{completed, total, file}` from `apply_batch`; `completed`
 //!   counts finished files.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
-use tauri::{Emitter, State, Window};
+use tauri::{AppHandle, Emitter, Manager, State, Window};
 
 use crate::commands::{
     self, BackendError, BatchResponse, CorrectResponse, DeriveResponse, DetectResponse,
-    ExportOptions, InspectResponse, LoadedReference, QuadPayload,
+    ExportOptions, InspectResponse, LoadedReference, MismatchPolicy, QuadPayload,
 };
+use crate::library::{self, LibraryEntry, LibraryListing};
 use crate::AppState;
 
 #[derive(Debug, Clone, Serialize)]
@@ -147,6 +148,7 @@ pub async fn correct_image(
     input_path: String,
     output_path: Option<String>,
     export_options: ExportOptions,
+    allow_mismatch: bool,
 ) -> Result<CorrectResponse, BackendError> {
     let export = output_path.map(|path| commands::ImageExport {
         path,
@@ -162,6 +164,7 @@ pub async fn correct_image(
                 profile_path,
                 input_path,
                 export,
+                MismatchPolicy::from_allow(allow_mismatch),
                 &|stage, step, steps| emit_stage(&window, "correct", stage, step, steps),
             )
         })
@@ -187,6 +190,7 @@ pub async fn apply_batch(
     input_path: String,
     output_path: String,
     export_options: ExportOptions,
+    allow_mismatch: bool,
 ) -> Result<BatchResponse, BackendError> {
     let cancellation = state.cancellation.clone();
     background(move || {
@@ -206,6 +210,7 @@ pub async fn apply_batch(
             input_path,
             output_path,
             export_options,
+            MismatchPolicy::from_allow(allow_mismatch),
             cancellation,
             on_progress,
         )
@@ -230,4 +235,50 @@ pub async fn export_profile(
     size: Option<usize>,
 ) -> Result<String, BackendError> {
     background(move || commands::export_profile(profile_path, format, output_path, size)).await
+}
+
+/// List the calibration library, and let the webview load its preview images.
+#[tauri::command]
+pub async fn list_library(
+    app: AppHandle,
+    library_path: String,
+) -> Result<LibraryListing, BackendError> {
+    let listing = background({
+        let library_path = library_path.clone();
+        move || library::list_library(Path::new(&library_path))
+    })
+    .await?;
+    let library_root = PathBuf::from(&library_path);
+    for entry in &listing.entries {
+        if let Some(preview) = library::preview_grant(&library_root, entry) {
+            app.asset_protocol_scope()
+                .allow_file(&preview)
+                .map_err(|error| BackendError::Message(error.to_string()))?;
+        }
+    }
+    Ok(listing)
+}
+
+#[tauri::command]
+pub async fn save_to_library(
+    library_path: String,
+    profile_path: String,
+    reference_path: String,
+    label: String,
+    notes: String,
+    tags: Vec<String>,
+    include_gps: bool,
+) -> Result<LibraryEntry, BackendError> {
+    background(move || {
+        library::save_to_library(
+            Path::new(&library_path),
+            Path::new(&profile_path),
+            Path::new(&reference_path),
+            &label,
+            &notes,
+            &tags,
+            include_gps,
+        )
+    })
+    .await
 }

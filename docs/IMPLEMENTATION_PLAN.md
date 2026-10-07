@@ -45,6 +45,7 @@ Differences from the plan text that readers keep tripping over:
 - JPEG and PNG references work through `--quick-and-dirty` (CLI) or automatic detection of a rendered file (desktop). The profile and report flag the result as approximate.
 - The CLI does not run the chart detector. Without `--quad` it samples an 8% inset rectangle. The desktop app runs the detector automatically through 12 MP and on request above that.
 - `colorbalance derive --chart` takes `classic-before-nov-2014` or `classic-from-nov-2014`. The CLI defaults to `classic-from-nov-2014`; the desktop app requires an explicit choice before deriving.
+- The desktop Library tab (D26) is an enhancement to milestone 4, not a reopening of issues 17–20. It scans one folder of digest-checked profile entries, saves a corrected reference preview and capture metadata, and applies a selected entry to a batch. Library-only camera or decode-contract mismatches proceed with warnings in the batch report; other paths stay fail-closed. GPS is stored by default with an opt-out when saving.
 
 ## Platform and technology decision
 

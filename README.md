@@ -122,7 +122,7 @@ Short version of the rules:
 - Fixed decode contract. No scene-inferred exposure or white balance.
 - Clipping is checked per photosite in the RAW domain.
 - The chart revision is chosen explicitly. Detection never chooses it.
-- Fail closed on camera, decoder, or exposure mismatch. Never modify inputs. Never delete-then-rename outputs.
+- Fail closed on camera, decoder, or exposure mismatch. The desktop Library tab may apply an entry across a camera or decode-contract mismatch with a recorded warning (D26). Never modify inputs. Never delete-then-rename outputs.
 - Report what you ran and saw. Tests alone are not proof.
 
 ## License

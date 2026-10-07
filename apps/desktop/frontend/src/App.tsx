@@ -1,9 +1,11 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { DEFAULT_EXPORT_OPTIONS, JPEG_SAMPLINGS, OUTPUT_SPACES } from './types';
-import type { ChartQuad, ChartRevision, CorrectResult, DeriveResult, BatchSummary, ExportFormat, ExportOptions, InspectResult, JpegSampling, MetadataSummary, OutputSpace } from './types';
+import type { ChartQuad, ChartRevision, CorrectResult, DeriveResult, BatchSummary, ExportFormat, ExportOptions, InspectResult, JpegSampling, LibraryEntryView, LibraryListingView, MetadataSummary, OutputSpace } from './types';
 import { backend, releasePreviewUrls, chooseDirectory, chooseImage, chooseSavePath, listenForBatchProgress, listenForFileDrop, listenForFileDropHover, listenForOperationProgress } from './tauri';
 import type { BatchProgress, OperationProgress } from './tauri';
-import { referenceFromDrop } from './interaction';
+import { chooseBatchProfile, parseTags, readStoredLibraryPath, referenceFromDrop, storeLibraryPath } from './interaction';
+import type { Tab } from './interaction';
+import { CameraMismatchNotice, LibraryGallery, LibraryPanel } from './components/Library';
 import { LightTableOverlay } from './components/LightTableOverlay';
 import { ValidationPanel } from './components/ValidationPanel';
 import { QualityFailures } from './components/QualityFailures';
@@ -22,9 +24,9 @@ import {
   SearchCheck,
   X,
   Save,
+  Library as LibraryIcon,
 } from 'lucide-react';
 
-type Tab = 'reference' | 'validate' | 'export';
 const decodePreview = async (url: string): Promise<void> => {
   const image = new Image();
   image.src = url;
@@ -45,6 +47,7 @@ const TABS: { id: Tab; label: string; icon: typeof Layers }[] = [
   { id: 'reference', label: 'REFERENCE', icon: Layers },
   { id: 'validate', label: 'VALIDATE', icon: Sparkles },
   { id: 'export', label: 'EXPORT', icon: Save },
+  { id: 'library', label: 'LIBRARY', icon: LibraryIcon },
 ];
 
 export const App: React.FC = () => {
@@ -118,6 +121,22 @@ export const App: React.FC = () => {
   const [batchSummary, setBatchSummary] = useState<BatchSummary | null>(null);
   const [batchProgress, setBatchProgress] = useState<BatchProgress | null>(null);
   const [operationProgress, setOperationProgress] = useState<OperationProgress | null>(null);
+
+  // Library State
+  const [libraryPath, setLibraryPath] = useState<string>(readStoredLibraryPath);
+  const [libraryListing, setLibraryListing] = useState<LibraryListingView | null>(null);
+  const [libraryLoading, setLibraryLoading] = useState(false);
+  const [libraryError, setLibraryError] = useState('');
+  const [librarySelectedId, setLibrarySelectedId] = useState<string | null>(null);
+  const [activeLibrary, setActiveLibrary] = useState<LibraryEntryView | null>(null);
+  const libraryScan = useRef(0);
+  const [saveOpen, setSaveOpen] = useState(false);
+  const [saveLabel, setSaveLabel] = useState('');
+  const [saveNotes, setSaveNotes] = useState('');
+  const [saveTags, setSaveTags] = useState('');
+  const [saveGps, setSaveGps] = useState(true);
+  const [saveStatus, setSaveStatus] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null);
+  const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     const preventDefault = (event: DragEvent) => event.preventDefault();
@@ -252,6 +271,8 @@ export const App: React.FC = () => {
     setCompare(null);
     setDetectionStatus('idle');
     setDetectionError('');
+    setDeriveResult(null);
+    setActiveLibrary(null);
     return ++referenceGeneration.current;
   };
 
@@ -498,7 +519,7 @@ export const App: React.FC = () => {
         if (!chosen) return;
         output = chosen;
       }
-      const result = await backend.correctImage(deriveResult.profilePath, input, output, { ...exportSettings, overwrite: true });
+      const result = await backend.correctImage(deriveResult.profilePath, input, output, { ...exportSettings, overwrite: true }, false);
       try {
         await Promise.all([decodePreview(result.beforeUrl), decodePreview(result.afterUrl)]);
       } catch (error) {
@@ -529,16 +550,20 @@ export const App: React.FC = () => {
   // loaded reference. Load it once per profile and reference, so a failure cannot loop.
   const previewAttempt = useRef('');
   useEffect(() => {
-    if (tab === 'reference' || compare || isProcessing || !deriveResult?.profilePath || !referencePath) return;
+    if (tab === 'reference' || tab === 'library' || compare || isProcessing || !deriveResult?.profilePath || !referencePath) return;
     const key = `${deriveResult.profilePath}|${deriveResult.digest}|${referencePath}`;
     if (previewAttempt.current === key) return;
     previewAttempt.current = key;
     void runCorrect(referencePath, false);
   });
 
+  /** The profile the batch applies: an active library entry, else the profile derived in this session. */
+  const batchProfile = chooseBatchProfile(deriveResult?.profilePath ?? null, activeLibrary);
+  const loadedCamera = inspectResult ? { make: inspectResult.camera.make, model: inspectResult.camera.model } : null;
+
   const handleRunBatch = () => {
-    if (!batchInputPath || !batchOutputPath || !deriveResult?.profilePath) {
-      setErrorMessage('Select source and destination folders after deriving a profile.');
+    if (!batchInputPath || !batchOutputPath || !batchProfile) {
+      setErrorMessage('Select source and destination folders, and derive a profile or choose a library entry.');
       return;
     }
     setErrorMessage('');
@@ -546,10 +571,11 @@ export const App: React.FC = () => {
     void (async () => {
       try {
         const result = await backend.applyBatch(
-          deriveResult.profilePath,
+          batchProfile.profilePath,
           batchInputPath,
           batchOutputPath,
           { ...exportSettings, overwrite: overwriteOutputs },
+          batchProfile.allowMismatch,
         );
         setBatchSummary(result);
       } catch (error: unknown) {
@@ -558,6 +584,108 @@ export const App: React.FC = () => {
         endWork();
       }
     })();
+  };
+
+  const refreshLibrary = async (path: string) => {
+    const scanId = ++libraryScan.current;
+    if (!path) {
+      setLibraryListing(null);
+      return;
+    }
+    setLibraryLoading(true);
+    setLibraryError('');
+    try {
+      const listing = await backend.listLibrary(path);
+      if (scanId !== libraryScan.current) return;
+      setLibraryListing(listing);
+      setLibrarySelectedId((current) => (listing.entries.some((entry) => entry.id === current) ? current : null));
+    } catch (error: unknown) {
+      if (scanId !== libraryScan.current) return;
+      setLibraryListing(null);
+      setLibraryError(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (scanId === libraryScan.current) setLibraryLoading(false);
+    }
+  };
+
+  // The folder is the source of truth: rescan every time the tab is opened.
+  const openTab = (next: Tab) => {
+    setTab(next);
+    if (next === 'library') void refreshLibrary(libraryPath);
+  };
+
+  const changeLibraryPath = (path: string) => {
+    ++libraryScan.current;
+    setLibraryPath(path);
+    setLibraryListing(null);
+    setLibrarySelectedId(null);
+    setActiveLibrary(null);
+    setLibraryError('');
+    setLibraryLoading(false);
+    storeLibraryPath(path);
+  };
+
+  const chooseLibraryFolder = async () => {
+    try {
+      const path = await chooseDirectory();
+      if (!path) return;
+      changeLibraryPath(path);
+      setActiveLibrary(null);
+      await refreshLibrary(path);
+    } catch {
+      setErrorMessage('Directory picker requires the desktop application.');
+    }
+  };
+
+  const useLibraryEntry = (entry: LibraryEntryView) => {
+    setActiveLibrary(entry);
+    setBatchSummary(null);
+    setTab('export');
+  };
+
+  const openSaveForm = () => {
+    setSaveStatus(null);
+    setSaveOpen(true);
+  };
+
+  const handleSaveToLibrary = async () => {
+    if (!deriveResult || !referencePath) return;
+    if (!saveLabel.trim()) {
+      setSaveStatus({ kind: 'error', text: 'Enter a label for the library entry.' });
+      return;
+    }
+    let folder = libraryPath;
+    setSaving(true);
+    setSaveStatus(null);
+    try {
+      if (!folder) {
+        const picked = await chooseDirectory();
+        if (!picked) {
+          setSaveStatus({ kind: 'error', text: 'Choose a library folder to save into.' });
+          return;
+        }
+        folder = picked;
+        changeLibraryPath(picked);
+      }
+      const entry = await backend.saveToLibrary({
+        libraryPath: folder,
+        profilePath: deriveResult.profilePath,
+        referencePath,
+        label: saveLabel.trim(),
+        notes: saveNotes,
+        tags: parseTags(saveTags),
+        includeGps: saveGps,
+      });
+      setSaveStatus({ kind: 'ok', text: `Saved "${entry.label}" to the library (${entry.id}).` });
+      setSaveOpen(false);
+      setSaveLabel('');
+      setSaveNotes('');
+      setSaveTags('');
+    } catch (error: unknown) {
+      setSaveStatus({ kind: 'error', text: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
@@ -585,7 +713,7 @@ export const App: React.FC = () => {
               <button
                 key={item.id}
                 type="button"
-                onClick={() => setTab(item.id)}
+                onClick={() => openTab(item.id)}
                 className={`h-7 px-2.5 flex items-center gap-1.5 text-[10px] font-bold tracking-wider border cursor-pointer transition-all ${
                   isActive
                     ? 'bg-[var(--bb-surface)] text-[var(--bb-gold)] border-[var(--bb-gold)] shadow-[0_0_8px_rgba(245,185,49,0.2)]'
@@ -673,7 +801,16 @@ export const App: React.FC = () => {
 
         {/* Left Side: Fully Contained Light-Table Viewport */}
         <div className="flex-1 min-w-0 h-full border-r border-[var(--bb-border)] flex flex-col bg-[var(--bb-vacuum)] overflow-hidden">
-          {tab !== 'reference' && compare ? (
+          {tab === 'library' ? (
+            <LibraryGallery
+              listing={libraryListing}
+              libraryPath={libraryPath}
+              loading={libraryLoading}
+              selectedId={librarySelectedId}
+              activeId={activeLibrary?.id ?? null}
+              onSelect={setLibrarySelectedId}
+            />
+          ) : tab !== 'reference' && compare ? (
             <BeforeAfter
               key={compare.source}
               beforeSrc={compare.beforeUrl}
@@ -810,6 +947,22 @@ export const App: React.FC = () => {
             </div>
           )}
 
+          {tab === 'library' && (
+            <LibraryPanel
+              listing={libraryListing}
+              libraryPath={libraryPath}
+              loading={libraryLoading}
+              error={libraryError}
+              selected={libraryListing?.entries.find((entry) => entry.id === librarySelectedId) ?? null}
+              active={activeLibrary}
+              loadedCamera={loadedCamera}
+              onLibraryPathChange={changeLibraryPath}
+              onChoose={() => void chooseLibraryFolder()}
+              onRefresh={() => void refreshLibrary(libraryPath)}
+              onUse={useLibraryEntry}
+            />
+          )}
+
           {tab === 'validate' && (
             <div className="space-y-3.5">
               <div className="border-b border-[var(--bb-border)] pb-2">
@@ -839,6 +992,80 @@ export const App: React.FC = () => {
                   CONTINUE TO EXPORT →
                 </button>
               </div>
+              <div className="space-y-1.5 p-2.5 bg-[var(--bb-panel)] border border-[var(--bb-border)]" data-testid="save-library-panel">
+                <button
+                  type="button"
+                  onClick={openSaveForm}
+                  disabled={!deriveResult || !referencePath || saving}
+                  className="ui-btn ui-btn-secondary w-full"
+                  data-testid="save-to-library"
+                >
+                  <LibraryIcon className="w-3 h-3" /> SAVE TO LIBRARY…
+                </button>
+                {saveOpen && (
+                  <div className="space-y-1.5" data-testid="save-library-form">
+                    <label htmlFor="library-label" className="text-[9px] text-[var(--bb-smoke)] font-bold tracking-wider">LABEL</label>
+                    <input
+                      id="library-label"
+                      type="text"
+                      value={saveLabel}
+                      onChange={(e) => setSaveLabel(e.target.value)}
+                      className="w-full bg-[var(--bb-vacuum)] border border-[var(--bb-border)] px-2 py-1 text-[11px] text-[var(--bb-sand)] focus:border-[var(--bb-gold)] outline-none"
+                    />
+                    <label htmlFor="library-notes" className="text-[9px] text-[var(--bb-smoke)] font-bold tracking-wider">NOTES (OPTIONAL)</label>
+                    <textarea
+                      id="library-notes"
+                      value={saveNotes}
+                      onChange={(e) => setSaveNotes(e.target.value)}
+                      rows={2}
+                      className="w-full bg-[var(--bb-vacuum)] border border-[var(--bb-border)] px-2 py-1 text-[11px] text-[var(--bb-sand)] focus:border-[var(--bb-gold)] outline-none"
+                    />
+                    <label htmlFor="library-tags" className="text-[9px] text-[var(--bb-smoke)] font-bold tracking-wider">TAGS (COMMA-SEPARATED)</label>
+                    <input
+                      id="library-tags"
+                      type="text"
+                      value={saveTags}
+                      onChange={(e) => setSaveTags(e.target.value)}
+                      className="w-full bg-[var(--bb-vacuum)] border border-[var(--bb-border)] px-2 py-1 text-[11px] text-[var(--bb-sand)] focus:border-[var(--bb-gold)] outline-none"
+                    />
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={saveGps}
+                        onChange={(e) => setSaveGps(e.target.checked)}
+                        className="accent-[var(--bb-amber)]"
+                        data-testid="save-include-gps"
+                      />
+                      <span className="text-[10px] text-[var(--bb-sand)]">Include GPS location from the reference</span>
+                    </label>
+                    <p className="text-[9px] text-[var(--bb-smoke)]">
+                      Saves to {libraryPath || 'a library folder you will be asked to choose'}.
+                    </p>
+                    <div className="flex gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => void handleSaveToLibrary()}
+                        disabled={saving}
+                        className="ui-btn ui-btn-primary flex-1"
+                        data-testid="save-library-confirm"
+                      >
+                        {saving ? 'SAVING…' : 'SAVE'}
+                      </button>
+                      <button type="button" onClick={() => setSaveOpen(false)} className="ui-btn ui-btn-ghost">
+                        CANCEL
+                      </button>
+                    </div>
+                  </div>
+                )}
+                {saveStatus && (
+                  <div
+                    className={`text-[10px] break-words ${saveStatus.kind === 'ok' ? 'text-[var(--bb-gold)]' : 'text-[var(--bb-orange)]'}`}
+                    data-testid="save-library-status"
+                  >
+                    {saveStatus.kind === 'ok' ? '✓ ' : '⚠ '}{saveStatus.text}
+                  </div>
+                )}
+              </div>
             </div>
           )}
 
@@ -854,7 +1081,7 @@ export const App: React.FC = () => {
                 </p>
               </div>
 
-              {!deriveResult && (
+              {!deriveResult && !activeLibrary && (
                 <div className="p-2.5 bg-[var(--bb-panel)] border border-[var(--bb-border)] text-[10px] text-[var(--bb-smoke)]">
                   Derive a profile on the REFERENCE tab to enable exports.
                 </div>
@@ -1011,6 +1238,28 @@ export const App: React.FC = () => {
                   <p className="text-[10px] text-[var(--bb-smoke)]">
                     Select matching image folders for batch correction. Files are written with the format and metadata options above.
                   </p>
+                  {activeLibrary && batchProfile?.source === 'library' && (
+                    <div className="mt-1.5 p-2 border border-[var(--bb-amber)] bg-[var(--bb-panel)] space-y-1 text-[10px]" data-testid="batch-active-library">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-[9px] font-bold tracking-wider text-[var(--bb-amber)]">LIBRARY CALIBRATION ACTIVE</span>
+                        <button
+                          type="button"
+                          className="text-[9px] text-[var(--bb-smoke)] hover:text-[var(--bb-white)] cursor-pointer"
+                          onClick={() => setActiveLibrary(null)}
+                          data-testid="batch-clear-library"
+                        >
+                          {deriveResult ? 'USE DERIVED PROFILE' : 'CLEAR'}
+                        </button>
+                      </div>
+                      <div className="text-[var(--bb-gold)] break-words">{activeLibrary.label}</div>
+                      <div className="text-[var(--bb-sand)] break-words">{activeLibrary.cameraMake} {activeLibrary.cameraModel}</div>
+                      <div className="text-[var(--bb-smoke)] break-all">{activeLibrary.profilePath}</div>
+                      <div className="text-[var(--bb-smoke)]">
+                        A camera or decode-contract mismatch will not stop the batch; it is recorded as a warning in the batch report.
+                      </div>
+                      <CameraMismatchNotice entry={activeLibrary} loadedCamera={loadedCamera} />
+                    </div>
+                  )}
                 </div>
 
                 <div className="space-y-1">
@@ -1089,7 +1338,7 @@ export const App: React.FC = () => {
                   <button
                     type="button"
                     onClick={handleRunBatch}
-                    disabled={isProcessing || !batchInputPath || !batchOutputPath || !deriveResult}
+                    disabled={isProcessing || !batchInputPath || !batchOutputPath || !batchProfile}
                     className="ui-btn ui-btn-primary col-span-3 h-9"
                   >
                     <Cpu className="w-3.5 h-3.5" />

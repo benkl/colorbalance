@@ -289,6 +289,18 @@ pub fn cube_max_error(p: &Profile, size: usize, probe_count: usize) -> f64;
 - `clf_to_matrices` parses only our generated subset (simple string scanning is acceptable; no XML dep). Test: `profile_to_clf` → parse → applying the two matrices in sequence to sample vectors equals `apply_transform` without clipping to 1e-9 (inputs chosen in range so no clipping occurs).
 - `.cube`: `TITLE`, `DOMAIN_MIN 0 0 0`, `DOMAIN_MAX 1 1 1`, `LUT_3D_SIZE N`, then N³ lines "r g b" of transform outputs clamped to [0,1], red fastest. `cube_max_error` trilinearly interpolates the cube at deterministic probe points (LCG `state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407)` starting 0x5eed, take 3 draws scaled to [0,1]) and compares with direct `apply_transform`; returns max abs component error. Test: size 33 on the identity profile has error < 1e-12; on a mild fixed matrix profile, error < 5e-3 and monotone with size (33 → error decreases or stays within 10% of size 17 error).
 
+## Library entry (desktop, decision D26)
+
+Entry folder `<library>/<slug>-<digest8>[-N]/`:
+
+- `profile.cbprofile.json`: the derived profile, byte for byte. Loaded with `profile::from_json`, which verifies the digest.
+- `preview.png`: corrected reference, longest side 320 px. Optional.
+- `entry.json`: `schema-version` `"1.0"`, `label`, `notes`, `tags[]`, `profile-digest`, and `capture` with `make`, `model`, `lens`, `date-time` and `gps` (`latitude`, `longitude`, `altitude`), each nullable.
+
+Rules. The scan ignores non-folders and folders whose name starts with `.`. `entry.json` `profile-digest` must equal the profile digest. A failed check yields a problem item and no card. Saving writes to a `.tmp-*` sibling and renames it. It never replaces an existing entry. `includeGps = false` omits `gps`.
+
+IPC. `list_library(libraryPath)` returns `{ entries, problems }`. `save_to_library(libraryPath, profilePath, referencePath, label, notes, tags, includeGps)` returns the new entry. `apply_batch` and `correct_image` take a final `allowMismatch`. With `true`, camera and decode-contract mismatches become warnings in the response.
+
 ## CLI (owner: lead, later wave)
 
 Not part of this delegation.

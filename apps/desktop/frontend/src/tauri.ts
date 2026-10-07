@@ -2,7 +2,7 @@ import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 import { logger } from './logger.ts';
-import type { BatchSummary, ChartQuad, ChartRevision, CorrectResult, DeriveResult, DetectResult, ExportOptions, InspectResult, LoadedReference } from './types';
+import type { BatchSummary, ChartQuad, ChartRevision, CorrectResult, DeriveResult, DetectResult, ExportOptions, InspectResult, LibraryEntry, LibraryEntryView, LibraryListing, LibraryListingView, LoadedReference, SaveToLibraryRequest } from './types';
 type NativeLoadedReference = Omit<LoadedReference, 'previewUrl'> & { previewPath: string };
 type NativeInspectResult = Omit<InspectResult, 'previewUrl'> & { previewPath?: string };
 type NativeCorrectResult = Omit<CorrectResult, 'beforeUrl' | 'afterUrl'> & { beforePath: string; afterPath: string };
@@ -12,6 +12,10 @@ function assetUrl(path: string): string {
   const url = convertFileSrc(path);
   assetPaths.set(url, path);
   return url;
+}
+
+function toLibraryEntryView({ previewPath, ...entry }: LibraryEntry): LibraryEntryView {
+  return { ...entry, previewUrl: previewPath ? assetUrl(previewPath) : null };
 }
 
 export async function releasePreviewUrls(urls: string[]): Promise<void> {
@@ -47,8 +51,10 @@ export interface BackendBridge {
   detectChart(path: string): Promise<DetectResult>;
   inspectReference(path: string, revision: ChartRevision, quad?: ChartQuad): Promise<InspectResult>;
   deriveProfile(path: string, revision: ChartRevision, profilePath: string, reportPath?: string, quad?: ChartQuad): Promise<DeriveResult>;
-  correctImage(profilePath: string, inputPath: string, outputPath: string | undefined, options: ExportOptions): Promise<CorrectResult>;
-  applyBatch(profilePath: string, inputPath: string, outputPath: string, options: ExportOptions): Promise<BatchSummary>;
+  correctImage(profilePath: string, inputPath: string, outputPath: string | undefined, options: ExportOptions, allowMismatch: boolean): Promise<CorrectResult>;
+  applyBatch(profilePath: string, inputPath: string, outputPath: string, options: ExportOptions, allowMismatch: boolean): Promise<BatchSummary>;
+  listLibrary(libraryPath: string): Promise<LibraryListingView>;
+  saveToLibrary(request: SaveToLibraryRequest): Promise<LibraryEntryView>;
   cancelBatch(): Promise<void>;
   exportProfile(profilePath: string, format: 'clf' | 'cube', outputPath: string, size?: number): Promise<string>;
 }
@@ -98,7 +104,7 @@ export const backend: BackendBridge = {
       throw err;
     }
   },
-  correctImage: async (profilePath, inputPath, outputPath, options) => {
+  correctImage: async (profilePath, inputPath, outputPath, options, allowMismatch) => {
     logger.ipc('IPC', `Invoking correct_image: "${inputPath}"${outputPath ? ` -> "${outputPath}"` : ' (preview only)'}`);
     try {
       const { beforePath, afterPath, ...result } = await invoke<NativeCorrectResult>('correct_image', {
@@ -106,6 +112,7 @@ export const backend: BackendBridge = {
         inputPath,
         outputPath,
         exportOptions: options,
+        allowMismatch,
       });
       logger.success('IPC', `correct_image complete${result.outputPath ? `: wrote "${result.outputPath}"` : ''}`);
       return { ...result, beforeUrl: assetUrl(beforePath), afterUrl: assetUrl(afterPath) };
@@ -114,7 +121,7 @@ export const backend: BackendBridge = {
       throw err;
     }
   },
-  applyBatch: async (profilePath, inputPath, outputPath, options) => {
+  applyBatch: async (profilePath, inputPath, outputPath, options, allowMismatch) => {
     logger.ipc('IPC', `Invoking apply_batch: "${inputPath}" -> "${outputPath}"`);
     try {
       const result = await invoke<BatchSummary>('apply_batch', {
@@ -122,6 +129,7 @@ export const backend: BackendBridge = {
         inputPath,
         outputPath,
         exportOptions: options,
+        allowMismatch,
       });
       logger.success('IPC', `apply_batch complete: ${result.succeeded.length} succeeded, ${result.skipped.length} skipped, ${result.failed.length} failed`);
       for (const failure of result.failed) {
@@ -130,6 +138,28 @@ export const backend: BackendBridge = {
       return result;
     } catch (err: unknown) {
       logger.error('IPC', `apply_batch failed: ${err instanceof Error ? err.message : String(err)}`);
+      throw err;
+    }
+  },
+  listLibrary: async (libraryPath) => {
+    logger.ipc('IPC', `Invoking list_library on "${libraryPath}"`);
+    try {
+      const listing = await invoke<LibraryListing>('list_library', { libraryPath });
+      logger.success('IPC', `list_library: ${listing.entries.length} entries, ${listing.problems.length} problems`);
+      return { entries: listing.entries.map(toLibraryEntryView), problems: listing.problems };
+    } catch (err: unknown) {
+      logger.error('IPC', `list_library failed: ${err instanceof Error ? err.message : String(err)}`);
+      throw err;
+    }
+  },
+  saveToLibrary: async (request) => {
+    logger.ipc('IPC', `Invoking save_to_library: "${request.label}" -> "${request.libraryPath}"`);
+    try {
+      const entry = await invoke<LibraryEntry>('save_to_library', { ...request });
+      logger.success('IPC', `save_to_library saved entry "${entry.id}"`);
+      return toLibraryEntryView(entry);
+    } catch (err: unknown) {
+      logger.error('IPC', `save_to_library failed: ${err instanceof Error ? err.message : String(err)}`);
       throw err;
     }
   },

@@ -187,3 +187,15 @@ A toolbar above the image controls what the viewport shows. Both images always s
 The decode contract uses unity white balance, so a DNG decodes as unbalanced camera RGB. Sensors collect much more green than red or blue, so that data looks green. A Galaxy S25 DNG averaged R 76, G 96, B 70 before balancing. Phone galleries hide this because they apply the camera's recorded neutral.
 
 For display only, the preview and the "before" image divide each channel by the DNG `AsShotNeutral` tag. On the same file that gives R 103, G 96, B 96. Pixel values, calibration, chart measurement, and corrected output never see this gain, and rendered JPEG/PNG sources have none. The "before" image is a white-balanced view of the camera data, not what the contract decodes.
+
+## 6. Desktop library
+
+The Library tab lists calibrations saved in one folder. Pick the folder once. The app rescans it every time you open the tab.
+
+Each card shows the preview (a card shows "No preview" when the reference could not be decoded at save time), the label, camera make, model and lens, capture time, GPS, calibration quality (passed, overridden or quick and dirty, with mean and max delta E), chart revision, decode contract, tags and notes. Entries whose profile fails its digest check appear under "Problems" and cannot be used.
+
+To save an entry, derive a profile, then use "Save to library" on the Validate tab. Enter a label, optional notes and tags. GPS from the reference photo is stored unless you untick "Include GPS". Take care before sharing a library folder, because the location is in `entry.json`.
+
+To share a calibration, copy its folder into another person's library folder. To use a `.cube` or `.clf` file, run `colorbalance export` on the entry's `profile.cbprofile.json`.
+
+"Use for batch" makes an entry the active profile. If the entry's camera or decode contract differs from the batch image, the file is still processed and the batch report carries a warning for it. The result will be wrong in color unless the two cameras behave alike. Exposure mismatches still stop processing.

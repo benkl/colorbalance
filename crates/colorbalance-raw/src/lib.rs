@@ -1,11 +1,13 @@
 //! RAW decoding through rawler and rendered JPEG/PNG decoding through image.
 
+mod capture;
 pub mod dng_writer;
 mod metadata;
 pub mod rawler_decode;
 pub mod rendered;
 mod restart_ljpeg;
 
+pub use capture::{read_capture_info, CaptureGps, CaptureInfo};
 pub use dng_writer::{write_dng, DngWriteSpec};
 pub use metadata::{read_export_metadata, MetadataRead};
 pub use rawler_decode::{decode_raw, RawlerDecoder, DECODER_NAME, DECODER_VERSION};

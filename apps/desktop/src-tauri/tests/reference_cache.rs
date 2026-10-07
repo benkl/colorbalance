@@ -11,7 +11,7 @@ use colorbalance_desktop::commands::{
     detect_chart_cached, inspect_reference_cached, load_reference, load_reference_cached,
     no_progress, BackendError,
 };
-use colorbalance_desktop::commands::{ExportOptions, ImageExport};
+use colorbalance_desktop::commands::{ExportOptions, ImageExport, MismatchPolicy};
 use colorbalance_desktop::preview_files::PreviewFiles;
 use colorbalance_desktop::reference_cache::ReferenceCache;
 use colorbalance_fixtures::{render_chart_dng, ChartScene};
@@ -377,6 +377,7 @@ fn correct_after_load_reuses_the_decode_and_leaves_the_cached_image_untouched() 
                     path,
                     options: ExportOptions::default(),
                 }),
+                MismatchPolicy::Block,
                 r,
             )
             .unwrap()
@@ -406,6 +407,7 @@ fn correct_after_load_reuses_the_decode_and_leaves_the_cached_image_untouched() 
             profile.to_string_lossy().into_owned(),
             path_str.clone(),
             None,
+            MismatchPolicy::Block,
             r,
         )
         .unwrap()

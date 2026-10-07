@@ -72,6 +72,8 @@ pub fn run_app() {
             crate::ipc::correct_image,
             crate::ipc::release_previews,
             crate::ipc::apply_batch,
+            crate::ipc::list_library,
+            crate::ipc::save_to_library,
             crate::ipc::cancel_batch,
             crate::ipc::export_profile,
             choose_image,
@@ -146,6 +148,7 @@ async fn choose_save_path(
 
 pub mod commands;
 pub mod ipc;
+pub mod library;
 pub mod preview_files;
 pub mod reference_cache;
 

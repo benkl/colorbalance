@@ -692,6 +692,7 @@ pub fn apply_batch(
     input_path: String,
     output_path: String,
     export: ExportOptions,
+    mismatch: MismatchPolicy,
     cancellation: colorbalance_core::CancelFlag,
     on_progress: BatchReport,
 ) -> Result<BatchResponse, BackendError> {
@@ -755,7 +756,7 @@ pub fn apply_batch(
                     return Ok(None);
                 }
                 let mut image = decode_auto(input).map_err(|e| e.to_string())?;
-                let warning = check_camera(&profile, &image)?;
+                let warnings = check_camera(&profile, &image, mismatch)?;
                 let (pixels, _) = correct_in_place(&converter, &profile, &mut image);
                 let (data, metadata) = encode_export(
                     image.width,
@@ -772,7 +773,7 @@ pub fn apply_batch(
                     copied: metadata.copied,
                     skipped: metadata.skipped,
                 });
-                if let Some(warning) = warning {
+                for warning in warnings {
                     let _ = warning_tx.send(BatchWarning {
                         file: input.display().to_string(),
                         warning,
@@ -815,13 +816,54 @@ pub fn apply_batch(
     })
 }
 
-/// Fail closed on camera, decoder or non-version decode-contract mismatch.
-fn check_camera(profile: &Profile, image: &DecodedImage) -> Result<Option<String>, String> {
+/// Whether a camera or decode-contract mismatch between a profile and an image
+/// fails the file or is recorded as a warning.
+///
+/// `Warn` is only for library calibrations, which are deliberately applied to
+/// images the profile was not measured on. It never relaxes the profile's own
+/// consistency checks or the RAW decoder identity check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MismatchPolicy {
+    Block,
+    Warn,
+}
+
+impl MismatchPolicy {
+    /// Map the IPC `allowMismatch` flag.
+    pub fn from_allow(allow: bool) -> Self {
+        if allow {
+            Self::Warn
+        } else {
+            Self::Block
+        }
+    }
+}
+
+/// Check camera, decoder and decode-contract agreement between `profile` and
+/// `image`. Returns the warnings to report: a version-only change, and under
+/// [`MismatchPolicy::Warn`] each allowed mismatch.
+fn check_camera(
+    profile: &Profile,
+    image: &DecodedImage,
+    policy: MismatchPolicy,
+) -> Result<Vec<String>, String> {
+    let mut warnings = Vec::new();
     if image.camera.make != profile.camera.make || image.camera.model != profile.camera.model {
-        return Err(format!(
-            "camera mismatch (profile: {} {}, image: {} {})",
-            profile.camera.make, profile.camera.model, image.camera.make, image.camera.model
-        ));
+        match policy {
+            MismatchPolicy::Block => {
+                return Err(format!(
+                    "camera mismatch (profile: {} {}, image: {} {})",
+                    profile.camera.make,
+                    profile.camera.model,
+                    image.camera.make,
+                    image.camera.model
+                ));
+            }
+            MismatchPolicy::Warn => warnings.push(format!(
+                "camera mismatch allowed for library calibration: profile {} {}, image {} {}",
+                profile.camera.make, profile.camera.model, image.camera.make, image.camera.model
+            )),
+        }
     }
     if profile.camera.decoder != profile.decode_contract.decoder
         || profile.camera.decoder_version != profile.decode_contract.decoder_version
@@ -846,10 +888,16 @@ fn check_camera(profile: &Profile, image: &DecodedImage) -> Result<Option<String
             }
             contract
         };
-    profile
-        .decode_contract
-        .compare_for_apply(&actual)
-        .map_err(|e| e.to_string())
+    match profile.decode_contract.compare_for_apply(&actual) {
+        Ok(version_warning) => warnings.extend(version_warning),
+        Err(error) => match policy {
+            MismatchPolicy::Block => return Err(error.to_string()),
+            MismatchPolicy::Warn => warnings.push(format!(
+                "decode-contract mismatch allowed for library calibration: {error}"
+            )),
+        },
+    }
+    Ok(warnings)
 }
 
 /// Apply the profile to every pixel and return the sRGB-encoded 16-bit samples
@@ -879,6 +927,23 @@ fn correct_buffer(
     let (pixels, out_of_gamut) = converter.correct_to_u16(profile, rgb_buffer);
     let total = (rgb_buffer.len() / 3).max(1);
     (pixels, out_of_gamut as f64 / total as f64)
+}
+
+/// Decode `input`, apply `profile` and render the corrected image as an sRGB
+/// PNG whose longest side is at most `max_dim`. The camera and decode contract
+/// are not checked: this is the picture a library entry shows of its own
+/// reference.
+pub(crate) fn corrected_preview_png(
+    profile: &Profile,
+    input: &Path,
+    max_dim: u32,
+) -> Result<Vec<u8>, BackendError> {
+    let converter = OutputConverter::new(OutputSpace::Srgb)
+        .map_err(|error| BackendError::Message(error.to_string()))?;
+    let mut image = decode_auto(input)?;
+    correct_in_place(&converter, profile, &mut image);
+    colorbalance_raw::render_preview_rgb(&image.rgb, image.width, image.height, None, max_dim)
+        .map_err(|error| BackendError::Message(error.to_string()))
 }
 
 /// Write `data` next to `output` through an exclusively created temporary
@@ -940,6 +1005,7 @@ pub fn correct_image(
     profile_path: String,
     input_path: String,
     export: Option<ImageExport>,
+    mismatch: MismatchPolicy,
     report: Report,
 ) -> Result<CorrectResponse, BackendError> {
     correct_image_cached(
@@ -948,6 +1014,7 @@ pub fn correct_image(
         profile_path,
         input_path,
         export,
+        mismatch,
         report,
     )
 }
@@ -962,6 +1029,7 @@ pub fn correct_image_cached(
     profile_path: String,
     input_path: String,
     export: Option<ImageExport>,
+    mismatch: MismatchPolicy,
     report: Report,
 ) -> Result<CorrectResponse, BackendError> {
     let steps = if export.is_some() { 5 } else { 4 };
@@ -989,7 +1057,7 @@ pub fn correct_image_cached(
         }
     }
     let image = decode_cached(cache, &input_path, report, steps)?;
-    let version_warning = check_camera(&profile, &image).map_err(BackendError::Message)?;
+    let mut warnings = check_camera(&profile, &image, mismatch).map_err(BackendError::Message)?;
     let (before_path, before_is_new) = preview_cached(cache, previews, &image, report, 2, steps)?;
     let rendered = (|| -> Result<CorrectResponse, BackendError> {
         report("Applying the transform", 3, steps);
@@ -1032,10 +1100,6 @@ pub fn correct_image_cached(
             });
         }
 
-        let mut warnings = Vec::new();
-        if let Some(warning) = version_warning {
-            warnings.push(warning);
-        }
         if let Some(quality) = &profile.quality {
             if quality.quick_and_dirty {
                 warnings.push("Profile came from a rendered image: approximate.".to_owned());
@@ -1177,21 +1241,34 @@ mod apply_contract_tests {
             display_neutral: None,
             camera: profile.camera.clone(),
         };
-        assert_eq!(check_camera(&profile, &image), Ok(None));
+        let block = MismatchPolicy::Block;
+        let warn = MismatchPolicy::Warn;
+        assert_eq!(check_camera(&profile, &image, block), Ok(Vec::new()));
         profile.decode_contract.decoder_version = "old".to_owned();
         profile.camera.decoder_version = "old".to_owned();
-        assert!(check_camera(&profile, &image)
-            .unwrap()
-            .unwrap()
-            .contains("decoder version differs"));
+        let drift = check_camera(&profile, &image, block).unwrap();
+        assert_eq!(drift.len(), 1);
+        assert!(drift[0].contains("decoder version differs"));
         image.camera.decoder = "libraw".to_owned();
-        assert!(check_camera(&profile, &image)
-            .unwrap_err()
-            .contains("RAW decoder identity"));
+        // Warn never relaxes the RAW decoder identity check.
+        for policy in [block, warn] {
+            assert!(check_camera(&profile, &image, policy)
+                .unwrap_err()
+                .contains("RAW decoder identity"));
+        }
         image.camera.decoder = actual.decoder;
         profile.decode_contract.no_auto_scale = true;
-        assert!(check_camera(&profile, &image)
+        assert!(check_camera(&profile, &image, block)
             .unwrap_err()
             .contains("decode settings differ"));
+        let allowed = check_camera(&profile, &image, warn).unwrap();
+        assert!(allowed.iter().any(|w| w
+            .starts_with("decode-contract mismatch allowed for library calibration: ")
+            && w.contains("decode settings differ")));
+        // A profile whose own camera and contract disagree stays a hard error.
+        profile.camera.decoder = "other".to_owned();
+        assert!(check_camera(&profile, &image, warn)
+            .unwrap_err()
+            .contains("disagrees with its decode contract"));
     }
 }

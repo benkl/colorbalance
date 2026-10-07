@@ -7,7 +7,7 @@ use colorbalance_desktop::commands::{
     correct_image, correct_image_cached, derive_profile, load_reference, load_reference_cached,
     no_progress,
 };
-use colorbalance_desktop::commands::{ExportOptions, ImageExport};
+use colorbalance_desktop::commands::{ExportOptions, ImageExport, MismatchPolicy};
 use colorbalance_desktop::preview_files::PreviewFiles;
 use colorbalance_desktop::reference_cache::{ReferenceCache, DEFAULT_LIMIT_BYTES};
 use colorbalance_fixtures::{render_chart_dng, ChartScene};
@@ -197,6 +197,7 @@ fn correct_image_returns_previews_writes_a_tiff_and_protects_existing_output() {
                     ..Default::default()
                 },
             }),
+            MismatchPolicy::Block,
             &no_progress,
         )
     };
@@ -265,6 +266,7 @@ fn correct_image_refuses_a_camera_mismatch_without_writing_anything() {
                 ..Default::default()
             },
         }),
+        MismatchPolicy::Block,
         &no_progress,
     )
     .expect_err("mismatch fails closed")
@@ -307,6 +309,7 @@ fn failed_correction_removes_its_new_before_preview_and_keeps_a_prior_one() {
                 path: bad_output.to_string_lossy().into_owned(),
                 options: ExportOptions::default(),
             }),
+            MismatchPolicy::Block,
             &no_progress,
         )
         .expect_err("the unwritable output fails the correction")
@@ -338,6 +341,7 @@ fn failed_correction_removes_its_new_before_preview_and_keeps_a_prior_one() {
         profile.clone(),
         input.clone(),
         None,
+        MismatchPolicy::Block,
         &no_progress,
     )
     .unwrap();
@@ -381,6 +385,7 @@ fn derive_and_correct_report_their_stages_in_order() {
             path: work.join("out.tiff").to_string_lossy().into_owned(),
             options: ExportOptions::default(),
         }),
+        MismatchPolicy::Block,
         &|stage, step, steps| {
             correct_stages
                 .borrow_mut()
@@ -427,6 +432,7 @@ fn batch_progress_counts_finished_files_and_reaches_the_total() {
         input.to_string_lossy().into_owned(),
         output.to_string_lossy().into_owned(),
         ExportOptions::default(),
+        MismatchPolicy::Block,
         Default::default(),
         Arc::new(move |completed, total, file| {
             sink.lock()
@@ -484,6 +490,7 @@ fn correct_image_embeds_the_icc_profile_of_the_chosen_output_space() {
                     ..Default::default()
                 },
             }),
+            MismatchPolicy::Block,
             &no_progress,
         )
         .expect("writes the TIFF");
@@ -537,6 +544,7 @@ fn jpeg_export_writes_a_jpeg_and_reports_metadata() {
                 ..Default::default()
             },
         }),
+        MismatchPolicy::Block,
         &|stage, _, _| stages.borrow_mut().push(stage.to_owned()),
     )
     .expect("writes the JPEG");
@@ -563,6 +571,7 @@ fn jpeg_export_writes_a_jpeg_and_reports_metadata() {
                 ..Default::default()
             },
         }),
+        MismatchPolicy::Block,
         &no_progress,
     )
     .expect_err("refuses to overwrite its input");

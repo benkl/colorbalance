@@ -149,3 +149,63 @@ export interface BatchSummary {
   metadata: Array<MetadataSummary & { file: string }>;
   total: number;
 }
+
+export interface LibraryGps {
+  latitude: number;
+  longitude: number;
+  altitude: number | null;
+}
+
+/** One verified library entry as the backend sends it. */
+export interface LibraryEntry {
+  id: string;
+  label: string;
+  notes: string;
+  tags: string[];
+  profilePath: string;
+  previewPath: string | null;
+  digest: string;
+  cameraMake: string;
+  cameraModel: string;
+  lens: string | null;
+  capturedAt: string | null;
+  gps: LibraryGps | null;
+  chartRevision: string;
+  decoder: string;
+  decoderVersion: string;
+  qualityPassed: boolean;
+  qualityOverridden: boolean;
+  quickAndDirty: boolean;
+  meanDeltaE: number;
+  maxDeltaE: number;
+  patchCount: number;
+}
+
+/** A library sub-folder that could not be listed as usable; it is reported, never offered for use. */
+export interface LibraryProblem {
+  id: string;
+  message: string;
+}
+
+export interface LibraryListing {
+  entries: LibraryEntry[];
+  problems: LibraryProblem[];
+}
+
+/** A library entry as the UI uses it: the preview path is turned into an asset URL. */
+export type LibraryEntryView = Omit<LibraryEntry, 'previewPath'> & { previewUrl: string | null };
+
+export interface LibraryListingView {
+  entries: LibraryEntryView[];
+  problems: LibraryProblem[];
+}
+
+export interface SaveToLibraryRequest {
+  libraryPath: string;
+  profilePath: string;
+  referencePath: string;
+  label: string;
+  notes: string;
+  tags: string[];
+  includeGps: boolean;
+}

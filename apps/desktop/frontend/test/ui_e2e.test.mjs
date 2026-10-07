@@ -155,6 +155,7 @@ test('UI end-to-end: native file drop loads image, enables derive, and completes
     uiState.batchInputPath,
     uiState.batchOutputPath,
     batchOptions,
+    false,
   );
   assert.equal(batchSummary.total, 3);
   assert.equal(batchSummary.metadata.length, 3);
@@ -164,6 +165,7 @@ test('UI end-to-end: native file drop loads image, enables derive, and completes
     inputPath: uiState.batchInputPath,
     outputPath: uiState.batchOutputPath,
     exportOptions: batchOptions,
+    allowMismatch: false,
   }]);
   assert.equal(batchSummary.total, 3);
   assert.equal(batchSummary.succeeded.length, 3);
@@ -219,18 +221,162 @@ test('correct image: IPC carries the output path and returns backend-rendered pr
     includeXmpIptc: true,
     stripGps: true,
   };
-  const saved = await tauri.backend.correctImage('p.cbprofile.json', 'in.dng', 'out.jpg', jpegOptions);
+  const saved = await tauri.backend.correctImage('p.cbprofile.json', 'in.dng', 'out.jpg', jpegOptions, false);
   assert.deepEqual(calls[0], ['correct_image', {
     profilePath: 'p.cbprofile.json',
     inputPath: 'in.dng',
     outputPath: 'out.jpg',
     exportOptions: jpegOptions,
+    allowMismatch: false,
   }]);
   assert.equal(saved.outputPath, 'out.jpg');
-  const preview = await tauri.backend.correctImage('p.cbprofile.json', 'in.dng', undefined, { ...jpegOptions, format: 'tiff' });
+  const preview = await tauri.backend.correctImage('p.cbprofile.json', 'in.dng', undefined, { ...jpegOptions, format: 'tiff' }, false);
   assert.equal(preview.outputPath, null);
   assert.equal(preview.beforeUrl, 'asset:///session/before.png');
   assert.equal(preview.afterUrl, 'asset:///session/after.png');
   await tauri.releasePreviewUrls([preview.afterUrl, 'asset:///outside.png']);
   assert.deepEqual(calls[2], ['release_previews', { paths: ['/session/after.png'] }]);
+});
+
+const libraryEntry = {
+  id: 'sony-a7-studio-0396277a',
+  label: 'Studio A7',
+  notes: 'Strobe, 5600K\nsecond line',
+  tags: ['studio', 'strobe'],
+  profilePath: 'C:/library/sony-a7-studio-0396277a/profile.cbprofile.json',
+  previewPath: 'C:/library/sony-a7-studio-0396277a/preview.png',
+  digest: '0396277212d10d4818b4f46510d9b587636ecedd6646af1de5770fe702cc019e',
+  cameraMake: 'SONY',
+  cameraModel: 'ILCE-7M3',
+  lens: 'FE 35mm F1.8',
+  capturedAt: '2026-10-03T18:33:14',
+  gps: { latitude: 52.520008, longitude: 13.404954, altitude: 34.2 },
+  chartRevision: 'classic-from-november2014',
+  decoder: 'rawler-ahd',
+  decoderVersion: '0.7.1',
+  qualityPassed: true,
+  qualityOverridden: false,
+  quickAndDirty: false,
+  meanDeltaE: 0.84,
+  maxDeltaE: 2.14,
+  patchCount: 24,
+};
+
+test('library: listing becomes cards, using an entry applies its profile with allowMismatch and surfaces the warning', async () => {
+  const calls = [];
+  globalThis.window = {
+    __TAURI_INTERNALS__: {
+      invoke: async (cmd, args) => {
+        calls.push([cmd, args]);
+        if (cmd === 'list_library') {
+          return {
+            entries: [libraryEntry, { ...libraryEntry, id: 'no-preview', label: 'No preview', previewPath: null, gps: null, lens: null, tags: [] }],
+            problems: [{ id: 'broken-entry', message: 'profile digest mismatch' }],
+          };
+        }
+        if (cmd === 'apply_batch') {
+          return {
+            total: 1,
+            succeeded: ['001.jpg'],
+            skipped: [],
+            failed: [],
+            warnings: [{ file: '001.jpg', warning: 'camera mismatch allowed for library calibration: profile SONY ILCE-7M3, image NIKON Z6' }],
+            metadata: [{ file: '001.jpg', copied: [], skipped: [] }],
+          };
+        }
+        throw new Error(`Unhandled mock command: ${cmd}`);
+      },
+      transformCallback: (fn) => fn,
+      unregisterCallback: () => undefined,
+      convertFileSrc: (path) => `asset://${path}`,
+    },
+  };
+  const tauri = await import('../src/tauri.ts');
+  const interaction = await import('../src/interaction.ts');
+
+  const listing = await tauri.backend.listLibrary('C:/library');
+  assert.deepEqual(calls[0], ['list_library', { libraryPath: 'C:/library' }]);
+  assert.deepEqual(listing.problems, [{ id: 'broken-entry', message: 'profile digest mismatch' }]);
+  assert.equal(listing.entries.length, 2);
+  const [entry, bare] = listing.entries;
+  assert.equal(entry.previewUrl, 'asset://C:/library/sony-a7-studio-0396277a/preview.png');
+  assert.equal('previewPath' in entry, false);
+  assert.equal(bare.previewUrl, null);
+
+  const card = interaction.libraryCardModel(entry);
+  assert.equal(card.title, 'Studio A7');
+  assert.equal(card.camera, 'SONY ILCE-7M3');
+  assert.equal(card.lens, 'FE 35mm F1.8');
+  assert.equal(card.capturedAt, '2026-10-03T18:33:14');
+  assert.equal(card.gps, '52.5200, 13.4050 · 34 m');
+  assert.deepEqual(card.badges, [{ label: 'PASSED', tone: 'ok' }]);
+  assert.equal(card.deltaE, 'ΔE mean 0.84 / max 2.14');
+  assert.equal(card.chartRevision, 'classic-from-november2014');
+  assert.equal(card.decoder, 'rawler-ahd 0.7.1');
+  assert.deepEqual(card.tags, ['studio', 'strobe']);
+  assert.equal(interaction.libraryCardModel(bare).gps, null);
+
+  // A loaded NIKON reference differs from the SONY calibration: notice, but not a block.
+  assert.equal(interaction.libraryCameraMismatch(entry, { make: 'NIKON', model: 'Z6' }), true);
+  assert.equal(interaction.libraryCameraMismatch(entry, { make: 'sony', model: 'ilce-7m3' }), false);
+  assert.equal(interaction.libraryCameraMismatch(entry, null), false);
+
+  // Use for batch: the library profile wins over a derived one and allows mismatch.
+  const choice = interaction.chooseBatchProfile('derived.cbprofile.json', entry);
+  assert.deepEqual(choice, { profilePath: entry.profilePath, allowMismatch: true, source: 'library' });
+  assert.deepEqual(interaction.chooseBatchProfile('derived.cbprofile.json', null), {
+    profilePath: 'derived.cbprofile.json',
+    allowMismatch: false,
+    source: 'derived',
+  });
+  assert.equal(interaction.chooseBatchProfile(null, null), null);
+
+  const options = { overwrite: false, space: 'srgb', format: 'tiff', quality: 95, sampling: '444', includeXmpIptc: false, stripGps: true };
+  const summary = await tauri.backend.applyBatch('unused', 'C:/in', 'C:/out', options, false);
+  assert.deepEqual(calls[1], ['apply_batch', {
+    profilePath: 'unused', inputPath: 'C:/in', outputPath: 'C:/out', exportOptions: options, allowMismatch: false,
+  }]);
+  const librarySummary = await tauri.backend.applyBatch(choice.profilePath, 'C:/in', 'C:/out', options, choice.allowMismatch);
+  assert.deepEqual(calls[2], ['apply_batch', {
+    profilePath: entry.profilePath, inputPath: 'C:/in', outputPath: 'C:/out', exportOptions: options, allowMismatch: true,
+  }]);
+  assert.equal(summary.warnings.length, 1);
+  assert.match(librarySummary.warnings[0].warning, /^camera mismatch allowed for library calibration/);
+});
+
+test('library: save sends camelCase args and returns the entry with a preview URL; tags are parsed', async () => {
+  const calls = [];
+  globalThis.window = {
+    __TAURI_INTERNALS__: {
+      invoke: async (cmd, args) => {
+        calls.push([cmd, args]);
+        if (cmd === 'save_to_library') return libraryEntry;
+        throw new Error(`Unhandled mock command: ${cmd}`);
+      },
+      transformCallback: (fn) => fn,
+      unregisterCallback: () => undefined,
+      convertFileSrc: (path) => `asset://${path}`,
+    },
+  };
+  const tauri = await import('../src/tauri.ts');
+  const interaction = await import('../src/interaction.ts');
+
+  assert.deepEqual(interaction.parseTags(' studio, strobe ,,Studio, 5600K '), ['studio', 'strobe', '5600K']);
+  const request = {
+    libraryPath: 'C:/library',
+    profilePath: 'colorbalance.cbprofile.json',
+    referencePath: 'C:/images/ref.dng',
+    label: 'Studio A7',
+    notes: 'Strobe',
+    tags: interaction.parseTags('studio, strobe'),
+    includeGps: false,
+  };
+  const saved = await tauri.backend.saveToLibrary(request);
+  assert.deepEqual(calls, [['save_to_library', request]]);
+  assert.equal(saved.id, libraryEntry.id);
+  assert.equal(saved.previewUrl, 'asset://C:/library/sony-a7-studio-0396277a/preview.png');
+
+  // Storage is best-effort: whatever the runtime provides, reading and writing the folder never throws.
+  assert.equal(typeof interaction.readStoredLibraryPath(), 'string');
+  assert.doesNotThrow(() => interaction.storeLibraryPath(''));
 });
