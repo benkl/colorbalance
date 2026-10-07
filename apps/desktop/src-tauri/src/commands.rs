@@ -7,9 +7,12 @@ use colorbalance_core::contract::DecodeContract;
 use colorbalance_core::decode::DecodedImage;
 use colorbalance_core::detection::{detect_chart, Detection};
 use colorbalance_core::interchange::{profile_to_clf, profile_to_cube};
-use colorbalance_core::output::encode_tiff_rgb_u16;
+use colorbalance_core::output::{
+    encode_jpeg_rgb_u16, encode_tiff_rgb_u16_with_metadata, JpegSampling, JPEG_MAX_DIMENSION,
+};
 use colorbalance_core::output_space::{OutputConverter, OutputSpace};
 use colorbalance_core::profile::{self, Profile, ValidationSummary};
+use colorbalance_core::MetadataReport;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -103,6 +106,7 @@ pub struct BatchResponse {
     skipped: Vec<String>,
     warnings: Vec<BatchWarning>,
     failed: Vec<BatchFailure>,
+    metadata: Vec<FileMetadataReport>,
     total: usize,
 }
 
@@ -118,6 +122,14 @@ struct BatchFailure {
 struct BatchWarning {
     file: String,
     warning: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FileMetadataReport {
+    file: String,
+    copied: Vec<String>,
+    skipped: Vec<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -547,6 +559,130 @@ pub fn derive_profile_cached(
     })
 }
 
+/// Full-resolution settings shared by single-image and batch exports.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportOptions {
+    pub overwrite: bool,
+    #[serde(deserialize_with = "deserialize_output_space")]
+    pub space: OutputSpace,
+    pub format: ExportFormat,
+    pub quality: u8,
+    pub sampling: JpegSampling,
+    pub include_xmp_iptc: bool,
+    pub strip_gps: bool,
+}
+
+impl Default for ExportOptions {
+    fn default() -> Self {
+        Self {
+            overwrite: false,
+            space: OutputSpace::Srgb,
+            format: ExportFormat::Tiff,
+            quality: 95,
+            sampling: JpegSampling::Yuv444,
+            include_xmp_iptc: false,
+            strip_gps: false,
+        }
+    }
+}
+
+fn deserialize_output_space<'de, D>(deserializer: D) -> Result<OutputSpace, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    let value = String::deserialize(deserializer)?;
+    value.parse().map_err(D::Error::custom)
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ExportFormat {
+    Tiff,
+    Jpeg,
+}
+
+impl ExportFormat {
+    fn extension(self) -> &'static str {
+        match self {
+            Self::Tiff => "tiff",
+            Self::Jpeg => "jpg",
+        }
+    }
+}
+
+/// Reject settings the encoder would refuse, before any file is touched.
+fn validate_export_options(options: &ExportOptions) -> Result<(), BackendError> {
+    if matches!(options.format, ExportFormat::Jpeg) && !(1..=100).contains(&options.quality) {
+        return Err(BackendError::Message(format!(
+            "JPEG quality must be 1-100, got {}",
+            options.quality
+        )));
+    }
+    Ok(())
+}
+
+fn encode_export(
+    width: u32,
+    height: u32,
+    pixels: &[u16],
+    icc_profile: &[u8],
+    input: &Path,
+    options: &ExportOptions,
+) -> Result<(Vec<u8>, MetadataReport), BackendError> {
+    if matches!(options.format, ExportFormat::Jpeg)
+        && (width > JPEG_MAX_DIMENSION || height > JPEG_MAX_DIMENSION)
+    {
+        return Err(BackendError::Message(format!(
+            "JPEG dimensions exceed {JPEG_MAX_DIMENSION}: {width}x{height}"
+        )));
+    }
+    let read =
+        colorbalance_raw::read_export_metadata(input, options.include_xmp_iptc, options.strip_gps);
+    let data = match options.format {
+        ExportFormat::Tiff => {
+            encode_tiff_rgb_u16_with_metadata(width, height, pixels, icc_profile, &read.metadata)
+        }
+        ExportFormat::Jpeg => encode_jpeg_rgb_u16(
+            width,
+            height,
+            pixels,
+            icc_profile,
+            options.quality,
+            options.sampling,
+            &read.metadata,
+        ),
+    }
+    .map_err(|error| BackendError::Message(error.to_string()))?;
+    Ok((data, read.report))
+}
+
+/// Selected inputs with their sizes. A cheap size filter keeps the identity
+/// check from opening every input for each existing output.
+struct SourceFiles(Vec<(std::path::PathBuf, u64)>);
+
+impl SourceFiles {
+    fn new(inputs: &[std::path::PathBuf]) -> std::io::Result<Self> {
+        inputs
+            .iter()
+            .map(|path| Ok((path.clone(), fs::metadata(path)?.len())))
+            .collect::<std::io::Result<_>>()
+            .map(Self)
+    }
+
+    /// Whether an existing `output` is any selected input, by path or by
+    /// filesystem identity (hard links, symlinks, case-insensitive names).
+    fn contains(&self, output: &Path) -> bool {
+        let Ok(metadata) = fs::metadata(output) else {
+            return false;
+        };
+        self.0.iter().any(|(path, len)| {
+            *len == metadata.len() && same_file::is_same_file(path, output).unwrap_or(false)
+        })
+    }
+}
+
 /// Run a batch. `on_progress(completed, total, file)` fires once at the start
 /// (`completed == 0`, no file), when each file starts (`file` set), and when
 /// each file finishes (`completed` counts finished files, including skipped and
@@ -555,14 +691,15 @@ pub fn apply_batch(
     profile_path: String,
     input_path: String,
     output_path: String,
-    overwrite: bool,
-    output_space: OutputSpace,
+    export: ExportOptions,
     cancellation: colorbalance_core::CancelFlag,
     on_progress: BatchReport,
 ) -> Result<BatchResponse, BackendError> {
     cancellation.store(false, std::sync::atomic::Ordering::Relaxed);
+    validate_export_options(&export)?;
+    let overwrite = export.overwrite;
     // Resolve the space before any file is touched; failure must stop the batch.
-    let converter = OutputConverter::new(output_space)
+    let converter = OutputConverter::new(export.space)
         .map_err(|error| BackendError::Message(error.to_string()))?;
     let icc_profile = converter
         .icc_profile()
@@ -581,17 +718,11 @@ pub fn apply_batch(
             .iter()
             .map(|s| s.to_string())
             .collect(),
+        output_extension: export.format.extension(),
     };
     let inputs = colorbalance_core::collect_inputs(input, &options.extensions)
         .map_err(BackendError::Message)?;
-    if let Ok(entries) = fs::read_dir(&options.output) {
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if name.starts_with(".tmp-") && name.ends_with(".tiff") || name.ends_with(".tiff.tmp") {
-                let _ = fs::remove_file(entry.path());
-            }
-        }
-    }
+    let sources = std::sync::Arc::new(SourceFiles::new(&inputs)?);
     let total = inputs.len();
     let finished = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     on_progress(0, total, None);
@@ -609,20 +740,38 @@ pub fn apply_batch(
         )
     };
     let (warning_tx, warning_rx) = std::sync::mpsc::channel::<BatchWarning>();
+    let (metadata_tx, metadata_rx) = std::sync::mpsc::channel::<FileMetadataReport>();
     let process = {
         let on_progress = on_progress.clone();
         let finished = finished.clone();
         let warning_tx = warning_tx.clone();
+        let metadata_tx = metadata_tx.clone();
         move |input: &std::path::Path, output: std::path::PathBuf| {
             let result = (|| {
-                if output.exists() && !overwrite {
+                if sources.contains(&output) {
+                    return Err("output path is a selected input file".to_owned());
+                }
+                if output.exists() && !export.overwrite {
                     return Ok(None);
                 }
                 let mut image = decode_auto(input).map_err(|e| e.to_string())?;
                 let warning = check_camera(&profile, &image)?;
                 let (pixels, _) = correct_in_place(&converter, &profile, &mut image);
-                let data = encode_tiff_rgb_u16(image.width, image.height, &pixels, &icc_profile);
-                write_atomically(&output, &data).map_err(|e| e.to_string())?;
+                let (data, metadata) = encode_export(
+                    image.width,
+                    image.height,
+                    &pixels,
+                    &icc_profile,
+                    input,
+                    &export,
+                )
+                .map_err(|e| e.to_string())?;
+                write_atomically(&output, &data, export.format).map_err(|e| e.to_string())?;
+                let _ = metadata_tx.send(FileMetadataReport {
+                    file: input.display().to_string(),
+                    copied: metadata.copied,
+                    skipped: metadata.skipped,
+                });
                 if let Some(warning) = warning {
                     let _ = warning_tx.send(BatchWarning {
                         file: input.display().to_string(),
@@ -656,6 +805,12 @@ pub fn apply_batch(
                 error: r.message.unwrap_or_default(),
             })
             .collect(),
+        metadata: {
+            drop(metadata_tx);
+            let mut metadata: Vec<_> = metadata_rx.into_iter().collect();
+            metadata.sort_by(|a, b| a.file.cmp(&b.file));
+            metadata
+        },
         total: summary.total,
     })
 }
@@ -700,15 +855,17 @@ fn check_camera(profile: &Profile, image: &DecodedImage) -> Result<Option<String
 /// Apply the profile to every pixel and return the sRGB-encoded 16-bit samples
 /// plus the fraction of pixels the transform pushed out of gamut.
 ///
-/// `image.rgb` is overwritten with the corrected linear sRGB values so the same
-/// buffer can feed the preview renderer; no second full-size copy is made.
+/// `image.rgb` is overwritten with the clamped linear Rec.709 (sRGB primaries)
+/// values, whatever the output space, so the same buffer can feed the sRGB
+/// preview renderer; no second full-size copy is made. The returned samples
+/// are the output-space encoded pixels.
 fn correct_in_place(
     converter: &OutputConverter,
     profile: &Profile,
     image: &mut DecodedImage,
 ) -> (Vec<u16>, f64) {
     let result = correct_buffer(converter, profile, &mut image.rgb);
-    // The buffer is corrected sRGB now; the camera neutral no longer applies.
+    // The buffer is corrected linear Rec.709 now; the camera neutral no longer applies.
     image.display_neutral = None;
     result
 }
@@ -724,36 +881,24 @@ fn correct_buffer(
     (pixels, out_of_gamut as f64 / total as f64)
 }
 
-/// Write `data` next to `output` through a unique temporary file, flush it to
-/// disk, then rename it into place. The temporary file is removed on failure.
-fn write_atomically(output: &Path, data: &[u8]) -> std::io::Result<()> {
+/// Write `data` next to `output` through an exclusively created temporary
+/// file, flush it to disk, then rename it into place. The temporary file is
+/// removed on failure, and only this call's own file is ever removed.
+fn write_atomically(output: &Path, data: &[u8], format: ExportFormat) -> std::io::Result<()> {
     use std::io::Write;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
 
     let directory = output
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    let temporary = directory.join(format!(
-        ".tmp-{}-{}.tiff",
-        std::process::id(),
-        COUNTER.fetch_add(1, Ordering::Relaxed)
-    ));
-    let result = (|| {
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)?;
-        file.write_all(data)?;
-        file.sync_all()?;
-        drop(file);
-        fs::rename(&temporary, output)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result
+    let mut file = tempfile::Builder::new()
+        .prefix(".tmp-")
+        .suffix(&format!(".{}", format.extension()))
+        .tempfile_in(directory)?;
+    file.write_all(data)?;
+    file.as_file().sync_all()?;
+    file.persist(output).map_err(|error| error.error)?;
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -763,19 +908,25 @@ pub struct CorrectResponse {
     before_path: String,
     /// App-owned PNG of the corrected image.
     after_path: String,
-    /// Where the corrected TIFF was written, when an output path was given.
+    /// Where the corrected image was written, when an output path was given.
     output_path: Option<String>,
+    /// Metadata copied from and skipped in the source; absent for preview-only runs.
+    metadata: Option<MetadataSummary>,
     warnings: Vec<String>,
 }
 
-/// Where and how [`correct_image`] writes the full-resolution TIFF.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MetadataSummary {
+    copied: Vec<String>,
+    skipped: Vec<String>,
+}
+
+/// Where and how [`correct_image`] writes the full-resolution image.
 #[derive(Debug, Clone)]
-pub struct TiffExport {
+pub struct ImageExport {
     pub path: String,
-    /// Replace an existing file at `path`; otherwise it is an error.
-    pub overwrite: bool,
-    /// Encoded color space of the samples and of the embedded ICC profile.
-    pub space: OutputSpace,
+    pub options: ExportOptions,
 }
 
 /// Correct one image with a saved profile.
@@ -788,7 +939,7 @@ pub fn correct_image(
     previews: &PreviewFiles,
     profile_path: String,
     input_path: String,
-    export: Option<TiffExport>,
+    export: Option<ImageExport>,
     report: Report,
 ) -> Result<CorrectResponse, BackendError> {
     correct_image_cached(
@@ -810,18 +961,27 @@ pub fn correct_image_cached(
     previews: &PreviewFiles,
     profile_path: String,
     input_path: String,
-    export: Option<TiffExport>,
+    export: Option<ImageExport>,
     report: Report,
 ) -> Result<CorrectResponse, BackendError> {
     let steps = if export.is_some() { 5 } else { 4 };
     // A preview-only run writes nothing, so it skips the OCIO conversion.
-    let output_space = export.as_ref().map_or(OutputSpace::Srgb, |e| e.space);
+    let output_space = export
+        .as_ref()
+        .map_or(OutputSpace::Srgb, |e| e.options.space);
     let converter = OutputConverter::new(output_space)
         .map_err(|error| BackendError::Message(error.to_string()))?;
     let profile = profile::from_json(&fs::read_to_string(&profile_path)?)
         .map_err(|error| BackendError::Message(error.to_string()))?;
     if let Some(export) = &export {
-        if Path::new(&export.path).exists() && !export.overwrite {
+        validate_export_options(&export.options)?;
+        let output = Path::new(&export.path);
+        if SourceFiles::new(&[Path::new(&input_path).to_path_buf()])?.contains(output) {
+            return Err(BackendError::Message(
+                "output path is the input file".to_owned(),
+            ));
+        }
+        if output.exists() && !export.options.overwrite {
             return Err(BackendError::Message(format!(
                 "output already exists: {}",
                 export.path
@@ -844,13 +1004,32 @@ pub fn correct_image_cached(
             colorbalance_raw::render_preview_rgb(&rgb, width, height, None, PREVIEW_MAX_DIM)
                 .map_err(|error| BackendError::Message(error.to_string()))?;
         drop(rgb);
+        let mut metadata = None;
         if let Some(export) = &export {
-            report("Writing 16-bit TIFF", 5, steps);
+            report(
+                match export.options.format {
+                    ExportFormat::Tiff => "Writing 16-bit TIFF",
+                    ExportFormat::Jpeg => "Writing 8-bit JPEG",
+                },
+                5,
+                steps,
+            );
             let icc_profile = converter
                 .icc_profile()
                 .map_err(|error| BackendError::Message(error.to_string()))?;
-            let data = encode_tiff_rgb_u16(width, height, &pixels, &icc_profile);
-            write_atomically(Path::new(&export.path), &data)?;
+            let (data, read) = encode_export(
+                width,
+                height,
+                &pixels,
+                &icc_profile,
+                Path::new(&input_path),
+                &export.options,
+            )?;
+            write_atomically(Path::new(&export.path), &data, export.options.format)?;
+            metadata = Some(MetadataSummary {
+                copied: read.copied,
+                skipped: read.skipped,
+            });
         }
 
         let mut warnings = Vec::new();
@@ -878,6 +1057,7 @@ pub fn correct_image_cached(
             before_path,
             after_path,
             output_path: export.map(|e| e.path),
+            metadata,
             warnings,
         })
     })();

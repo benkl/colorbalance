@@ -11,7 +11,9 @@ use colorbalance_core::contract::DecodeContract;
 use colorbalance_core::dataset;
 use colorbalance_core::decode::{CameraIdentity, DecodedImage};
 use colorbalance_core::interchange::{profile_to_clf, profile_to_cube};
-use colorbalance_core::output::encode_tiff_rgb_u16;
+use colorbalance_core::output::{
+    encode_jpeg_rgb_u16, encode_tiff_rgb_u16_with_metadata, JpegSampling,
+};
 use colorbalance_core::output_space::{OutputConverter, OutputSpace, OCIO_CONFIG, OCIO_VERSION};
 use colorbalance_core::profile::{self, Profile, ValidationSummary};
 use serde::Serialize;
@@ -37,7 +39,7 @@ enum Commands {
     Inspect(InspectArgs),
     /// Derive a measured color profile and HTML report from a reference
     Derive(DeriveArgs),
-    /// Apply a measured profile to a directory of images and write 16-bit TIFFs
+    /// Apply a measured color profile to a directory of images
     Apply(ApplyArgs),
     /// Export a profile to Common LUT Format (.clf) or 3D LUT (.cube)
     Export(ExportArgs),
@@ -91,17 +93,27 @@ struct ApplyArgs {
     profile: PathBuf,
     /// Input directory containing matching images (or a single file)
     input: PathBuf,
-    /// Destination directory for balanced 16-bit TIFF outputs
+    /// Destination directory for balanced TIFF or JPEG outputs
     #[arg(long, short = 'o')]
     output: PathBuf,
-    /// Encoded color space of the TIFF samples and its embedded ICC profile:
-    /// srgb, display-p3 or adobe-rgb. Non-sRGB targets convert through OCIO
-    /// before clipping.
+    /// Encoded color space and matching embedded ICC profile
     #[arg(long, default_value = "srgb")]
     output_space: OutputSpace,
-    /// Output format (only 'tiff' in this release)
-    #[arg(long, default_value = "tiff")]
-    format: String,
+    /// Export 16-bit TIFF (default) or 8-bit JPEG
+    #[arg(long, value_enum, default_value_t = ApplyFormat::Tiff)]
+    format: ApplyFormat,
+    /// JPEG quality, 1–100 (default: 95)
+    #[arg(long, value_parser = clap::value_parser!(u8).range(1..=100), default_value_t = 95)]
+    jpeg_quality: u8,
+    /// JPEG chroma subsampling: 444, 422, or 420 (default: 444)
+    #[arg(long, value_enum, default_value_t = JpegSubsampling::S444)]
+    jpeg_subsampling: JpegSubsampling,
+    /// Copy source XMP and IPTC in addition to reviewed EXIF fields
+    #[arg(long)]
+    copy_xmp_iptc: bool,
+    /// Omit GPS coordinates from both formats
+    #[arg(long)]
+    strip_gps: bool,
     /// Overwrite existing output files (default: skip/fail existing)
     #[arg(long, default_value_t = false)]
     overwrite: bool,
@@ -114,6 +126,56 @@ struct ApplyArgs {
     /// Output path for the JSON batch summary
     #[arg(long)]
     summary: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ApplyFormat {
+    Tiff,
+    Jpeg,
+}
+
+impl ApplyFormat {
+    fn extension(self) -> &'static str {
+        match self {
+            Self::Tiff => "tiff",
+            Self::Jpeg => "jpg",
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Tiff => "tiff",
+            Self::Jpeg => "jpeg",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum JpegSubsampling {
+    #[value(name = "444")]
+    S444,
+    #[value(name = "422")]
+    S422,
+    #[value(name = "420")]
+    S420,
+}
+
+impl JpegSubsampling {
+    fn encoder(self) -> JpegSampling {
+        match self {
+            Self::S444 => JpegSampling::Yuv444,
+            Self::S422 => JpegSampling::Yuv422,
+            Self::S420 => JpegSampling::Yuv420,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::S444 => "444",
+            Self::S422 => "422",
+            Self::S420 => "420",
+        }
+    }
 }
 
 #[derive(Args)]
@@ -221,6 +283,10 @@ struct InspectGateFailure {
 #[serde(rename_all = "kebab-case")]
 pub struct BatchSummary {
     pub output_space: String,
+    pub format: String,
+    pub jpeg_quality: Option<u8>,
+    pub jpeg_subsampling: Option<String>,
+    pub metadata: Vec<BatchMetadata>,
     /// OCIO config and `ocio` crate version used for non-sRGB targets.
     pub ocio_config: Option<String>,
     pub ocio_version: Option<String>,
@@ -229,6 +295,14 @@ pub struct BatchSummary {
     pub warnings: Vec<BatchWarning>,
     pub failed: Vec<BatchFileError>,
     pub total: usize,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct BatchMetadata {
+    pub file: String,
+    pub copied: Vec<String>,
+    pub skipped: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -581,25 +655,45 @@ fn execute_apply(args: ApplyArgs) -> Result<(), String> {
             .iter()
             .map(|s| s.to_string())
             .collect(),
+        output_extension: args.format.extension(),
     };
     let inputs = colorbalance_core::batch::collect_inputs(&args.input, &options.extensions)?;
     if inputs.is_empty() {
         return Err(format!("no files found at {}", args.input.display()));
     }
+    // A generated JPEG must not replace a selected input, including a file
+    // another worker has not decoded yet.
+    let source_paths: Vec<_> = inputs
+        .iter()
+        .map(|input| fs::canonicalize(input).map_err(|e| e.to_string()))
+        .collect::<Result<_, _>>()?;
 
     // Resolve the output space before touching the destination: a missing
     // OCIO space or ICC profile must stop the batch, not label pixels wrong.
     let converter = OutputConverter::new(args.output_space).map_err(|e| e.to_string())?;
     let icc_profile = converter.icc_profile().map_err(|e| e.to_string())?;
 
-    cleanup_stale_temp_files(&args.output);
-
     let (warning_tx, warning_rx) = std::sync::mpsc::channel::<BatchWarning>();
+    let (metadata_tx, metadata_rx) = std::sync::mpsc::channel::<BatchMetadata>();
     let prof = std::sync::Arc::new(prof);
     let force = args.force;
     let overwrite = args.overwrite;
     let file_warnings = warning_tx.clone();
+    let file_metadata = metadata_tx.clone();
+    let source_paths = std::sync::Arc::new(source_paths);
+    let format = args.format;
+    let quality = args.jpeg_quality;
+    let sampling = args.jpeg_subsampling.encoder();
+    let copy_xmp_iptc = args.copy_xmp_iptc;
+    let strip_gps = args.strip_gps;
     let process = move |input: &Path, output: PathBuf| -> Result<Option<PathBuf>, String> {
+        if output.exists()
+            && fs::canonicalize(&output)
+                .ok()
+                .is_some_and(|path| source_paths.contains(&path))
+        {
+            return Err("output path is a selected input file".to_owned());
+        }
         if output.exists() && !overwrite {
             return Ok(None);
         }
@@ -643,25 +737,64 @@ fn execute_apply(args: ApplyArgs) -> Result<(), String> {
             Err(error) => return Err(error.to_string()),
         };
 
+        let source_metadata =
+            colorbalance_raw::read_export_metadata(input, copy_xmp_iptc, strip_gps);
         let (out_u16, _clipped) = converter.correct_to_u16(&prof, &mut decoded.rgb);
-        let tiff_bytes = encode_tiff_rgb_u16(decoded.width, decoded.height, &out_u16, &icc_profile);
+        let data = match format {
+            ApplyFormat::Tiff => encode_tiff_rgb_u16_with_metadata(
+                decoded.width,
+                decoded.height,
+                &out_u16,
+                &icc_profile,
+                &source_metadata.metadata,
+            ),
+            ApplyFormat::Jpeg => encode_jpeg_rgb_u16(
+                decoded.width,
+                decoded.height,
+                &out_u16,
+                &icc_profile,
+                quality,
+                sampling,
+                &source_metadata.metadata,
+            ),
+        }
+        .map_err(|e| format!("export failed: {e}"))?;
         let tmp_path = output
             .parent()
             .map(Path::new)
             .unwrap_or(Path::new("."))
             .join(format!(
-                ".tmp-{}-{}.tiff",
+                ".tmp-{}-{}-{}.{}",
                 std::process::id(),
-                fastrand_u64()
+                fastrand_u64(),
+                TEMP_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                format.extension()
             ));
-        if let Err(e) = fs::write(&tmp_path, &tiff_bytes) {
-            let _ = fs::remove_file(&tmp_path);
+        let mut created = false;
+        if let Err(e) = (|| -> std::io::Result<()> {
+            use std::io::Write;
+            let mut tmp = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp_path)?;
+            created = true;
+            tmp.write_all(&data)?;
+            tmp.sync_all()
+        })() {
+            if created {
+                let _ = fs::remove_file(&tmp_path);
+            }
             return Err(format!("write failed: {e}"));
         }
         if let Err(e) = atomic_rename(&tmp_path, &output) {
             let _ = fs::remove_file(&tmp_path);
             return Err(format!("rename failed: {e}"));
         }
+        let _ = file_metadata.send(BatchMetadata {
+            file: input.display().to_string(),
+            copied: source_metadata.report.copied,
+            skipped: source_metadata.report.skipped,
+        });
         if let Some(warning) = warning {
             let _ = file_warnings.send(BatchWarning {
                 file: input.display().to_string(),
@@ -682,6 +815,16 @@ fn execute_apply(args: ApplyArgs) -> Result<(), String> {
     let uses_ocio = args.output_space.ocio_destination().is_some();
     let summary = BatchSummary {
         output_space: args.output_space.to_string(),
+        format: args.format.name().to_owned(),
+        jpeg_quality: matches!(args.format, ApplyFormat::Jpeg).then_some(args.jpeg_quality),
+        jpeg_subsampling: matches!(args.format, ApplyFormat::Jpeg)
+            .then(|| args.jpeg_subsampling.name().to_owned()),
+        metadata: {
+            drop(metadata_tx);
+            let mut reports: Vec<_> = metadata_rx.into_iter().collect();
+            reports.sort_by(|a, b| a.file.cmp(&b.file));
+            reports
+        },
         ocio_config: uses_ocio.then(|| OCIO_CONFIG.to_owned()),
         ocio_version: uses_ocio.then(|| OCIO_VERSION.to_owned()),
         total: core_summary.total,
@@ -730,18 +873,7 @@ fn execute_apply(args: ApplyArgs) -> Result<(), String> {
     Ok(())
 }
 
-/// Remove leftover `.tmp-*.tiff` files from a previously crashed or cancelled run.
-fn cleanup_stale_temp_files(output_dir: &Path) {
-    if let Ok(entries) = fs::read_dir(output_dir) {
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if name.starts_with(".tmp-") && name.ends_with(".tiff") {
-                let _ = fs::remove_file(entry.path());
-            }
-        }
-    }
-}
+static TEMP_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn fastrand_u64() -> u64 {
     use std::time::SystemTime;
@@ -753,17 +885,7 @@ fn fastrand_u64() -> u64 {
 }
 
 fn atomic_rename(from: &Path, to: &Path) -> std::io::Result<()> {
-    #[cfg(windows)]
-    {
-        if to.exists() {
-            fs::remove_file(to)?;
-        }
-        fs::rename(from, to)
-    }
-    #[cfg(not(windows))]
-    {
-        fs::rename(from, to)
-    }
+    fs::rename(from, to)
 }
 
 fn execute_export(args: ExportArgs) -> Result<(), String> {

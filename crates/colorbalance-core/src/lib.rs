@@ -20,7 +20,11 @@ pub mod dataset;
 pub mod decode;
 pub mod detection;
 pub mod interchange;
+pub mod metadata;
 pub mod output;
+mod output_metadata;
+#[cfg(test)]
+mod output_metadata_tests;
 pub mod output_space;
 pub mod par;
 pub mod profile;
@@ -35,3 +39,4 @@ pub use contract::{
     OutputDepth, WhiteBalancePolicy,
 };
 pub use decode::{CameraIdentity, DecodeError, DecodedImage, RawDecoder};
+pub use metadata::{ExportMetadata, MetadataReport};

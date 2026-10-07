@@ -62,7 +62,7 @@ Target 64-bit Windows, macOS, and Linux. Windows is the first packaged target. B
 | RAW decode | `rawler` crate, then AHD demosaic in `colorbalance-core` | Maintained multi-format decoder instead of a hand-written one; no C library or FFI. LGPL-2.1 (see D18) |
 | Chart detection | Pure Rust in `colorbalance-core`, using a bounded thumbnail | Avoids OpenCV and bounds the search after thumbnail sampling; uncertain results require manual corners |
 | Parallelism | `rayon` | Native per-image and per-tile CPU parallelism |
-| TIFF output and metadata | `tiff` crate or libtiff binding, Exiv2 or `kamadak-exif` | 16-bit output, embedded ICC, reviewed EXIF copying |
+| TIFF/JPEG output and metadata | In-repo TIFF/EXIF writers, pure-Rust `jpeg-encoder` and `kamadak-exif` | 16-bit TIFF master or 8-bit JPEG, matching ICC, reviewed EXIF; optional XMP/IPTC and GPS removal (D25) |
 | Serialization and profiles | `serde`, `serde_json`, `jsonschema` crate | Versioned `*.cbprofile.json` with schema validation |
 | Interchange transform | CLF written by the engine, validated with OpenColorIO | Open, checkable interchange for the transform stages |
 | CLI | `clap` | Typed subcommands matching the documented contract |
@@ -122,7 +122,7 @@ Store these validation values:
 
 The apply path verifies camera identity, decoder settings, and capture exposure metadata before processing. Decode, apply the stored exposure scalar and neutral channel scaling unchanged, apply the fitted matrix, then for sRGB clip linear to `[0, 1]`, count and report clipped pixels, and encode sRGB. For Display P3 and Adobe RGB, convert the unclamped linear Rec.709 result with OCIO, clip in the target space, count, and quantize (D24). A user may supply an explicit stop offset for intentional exposure differences. The tool must not derive one from scene content. A force flag may override camera or metadata mismatch, but the report records it.
 
-Default output is 16-bit TIFF in sRGB with an embedded ICC profile; `--output-space` selects Display P3 or Adobe RGB (1998), and the TIFF embeds the matching profile. Preserve capture metadata where the output format supports it, but remove or rewrite tags that would falsely describe transformed pixel data. Never overwrite input files. Existing outputs fail or skip by default. Explicit overwrite writes a unique temporary file in the destination directory, closes and flushes it, then atomically replaces the destination. Never delete the existing destination before rename.
+Default output is 16-bit TIFF in sRGB with an embedded ICC profile; `--format jpeg` adds 8-bit JPEG at quality 95 and 4:4:4 chroma by default, with user-controlled quality and subsampling. `--output-space` selects Display P3 or Adobe RGB (1998) for either format, and each embeds the matching ICC. Quantize after target-space clipping. Copy reviewed capture fields when present; optional XMP/IPTC copying and GPS removal are explicit. Remove stale orientation, thumbnails, ColorSpace, white-balance fields and maker notes. Missing metadata does not fail export; the report says what was copied or skipped. Never overwrite input files. Existing outputs fail or skip by default. Explicit overwrite writes a unique temporary file in the destination directory, closes and flushes it, then atomically replaces the destination. Never delete the existing destination before rename.
 
 Parallelize by image with a bounded worker count. Keep only active images in memory. Cancellation stops scheduling new files and lets active writes finish or removes their temporary files.
 
@@ -229,9 +229,9 @@ Exit criterion: a profile applies to a directory of matching RAW files and produ
    - Verify the decode contract and exposure metadata, apply the stored scalar and channel scaling without scene analysis, apply the exact transform, convert to the chosen output space (sRGB by default; Display P3 and Adobe RGB through OCIO, D24), clip, count clipped pixels, and encode.
    - Acceptance: known synthetic pixels, including negative and over-range results, reproduce exact expected 16-bit encoded values; camera or exposure mismatch fails unless forced or given an explicit stop offset.
 
-10. **Write 16-bit TIFF output with valid metadata**
-    - Use a same-directory unique temporary file, close and flush before atomic rename, embed the ICC profile of the output space, normalize orientation, and copy only reviewed EXIF fields. Existing outputs fail or skip unless overwrite is explicit. Do not use delete-then-rename.
-    - Acceptance: an external metadata reader identifies 16-bit TIFF and embedded sRGB; inputs remain byte-identical; cancellation and injected write or commit failures leave no partial final file; an existing output remains byte-identical when replacement fails.
+10. **Write TIFF or JPEG output with valid metadata**
+    - Use a same-directory unique temporary file, close and flush before atomic rename, embed a matching ICC, normalize orientation, and copy only reviewed EXIF fields. TIFF remains 16-bit; JPEG is 8-bit, with configurable quality and subsampling. Existing outputs fail or skip unless overwrite is explicit. Do not use delete-then-rename.
+    - Acceptance: an external metadata reader identifies depth, ICC and retained safe capture fields in both formats; stale tags are absent; inputs remain byte-identical; cancellation and injected write or commit failures leave no partial final file; an existing output remains byte-identical when replacement fails.
 
 11. **Add bounded parallel batch processing**
     - Implement recursive input selection, collision-safe output paths, worker limits, cancellation, resume behavior, existing-output policy, and JSON batch summary.

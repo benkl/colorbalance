@@ -26,9 +26,9 @@ All non-negotiable invariants defined in `AGENTS.md` and `docs/IMPLEMENTATION_PL
 
 ## 3. Data Safety and Batch Integrity Verification
 
-- **Atomic File Writing**: All outputs write to `.tmp-<pid>-<nanos>.tiff` before atomic rename.
+- **Atomic File Writing**: All outputs write to an exclusively created `.tmp-<pid>-<nanos>-<seq>.<ext>` file in the destination directory, are flushed, then renamed into place.
 - **Overwrite Safety**: Existing files are skipped by default (`summary.skipped` count incremented). Overwrite succeeds only when `--overwrite` is explicitly specified.
-- **Crash Recovery**: Stale `.tmp-*.tiff` files from interrupted runs are automatically purged on startup.
+- **Crash Recovery**: A failed write removes only the temporary file that write created. Startup never sweeps `.tmp-*` files, since they may belong to a concurrent run.
 - **Non-destructive Invariant**: Source files are opened read-only and remain byte-identical after processing.
 - **Failure Isolation**: A corrupted file in a batch logs an individual failure and continues processing remaining images without aborting or discarding successful outputs.
 

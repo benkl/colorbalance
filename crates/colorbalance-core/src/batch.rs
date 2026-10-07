@@ -34,6 +34,8 @@ pub struct BatchOptions {
     pub workers: usize,
     /// Extensions accepted as inputs, in lowercase.
     pub extensions: Vec<String>,
+    /// Output filename extension, without the dot.
+    pub output_extension: &'static str,
 }
 
 impl Default for BatchOptions {
@@ -43,6 +45,7 @@ impl Default for BatchOptions {
             overwrite: false,
             workers: DEFAULT_WORKERS,
             extensions: DEFAULT_EXTENSIONS.iter().map(|s| s.to_string()).collect(),
+            output_extension: "tiff",
         }
     }
 }
@@ -137,16 +140,21 @@ pub type ProgressFn = Arc<dyn Fn(&Path, usize, usize) + Send + Sync>;
 /// same stem is suffixed `-1`, `-2`, ... so recursive selection never
 /// overwrites an earlier file of the run. The returned path is registered in
 /// `seen`.
-pub fn unique_output_path(output_dir: &Path, input: &Path, seen: &mut Vec<String>) -> PathBuf {
+pub fn unique_output_path(
+    output_dir: &Path,
+    input: &Path,
+    extension: &str,
+    seen: &mut Vec<String>,
+) -> PathBuf {
     let stem = input
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("image")
         .to_string();
-    let mut candidate = output_dir.join(format!("{stem}.tiff"));
+    let mut candidate = output_dir.join(format!("{stem}.{extension}"));
     let mut counter = 1usize;
     while seen.contains(&candidate.to_string_lossy().into_owned()) {
-        candidate = output_dir.join(format!("{stem}-{counter}.tiff"));
+        candidate = output_dir.join(format!("{stem}-{counter}.{extension}"));
         counter += 1;
     }
     seen.push(candidate.to_string_lossy().into_owned());
@@ -208,7 +216,7 @@ where
                 };
                 let output = {
                     let mut lock = seen.lock().expect("output name lock poisoned");
-                    unique_output_path(&options.output, input, &mut lock)
+                    unique_output_path(&options.output, input, options.output_extension, &mut lock)
                 };
                 if let Some(cb) = &progress {
                     cb(input, index, inputs.len());
@@ -313,8 +321,8 @@ mod tests {
     fn duplicate_names_get_colliding_suffixes() {
         let out = temp_dir("names");
         let mut seen: Vec<String> = Vec::new();
-        let p1 = unique_output_path(&out, Path::new("a/cr-0001.dng"), &mut seen);
-        let p2 = unique_output_path(&out, Path::new("b/cr-0001.dng"), &mut seen);
+        let p1 = unique_output_path(&out, Path::new("a/cr-0001.dng"), "tiff", &mut seen);
+        let p2 = unique_output_path(&out, Path::new("b/cr-0001.dng"), "tiff", &mut seen);
         assert_eq!(p1.file_name().unwrap(), "cr-0001.tiff");
         assert_eq!(p2.file_name().unwrap(), "cr-0001-1.tiff");
         let _ = fs::remove_dir_all(&out);

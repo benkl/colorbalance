@@ -80,6 +80,15 @@ colorbalance apply studio.cbprofile.json ./shoot -o ./balanced --summary summary
 # Write Display P3 or Adobe RGB (1998) TIFFs instead of sRGB
 colorbalance apply studio.cbprofile.json ./shoot -o ./balanced --output-space display-p3
 
+# Write 8-bit JPEG in Display P3 at quality 95 with 4:4:4 chroma (defaults)
+colorbalance apply studio.cbprofile.json ./shoot -o ./balanced \
+  --format jpeg --output-space display-p3
+
+# Smaller JPEGs; omit GPS and opt in to XMP/IPTC copying
+colorbalance apply studio.cbprofile.json ./shoot -o ./balanced \
+  --format jpeg --jpeg-quality 85 --jpeg-subsampling 420 \
+  --strip-gps --copy-xmp-iptc --summary summary.json
+
 # Apply with parallel workers and explicit overwrite
 colorbalance apply studio.cbprofile.json ./shoot -o ./balanced \
   --workers 4 --overwrite --summary summary.json
@@ -93,7 +102,7 @@ colorbalance export studio.cbprofile.json --format cube --size 33 -o studio.cube
 
 ### Output color spaces
 
-`apply` writes sRGB by default. `--output-space display-p3` or `--output-space adobe-rgb` writes the corrected image in that space instead, and the TIFF embeds a matching ICC profile. Every TIFF now carries an ICC profile, sRGB included.
+`apply` writes 16-bit sRGB TIFF by default. `--format jpeg` writes 8-bit `.jpg` files instead. Either format accepts `--output-space display-p3` or `--output-space adobe-rgb`; the output embeds a matching ICC profile. TIFF remains the lossless 16-bit master.
 
 - The fitted transform still produces linear Rec.709. OpenColorIO converts that to the target (`Linear Rec.709 (sRGB)` to `sRGB Encoded P3-D65` or `Gamma 2.2 Encoded AdobeRGB` in config `cg-config-v4.0.0_aces-v2.0_ocio-v2.5`). The color is not clipped to sRGB first, so a saturated color that sRGB would clip can survive in P3 or Adobe RGB. Clipping happens in the target space, and the clipped-pixel count refers to that space.
 - Adobe RGB uses the 2.19921875 exponent from the specification, which is not the same curve as plain gamma 2.2.
@@ -101,7 +110,15 @@ colorbalance export studio.cbprofile.json --format cube --size 33 -o studio.cube
 - The batch summary records `output-space`. For non-sRGB output it also records `ocio-config` and `ocio-version`. They are `null` for sRGB, which does not use OCIO.
 - An unknown name fails before any file is touched.
 - CLF and `.cube` exports are unaffected. They still take normalized linear camera RGB from this tool's decode contract.
-- In the desktop app, the **TIFF color space** selector on the Export tab applies to saved single images and batches. The on-screen before and after previews are always sRGB.
+- In the desktop app, the output color-space selector applies to saved single images and batches. The on-screen before and after previews are always sRGB.
+
+### JPEG and capture metadata
+
+JPEG uses the same color-space conversion and target-space clipping as TIFF, then rounds the samples to 8 bits. Its default quality is 95 with 4:4:4 chroma subsampling; use `--jpeg-quality 1..100` and `--jpeg-subsampling 444|422|420` to trade color-edge fidelity for size. JPEG dimensions cannot exceed 65,535 pixels per side.
+
+Both export formats carry a reviewed selection of available source metadata: camera make/model, lens, capture time, exposure, ISO, focal length, GPS, artist and copyright. `--strip-gps` drops coordinates. `--copy-xmp-iptc` additionally copies XMP and IPTC where the source and output container support them. No metadata is an ordinary case: export still succeeds, and the batch summary records what was copied or skipped for each image.
+
+The output pixels are already upright. Original Orientation, embedded thumbnails, ColorSpace, white-balance settings and maker notes are not copied: those describe the old RAW or could point at stale data. A JPEG-to-JPEG batch never replaces an input at the same path, even with `--overwrite`. Existing destination files are skipped unless overwrite is explicit; completed outputs survive a later file failure.
 
 ### Finding the chart in the desktop app
 

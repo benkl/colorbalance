@@ -2,7 +2,7 @@ import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 import { logger } from './logger.ts';
-import type { BatchSummary, ChartQuad, ChartRevision, CorrectResult, DeriveResult, DetectResult, InspectResult, LoadedReference, OutputSpace } from './types';
+import type { BatchSummary, ChartQuad, ChartRevision, CorrectResult, DeriveResult, DetectResult, ExportOptions, InspectResult, LoadedReference } from './types';
 type NativeLoadedReference = Omit<LoadedReference, 'previewUrl'> & { previewPath: string };
 type NativeInspectResult = Omit<InspectResult, 'previewUrl'> & { previewPath?: string };
 type NativeCorrectResult = Omit<CorrectResult, 'beforeUrl' | 'afterUrl'> & { beforePath: string; afterPath: string };
@@ -47,8 +47,8 @@ export interface BackendBridge {
   detectChart(path: string): Promise<DetectResult>;
   inspectReference(path: string, revision: ChartRevision, quad?: ChartQuad): Promise<InspectResult>;
   deriveProfile(path: string, revision: ChartRevision, profilePath: string, reportPath?: string, quad?: ChartQuad): Promise<DeriveResult>;
-  correctImage(profilePath: string, inputPath: string, outputPath?: string, overwrite?: boolean, outputSpace?: OutputSpace): Promise<CorrectResult>;
-  applyBatch(profilePath: string, inputPath: string, outputPath: string, overwrite?: boolean, outputSpace?: OutputSpace): Promise<BatchSummary>;
+  correctImage(profilePath: string, inputPath: string, outputPath: string | undefined, options: ExportOptions): Promise<CorrectResult>;
+  applyBatch(profilePath: string, inputPath: string, outputPath: string, options: ExportOptions): Promise<BatchSummary>;
   cancelBatch(): Promise<void>;
   exportProfile(profilePath: string, format: 'clf' | 'cube', outputPath: string, size?: number): Promise<string>;
 }
@@ -98,15 +98,14 @@ export const backend: BackendBridge = {
       throw err;
     }
   },
-  correctImage: async (profilePath, inputPath, outputPath, overwrite, outputSpace = 'srgb') => {
+  correctImage: async (profilePath, inputPath, outputPath, options) => {
     logger.ipc('IPC', `Invoking correct_image: "${inputPath}"${outputPath ? ` -> "${outputPath}"` : ' (preview only)'}`);
     try {
       const { beforePath, afterPath, ...result } = await invoke<NativeCorrectResult>('correct_image', {
         profilePath,
         inputPath,
         outputPath,
-        overwrite: Boolean(overwrite),
-        outputSpace,
+        exportOptions: options,
       });
       logger.success('IPC', `correct_image complete${result.outputPath ? `: wrote "${result.outputPath}"` : ''}`);
       return { ...result, beforeUrl: assetUrl(beforePath), afterUrl: assetUrl(afterPath) };
@@ -115,15 +114,14 @@ export const backend: BackendBridge = {
       throw err;
     }
   },
-  applyBatch: async (profilePath, inputPath, outputPath, overwrite, outputSpace = 'srgb') => {
+  applyBatch: async (profilePath, inputPath, outputPath, options) => {
     logger.ipc('IPC', `Invoking apply_batch: "${inputPath}" -> "${outputPath}"`);
     try {
       const result = await invoke<BatchSummary>('apply_batch', {
         profilePath,
         inputPath,
         outputPath,
-        overwrite,
-        outputSpace,
+        exportOptions: options,
       });
       logger.success('IPC', `apply_batch complete: ${result.succeeded.length} succeeded, ${result.skipped.length} skipped, ${result.failed.length} failed`);
       for (const failure of result.failed) {

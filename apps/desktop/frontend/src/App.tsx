@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { OUTPUT_SPACES } from './types';
-import type { ChartQuad, ChartRevision, CorrectResult, DeriveResult, BatchSummary, InspectResult, OutputSpace } from './types';
+import { DEFAULT_EXPORT_OPTIONS, JPEG_SAMPLINGS, OUTPUT_SPACES } from './types';
+import type { ChartQuad, ChartRevision, CorrectResult, DeriveResult, BatchSummary, ExportFormat, ExportOptions, InspectResult, JpegSampling, MetadataSummary, OutputSpace } from './types';
 import { backend, releasePreviewUrls, chooseDirectory, chooseImage, chooseSavePath, listenForBatchProgress, listenForFileDrop, listenForFileDropHover, listenForOperationProgress } from './tauri';
 import type { BatchProgress, OperationProgress } from './tauri';
 import { referenceFromDrop } from './interaction';
@@ -30,6 +30,15 @@ const decodePreview = async (url: string): Promise<void> => {
   image.src = url;
   await image.decode();
 };
+
+const MetadataLines: React.FC<{ metadata: MetadataSummary }> = ({ metadata }) => (
+  <div className="text-[9px] space-y-0.5" data-testid="metadata-summary">
+    <div className="text-[var(--bb-sand)] break-words">Metadata copied: {metadata.copied.length > 0 ? metadata.copied.join(', ') : 'none'}</div>
+    {metadata.skipped.length > 0 && (
+      <div className="text-[var(--bb-orange)] break-words">Metadata skipped: {metadata.skipped.join(', ')}</div>
+    )}
+  </div>
+);
 
 
 const TABS: { id: Tab; label: string; icon: typeof Layers }[] = [
@@ -96,7 +105,16 @@ export const App: React.FC = () => {
   const [batchInputPath, setBatchInputPath] = useState<string>('');
   const [batchOutputPath, setBatchOutputPath] = useState<string>('');
   const [overwriteOutputs, setOverwriteOutputs] = useState<boolean>(false);
-  const [outputSpace, setOutputSpace] = useState<OutputSpace>('srgb');
+  const [exportSettings, setExportSettings] = useState<Omit<ExportOptions, 'overwrite'>>({
+    space: DEFAULT_EXPORT_OPTIONS.space,
+    format: DEFAULT_EXPORT_OPTIONS.format,
+    quality: DEFAULT_EXPORT_OPTIONS.quality,
+    sampling: DEFAULT_EXPORT_OPTIONS.sampling,
+    includeXmpIptc: DEFAULT_EXPORT_OPTIONS.includeXmpIptc,
+    stripGps: DEFAULT_EXPORT_OPTIONS.stripGps,
+  });
+  const updateExport = (patch: Partial<Omit<ExportOptions, 'overwrite'>>) =>
+    setExportSettings((current) => ({ ...current, ...patch }));
   const [batchSummary, setBatchSummary] = useState<BatchSummary | null>(null);
   const [batchProgress, setBatchProgress] = useState<BatchProgress | null>(null);
   const [operationProgress, setOperationProgress] = useState<OperationProgress | null>(null);
@@ -461,7 +479,7 @@ export const App: React.FC = () => {
 
   /**
    * Correct one image with the derived profile and show before/after.
-   * With `save` the full-resolution TIFF is also written; the native save
+   * With `save` the full-resolution image is also written; the native save
    * dialog has already asked about replacing an existing file.
    */
   const runCorrect = async (input: string, save: boolean) => {
@@ -475,11 +493,12 @@ export const App: React.FC = () => {
       let output: string | undefined;
       if (save) {
         const name = (input.split(/[\\/]/).pop() ?? 'image').replace(/\.[^.]+$/, '');
-        const chosen = await chooseSavePath(`${name}_corrected.tiff`, 'tiff');
+        const extension = exportSettings.format === 'jpeg' ? 'jpg' : 'tiff';
+        const chosen = await chooseSavePath(`${name}_corrected.${extension}`, extension);
         if (!chosen) return;
         output = chosen;
       }
-      const result = await backend.correctImage(deriveResult.profilePath, input, output, true, outputSpace);
+      const result = await backend.correctImage(deriveResult.profilePath, input, output, { ...exportSettings, overwrite: true });
       try {
         await Promise.all([decodePreview(result.beforeUrl), decodePreview(result.afterUrl)]);
       } catch (error) {
@@ -530,8 +549,7 @@ export const App: React.FC = () => {
           deriveResult.profilePath,
           batchInputPath,
           batchOutputPath,
-          overwriteOutputs,
-          outputSpace,
+          { ...exportSettings, overwrite: overwriteOutputs },
         );
         setBatchSummary(result);
       } catch (error: unknown) {
@@ -850,25 +868,84 @@ export const App: React.FC = () => {
                 </div>
               )}
 
-              <div className="space-y-1 p-2.5 bg-[var(--bb-panel)] border border-[var(--bb-border)]" data-testid="output-space-panel">
-                <label htmlFor="output-space" className="text-[9px] text-[var(--bb-smoke)] font-bold tracking-wider">TIFF COLOR SPACE</label>
+              <div className="space-y-1.5 p-2.5 bg-[var(--bb-panel)] border border-[var(--bb-border)]" data-testid="output-space-panel">
+                <label htmlFor="export-format" className="text-[9px] text-[var(--bb-smoke)] font-bold tracking-wider">FILE FORMAT</label>
+                <select
+                  id="export-format"
+                  value={exportSettings.format}
+                  onChange={(e) => updateExport({ format: e.target.value as ExportFormat })}
+                  className="w-full bg-[var(--bb-vacuum)] border border-[var(--bb-border)] px-2 py-1 text-[11px] text-[var(--bb-sand)] focus:border-[var(--bb-gold)] outline-none"
+                >
+                  <option value="tiff">TIFF, 16-bit</option>
+                  <option value="jpeg">JPEG, 8-bit</option>
+                </select>
+                <label htmlFor="output-space" className="text-[9px] text-[var(--bb-smoke)] font-bold tracking-wider">COLOR SPACE</label>
                 <select
                   id="output-space"
-                  value={outputSpace}
-                  onChange={(e) => setOutputSpace(e.target.value as OutputSpace)}
+                  value={exportSettings.space}
+                  onChange={(e) => updateExport({ space: e.target.value as OutputSpace })}
                   className="w-full bg-[var(--bb-vacuum)] border border-[var(--bb-border)] px-2 py-1 text-[11px] text-[var(--bb-sand)] focus:border-[var(--bb-gold)] outline-none"
                 >
                   {OUTPUT_SPACES.map((space) => (
                     <option key={space.id} value={space.id}>{space.label}</option>
                   ))}
                 </select>
+                {exportSettings.format === 'jpeg' && (
+                  <div className="space-y-1.5" data-testid="jpeg-options">
+                    <label htmlFor="jpeg-quality" className="text-[9px] text-[var(--bb-smoke)] font-bold tracking-wider">JPEG QUALITY (1-100)</label>
+                    <input
+                      id="jpeg-quality"
+                      type="number"
+                      min={1}
+                      max={100}
+                      step={1}
+                      value={exportSettings.quality}
+                      onChange={(e) => {
+                        const value = Math.round(Number(e.target.value));
+                        if (Number.isFinite(value)) updateExport({ quality: Math.min(100, Math.max(1, value)) });
+                      }}
+                      className="w-full bg-[var(--bb-vacuum)] border border-[var(--bb-border)] px-2 py-1 text-[11px] text-[var(--bb-sand)] focus:border-[var(--bb-gold)] outline-none"
+                    />
+                    <label htmlFor="jpeg-sampling" className="text-[9px] text-[var(--bb-smoke)] font-bold tracking-wider">CHROMA SUBSAMPLING</label>
+                    <select
+                      id="jpeg-sampling"
+                      value={exportSettings.sampling}
+                      onChange={(e) => updateExport({ sampling: e.target.value as JpegSampling })}
+                      className="w-full bg-[var(--bb-vacuum)] border border-[var(--bb-border)] px-2 py-1 text-[11px] text-[var(--bb-sand)] focus:border-[var(--bb-gold)] outline-none"
+                    >
+                      {JPEG_SAMPLINGS.map((sampling) => (
+                        <option key={sampling.id} value={sampling.id}>{sampling.label}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={exportSettings.includeXmpIptc}
+                    onChange={(e) => updateExport({ includeXmpIptc: e.target.checked })}
+                    className="accent-[var(--bb-amber)]"
+                  />
+                  <span className="text-[10px] text-[var(--bb-sand)]">Copy XMP and IPTC</span>
+                </label>
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={exportSettings.stripGps}
+                    onChange={(e) => updateExport({ stripGps: e.target.checked })}
+                    className="accent-[var(--bb-amber)]"
+                  />
+                  <span className="text-[10px] text-[var(--bb-sand)]">Strip GPS location</span>
+                </label>
                 <p className="text-[9px] text-[var(--bb-smoke)]">
-                  Applies to saved and batch TIFFs, which embed a matching ICC profile. Previews on screen are always sRGB.
+                  Applies to saved and batch files, which embed a matching ICC profile. Basic camera and capture EXIF is copied. Previews on screen are always sRGB.
                 </p>
               </div>
 
               <div className="space-y-1.5 p-2.5 bg-[var(--bb-panel)] border border-[var(--bb-border)]" data-testid="correct-panel">
-                <div className="text-[9px] text-[var(--bb-smoke)] font-bold tracking-wider">CORRECTED IMAGES (16-BIT TIFF)</div>
+                <div className="text-[9px] text-[var(--bb-smoke)] font-bold tracking-wider">
+                  CORRECTED IMAGES ({exportSettings.format === 'jpeg' ? '8-BIT JPEG' : '16-BIT TIFF'})
+                </div>
                 <button
                   type="button"
                   onClick={() => runCorrect(referencePath, true)}
@@ -890,6 +967,7 @@ export const App: React.FC = () => {
                 {compare && (
                   <div className="text-[10px] space-y-0.5" data-testid="correct-result">
                     {compare.outputPath && <div className="text-[var(--bb-gold)] break-all">✓ SAVED {compare.outputPath}</div>}
+                    {compare.metadata && <MetadataLines metadata={compare.metadata} />}
                     {compare.warnings.map((w, i) => (
                       <div key={i} className="text-[var(--bb-orange)]">⚠ {w}</div>
                     ))}
@@ -931,7 +1009,7 @@ export const App: React.FC = () => {
                     BATCH
                   </h3>
                   <p className="text-[10px] text-[var(--bb-smoke)]">
-                    Select matching image folders for batch correction and 16-bit TIFF export.
+                    Select matching image folders for batch correction. Files are written with the format and metadata options above.
                   </p>
                 </div>
 
@@ -1092,6 +1170,16 @@ export const App: React.FC = () => {
                           ))}
                         </ul>
                       </div>
+                    )}
+                    {batchSummary.metadata.length > 0 && (
+                      <ul className="space-y-1 text-[9px] text-[var(--bb-sand)] max-h-40 overflow-y-auto" data-testid="batch-metadata">
+                        {batchSummary.metadata.map((item) => (
+                          <li key={item.file}>
+                            <span className="text-[var(--bb-gold)] break-all">{item.file}</span>
+                            <MetadataLines metadata={item} />
+                          </li>
+                        ))}
+                      </ul>
                     )}
                   </div>
                 )}

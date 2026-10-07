@@ -18,6 +18,7 @@ sha2 = { workspace = true }
 thiserror = { workspace = true }
 ocio = { workspace = true }
 moxcms = { workspace = true }
+jpeg-encoder = { workspace = true }
 
 [lints.rust]
 unsafe_code = "forbid"

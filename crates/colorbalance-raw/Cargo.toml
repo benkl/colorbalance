@@ -12,6 +12,8 @@ fast_image_resize = "6.1.0"
 rayon = { workspace = true }
 image = { workspace = true }
 rawler = "=0.8.0"
+kamadak-exif = { workspace = true }
+flate2 = "1.1"
 thiserror = { workspace = true }
 
 [lints.rust]

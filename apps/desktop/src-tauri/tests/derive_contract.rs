@@ -3,11 +3,11 @@
 //! field fails here instead of surfacing as `undefined.toFixed` in the window.
 
 use colorbalance_core::output_space::OutputSpace;
-use colorbalance_desktop::commands::TiffExport;
 use colorbalance_desktop::commands::{
     correct_image, correct_image_cached, derive_profile, load_reference, load_reference_cached,
     no_progress,
 };
+use colorbalance_desktop::commands::{ExportOptions, ImageExport};
 use colorbalance_desktop::preview_files::PreviewFiles;
 use colorbalance_desktop::reference_cache::{ReferenceCache, DEFAULT_LIMIT_BYTES};
 use colorbalance_fixtures::{render_chart_dng, ChartScene};
@@ -190,10 +190,12 @@ fn correct_image_returns_previews_writes_a_tiff_and_protects_existing_output() {
             &previews,
             profile_path.to_string_lossy().into_owned(),
             reference.to_string_lossy().into_owned(),
-            Some(TiffExport {
+            Some(ImageExport {
                 path: output.to_string_lossy().into_owned(),
-                overwrite,
-                space: OutputSpace::Srgb,
+                options: ExportOptions {
+                    overwrite,
+                    ..Default::default()
+                },
             }),
             &no_progress,
         )
@@ -256,10 +258,12 @@ fn correct_image_refuses_a_camera_mismatch_without_writing_anything() {
         &previews,
         profile_path.to_string_lossy().into_owned(),
         reference.to_string_lossy().into_owned(),
-        Some(TiffExport {
+        Some(ImageExport {
             path: output.to_string_lossy().into_owned(),
-            overwrite: true,
-            space: OutputSpace::Srgb,
+            options: ExportOptions {
+                overwrite: true,
+                ..Default::default()
+            },
         }),
         &no_progress,
     )
@@ -299,10 +303,9 @@ fn failed_correction_removes_its_new_before_preview_and_keeps_a_prior_one() {
             previews,
             profile.clone(),
             input.clone(),
-            Some(TiffExport {
+            Some(ImageExport {
                 path: bad_output.to_string_lossy().into_owned(),
-                overwrite: false,
-                space: OutputSpace::Srgb,
+                options: ExportOptions::default(),
             }),
             &no_progress,
         )
@@ -374,10 +377,9 @@ fn derive_and_correct_report_their_stages_in_order() {
         &previews,
         profile_path.to_string_lossy().into_owned(),
         reference.to_string_lossy().into_owned(),
-        Some(TiffExport {
+        Some(ImageExport {
             path: work.join("out.tiff").to_string_lossy().into_owned(),
-            overwrite: false,
-            space: OutputSpace::Srgb,
+            options: ExportOptions::default(),
         }),
         &|stage, step, steps| {
             correct_stages
@@ -424,8 +426,7 @@ fn batch_progress_counts_finished_files_and_reaches_the_total() {
         profile_path.to_string_lossy().into_owned(),
         input.to_string_lossy().into_owned(),
         output.to_string_lossy().into_owned(),
-        false,
-        OutputSpace::Srgb,
+        ExportOptions::default(),
         Default::default(),
         Arc::new(move |completed, total, file| {
             sink.lock()
@@ -476,10 +477,12 @@ fn correct_image_embeds_the_icc_profile_of_the_chosen_output_space() {
             &previews,
             profile_path.to_string_lossy().into_owned(),
             reference.to_string_lossy().into_owned(),
-            Some(TiffExport {
+            Some(ImageExport {
                 path: output.to_string_lossy().into_owned(),
-                overwrite: false,
-                space,
+                options: ExportOptions {
+                    space,
+                    ..Default::default()
+                },
             }),
             &no_progress,
         )
@@ -511,4 +514,58 @@ fn correct_image_embeds_the_icc_profile_of_the_chosen_output_space() {
         tiffs[0], tiffs[1],
         "the pixels were converted, not relabeled"
     );
+}
+
+#[test]
+fn jpeg_export_writes_a_jpeg_and_reports_metadata() {
+    use colorbalance_desktop::commands::ExportFormat;
+
+    let work = temp_dir("jpeg-export");
+    let (reference, profile_path) = derive_clean_profile(&work);
+    let previews = PreviewFiles::default();
+    let output = work.join("out.jpg");
+    let stages = std::cell::RefCell::new(Vec::<String>::new());
+    let response = correct_image(
+        &previews,
+        profile_path.to_string_lossy().into_owned(),
+        reference.to_string_lossy().into_owned(),
+        Some(ImageExport {
+            path: output.to_string_lossy().into_owned(),
+            options: ExportOptions {
+                format: ExportFormat::Jpeg,
+                quality: 90,
+                ..Default::default()
+            },
+        }),
+        &|stage, _, _| stages.borrow_mut().push(stage.to_owned()),
+    )
+    .expect("writes the JPEG");
+    let bytes = std::fs::read(&output).unwrap();
+    assert_eq!(&bytes[..2], [0xFF, 0xD8], "JPEG SOI marker");
+    assert!(stages
+        .borrow()
+        .iter()
+        .any(|stage| stage == "Writing 8-bit JPEG"));
+    let json = serde_json::to_value(&response).unwrap();
+    assert!(json["metadata"]["copied"].is_array(), "{json}");
+    assert!(json["metadata"]["skipped"].is_array(), "{json}");
+    assert_eq!(leftover_temp_files(&work), 0);
+
+    // The input is never a valid output, even when overwriting is allowed.
+    let error = correct_image(
+        &previews,
+        profile_path.to_string_lossy().into_owned(),
+        reference.to_string_lossy().into_owned(),
+        Some(ImageExport {
+            path: reference.to_string_lossy().into_owned(),
+            options: ExportOptions {
+                overwrite: true,
+                ..Default::default()
+            },
+        }),
+        &no_progress,
+    )
+    .expect_err("refuses to overwrite its input");
+    assert!(error.to_string().contains("input"), "{error}");
+    let _ = std::fs::remove_dir_all(work);
 }

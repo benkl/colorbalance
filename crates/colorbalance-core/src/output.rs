@@ -1,119 +1,220 @@
-//! Deterministic RGB TIFF output.
+//! Deterministic RGB TIFF and JPEG output.
 //!
-//! The encoder writes classic little-endian TIFF with one uncompressed RGB
-//! strip and an embedded ICC profile (tag 34675). It has no
-//! platform-dependent metadata, timestamps, or compression, so identical
-//! inputs produce identical bytes.
+//! Both formats embed ICC and rebuilt, reviewed metadata. TIFF retains 16-bit
+//! samples; JPEG rounds output-space samples to 8-bit before YCbCr conversion.
+use std::fmt;
+use std::str::FromStr;
 
-/// TIFF tag number of the embedded ICC profile.
-const TAG_ICC_PROFILE: u16 = 34675;
+use crate::metadata::ExportMetadata;
+use jpeg_encoder::{rgb_to_ycbcr, Encoder, ImageBuffer, JpegColorType, SamplingFactor};
+use serde::{Deserialize, Serialize};
 
-/// Encode interleaved RGB `u16` pixels as a baseline little-endian TIFF.
-///
-/// Pixels are written in row-major order, with each pixel represented by
-/// three little-endian 16-bit samples. The file has one strip,
-/// `PhotometricInterpretation=RGB`, `BitsPerSample=[16,16,16]`,
-/// `SamplesPerPixel=3`, and no extra samples. `icc_profile` is stored
-/// verbatim in tag 34675 so viewers interpret the samples in the space they
-/// were encoded for.
+pub const JPEG_MAX_DIMENSION: u32 = u16::MAX as u32;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum JpegSampling {
+    #[default]
+    #[serde(rename = "444")]
+    Yuv444,
+    #[serde(rename = "422")]
+    Yuv422,
+    #[serde(rename = "420")]
+    Yuv420,
+}
+
+impl fmt::Display for JpegSampling {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Yuv444 => "4:4:4",
+            Self::Yuv422 => "4:2:2",
+            Self::Yuv420 => "4:2:0",
+        })
+    }
+}
+
+impl FromStr for JpegSampling {
+    type Err = &'static str;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "444" | "4:4:4" => Ok(Self::Yuv444),
+            "422" | "4:2:2" => Ok(Self::Yuv422),
+            "420" | "4:2:0" => Ok(Self::Yuv420),
+            _ => Err("expected 444, 422, or 420"),
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum OutputError {
+    #[error("output dimensions must be nonzero")]
+    ZeroDimensions,
+    #[error("pixel count must equal width * height * 3")]
+    PixelCount,
+    #[error("JPEG width and height must not exceed 65535")]
+    JpegDimensions,
+    #[error("JPEG quality must be between 1 and 100")]
+    InvalidQuality,
+    #[error("ICC profile must not be empty")]
+    EmptyIcc,
+    #[error("output or metadata exceeds format limits")]
+    TooLarge,
+    #[error("JPEG encoding failed: {0}")]
+    Jpeg(String),
+}
+
+fn validate(width: u32, height: u32, pixels: &[u16], icc: &[u8]) -> Result<(), OutputError> {
+    if width == 0 || height == 0 {
+        return Err(OutputError::ZeroDimensions);
+    }
+    if icc.is_empty() {
+        return Err(OutputError::EmptyIcc);
+    }
+    if (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|v| v.checked_mul(3))
+        != Some(pixels.len())
+    {
+        return Err(OutputError::PixelCount);
+    }
+    Ok(())
+}
+
+/// Rebuild all directories from reviewed values; source offsets are never copied.
+pub fn encode_tiff_rgb_u16_with_metadata(
+    width: u32,
+    height: u32,
+    pixels: &[u16],
+    icc_profile: &[u8],
+    metadata: &ExportMetadata,
+) -> Result<Vec<u8>, OutputError> {
+    validate(width, height, pixels, icc_profile)?;
+    crate::output_metadata::serialize(metadata, Some((width, height, pixels, icc_profile)), true)
+}
+
+struct Rgb16Image<'a> {
+    pixels: &'a [u16],
+    width: u16,
+    height: u16,
+}
+
+impl ImageBuffer for Rgb16Image<'_> {
+    fn get_jpeg_color_type(&self) -> JpegColorType {
+        JpegColorType::Ycbcr
+    }
+    fn width(&self) -> u16 {
+        self.width
+    }
+    fn height(&self) -> u16 {
+        self.height
+    }
+    fn fill_buffers(&self, y: u16, buffers: &mut [Vec<u8>; 4]) {
+        let row = (y as usize) * (self.width as usize) * 3;
+        let (triples, _) = self.pixels[row..row + self.width as usize * 3].as_chunks::<3>();
+        for rgb in triples {
+            let (l, cb, cr) = rgb_to_ycbcr(
+                ((rgb[0] as u32 + 128) / 257) as u8,
+                ((rgb[1] as u32 + 128) / 257) as u8,
+                ((rgb[2] as u32 + 128) / 257) as u8,
+            );
+            buffers[0].push(l);
+            buffers[1].push(cb);
+            buffers[2].push(cr);
+        }
+    }
+}
+
+/// Encode 8-bit JPEG from the output-space RGB u16 samples, with ICC and reviewed metadata.
+pub fn encode_jpeg_rgb_u16(
+    width: u32,
+    height: u32,
+    pixels: &[u16],
+    icc_profile: &[u8],
+    quality: u8,
+    sampling: JpegSampling,
+    metadata: &ExportMetadata,
+) -> Result<Vec<u8>, OutputError> {
+    if width > JPEG_MAX_DIMENSION || height > JPEG_MAX_DIMENSION {
+        return Err(OutputError::JpegDimensions);
+    }
+    validate(width, height, pixels, icc_profile)?;
+    if !(1..=100).contains(&quality) {
+        return Err(OutputError::InvalidQuality);
+    }
+    let mut bytes = Vec::new();
+    let mut encoder = Encoder::new(&mut bytes, quality);
+    encoder.set_sampling_factor(match sampling {
+        JpegSampling::Yuv444 => SamplingFactor::R_4_4_4,
+        JpegSampling::Yuv422 => SamplingFactor::R_4_2_2,
+        JpegSampling::Yuv420 => SamplingFactor::R_4_2_0,
+    });
+    encoder
+        .add_icc_profile(icc_profile)
+        .map_err(|e| OutputError::Jpeg(e.to_string()))?;
+    if !metadata.exif.is_empty() {
+        // The source reader enforces the APP1 budget. Caller-created oversized metadata is optional.
+        if let Ok(exif) = crate::output_metadata::serialize(metadata, None, false) {
+            if exif.len() <= 65527 {
+                encoder
+                    .add_exif_metadata(&exif)
+                    .map_err(|e| OutputError::Jpeg(e.to_string()))?;
+            }
+        }
+    }
+    if let Some(xmp) = &metadata.xmp {
+        const PREFIX: &[u8] = b"http://ns.adobe.com/xap/1.0/\0";
+        if xmp.len() <= 65533 - PREFIX.len() {
+            let mut segment = Vec::with_capacity(PREFIX.len() + xmp.len());
+            segment.extend_from_slice(PREFIX);
+            segment.extend_from_slice(xmp);
+            encoder
+                .add_app_segment(1, segment)
+                .map_err(|e| OutputError::Jpeg(e.to_string()))?;
+        }
+    }
+    if let Some(iptc) = &metadata.iptc {
+        // Photoshop 3.0 APP13, 8BIM resource 0x0404 (IPTC-NAA).
+        const HEADER: &[u8] = b"Photoshop 3.0\0";
+        if iptc.len() <= 65533 - HEADER.len() - 12 && iptc.len() <= u32::MAX as usize {
+            let mut segment = Vec::with_capacity(HEADER.len() + 12 + iptc.len());
+            segment.extend_from_slice(HEADER);
+            segment.extend_from_slice(b"8BIM\x04\x04\0\0");
+            segment.extend_from_slice(&(iptc.len() as u32).to_be_bytes());
+            segment.extend_from_slice(iptc);
+            if iptc.len() & 1 != 0 {
+                segment.push(0);
+            }
+            if segment.len() <= 65533 {
+                encoder
+                    .add_app_segment(13, segment)
+                    .map_err(|e| OutputError::Jpeg(e.to_string()))?;
+            }
+        }
+    }
+    encoder
+        .encode_image(Rgb16Image {
+            pixels,
+            width: width as u16,
+            height: height as u16,
+        })
+        .map_err(|e| OutputError::Jpeg(e.to_string()))?;
+    Ok(bytes)
+}
+
+/// Encode TIFF without source metadata. Retained for callers using the original API.
 ///
 /// # Panics
 ///
-/// Panics if either dimension is zero, `icc_profile` is empty, `pixels` does
-/// not contain exactly `width * height * 3` samples, or the file offsets
-/// cannot be stored in a classic TIFF `LONG` field.
+/// Panics on invalid dimensions, pixels, ICC, or classic TIFF size limits.
 pub fn encode_tiff_rgb_u16(width: u32, height: u32, pixels: &[u16], icc_profile: &[u8]) -> Vec<u8> {
-    assert!(width != 0 && height != 0, "TIFF dimensions must be nonzero");
     assert!(!icc_profile.is_empty(), "ICC profile must not be empty");
-    let expected_samples = (width as usize)
-        .checked_mul(height as usize)
-        .and_then(|count| count.checked_mul(3))
-        .expect("TIFF dimensions exceed addressable memory");
-    assert_eq!(
-        pixels.len(),
-        expected_samples,
-        "pixel count must equal width * height * 3"
-    );
-    // Header (8) + IFD count (2) + eleven 12-byte entries + next-IFD offset (4).
-    const IFD_OFFSET: u32 = 8;
-    const TAG_COUNT: u16 = 11;
-    const IFD_BYTES: u32 = 2 + (TAG_COUNT as u32) * 12 + 4;
-    const BITS_PER_SAMPLE_OFFSET: u32 = IFD_OFFSET + IFD_BYTES;
-    const BITS_PER_SAMPLE_BYTES: u32 = 6;
-    let icc_offset = BITS_PER_SAMPLE_OFFSET + BITS_PER_SAMPLE_BYTES;
-    let icc_len = u32::try_from(icc_profile.len()).expect("ICC profile exceeds classic TIFF LONG");
-    // TIFF values start on word boundaries.
-    let icc_padded = icc_len
-        .checked_add(icc_len & 1)
-        .expect("ICC profile exceeds classic TIFF LONG");
-    let strip_offset = icc_offset
-        .checked_add(icc_padded)
-        .expect("TIFF file size exceeds classic TIFF LONG");
-    let pixel_byte_count = pixels
-        .len()
-        .checked_mul(2)
-        .expect("TIFF pixel byte count exceeds addressable memory");
-    let strip_byte_count =
-        u32::try_from(pixel_byte_count).expect("TIFF pixel byte count exceeds classic TIFF LONG");
-    let capacity = (strip_offset as usize)
-        .checked_add(pixel_byte_count)
-        .expect("TIFF file size exceeds addressable memory");
-    let mut bytes = Vec::with_capacity(capacity);
-    bytes.extend_from_slice(b"II");
-    put_u16(&mut bytes, 42);
-    put_u32(&mut bytes, IFD_OFFSET);
-
-    put_u16(&mut bytes, TAG_COUNT);
-    // Entries are sorted by tag number, as required by classic TIFF.
-    put_entry(&mut bytes, 256, 4, 1, width);
-    put_entry(&mut bytes, 257, 4, 1, height);
-    put_entry(&mut bytes, 258, 3, 3, BITS_PER_SAMPLE_OFFSET);
-    put_entry(&mut bytes, 259, 3, 1, 1);
-    put_entry(&mut bytes, 262, 3, 1, 2);
-    put_entry(&mut bytes, 273, 4, 1, strip_offset);
-    put_entry(&mut bytes, 277, 3, 1, 3);
-    put_entry(&mut bytes, 278, 4, 1, height);
-    put_entry(&mut bytes, 279, 4, 1, strip_byte_count);
-    put_entry(&mut bytes, 284, 3, 1, 1);
-    put_entry(&mut bytes, TAG_ICC_PROFILE, 7, icc_len, icc_offset);
-    // No following IFD.
-    put_u32(&mut bytes, 0);
-
-    put_u16(&mut bytes, 16);
-    put_u16(&mut bytes, 16);
-    put_u16(&mut bytes, 16);
-    bytes.extend_from_slice(icc_profile);
-    if icc_len & 1 == 1 {
-        bytes.push(0);
-    }
-    for &sample in pixels {
-        put_u16(&mut bytes, sample);
-    }
-    bytes
-}
-
-/// Append one classic TIFF IFD entry. `value` is either an inline scalar or
-/// an offset, depending on the entry's type and count.
-fn put_entry(bytes: &mut Vec<u8>, tag: u16, field_type: u16, count: u32, value: u32) {
-    put_u16(bytes, tag);
-    put_u16(bytes, field_type);
-    put_u32(bytes, count);
-    match (field_type, count) {
-        // A SHORT scalar occupies the first two bytes of the value field.
-        (3, 1) => {
-            put_u16(bytes, value as u16);
-            put_u16(bytes, 0);
-        }
-        _ => put_u32(bytes, value),
-    }
-}
-
-fn put_u16(bytes: &mut Vec<u8>, value: u16) {
-    bytes.extend_from_slice(&value.to_le_bytes());
-}
-
-fn put_u32(bytes: &mut Vec<u8>, value: u32) {
-    bytes.extend_from_slice(&value.to_le_bytes());
+    encode_tiff_rgb_u16_with_metadata(
+        width,
+        height,
+        pixels,
+        icc_profile,
+        &ExportMetadata::default(),
+    )
+    .expect("TIFF dimensions, pixels, or classic TIFF file size invalid")
 }
 
 #[cfg(test)]
@@ -219,8 +320,13 @@ mod tests {
                 }
                 34675 => {
                     assert_eq!(field_type, 7);
-                    let at = read_u32(bytes, value) as usize;
-                    icc = Some(&bytes[at..at + item_count as usize]);
+                    let len = item_count as usize;
+                    let at = if len <= 4 {
+                        value
+                    } else {
+                        read_u32(bytes, value) as usize
+                    };
+                    icc = Some(&bytes[at..at + len]);
                 }
                 tag => panic!("unexpected TIFF tag {tag}"),
             }

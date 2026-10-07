@@ -18,7 +18,7 @@ use tauri::{Emitter, State, Window};
 
 use crate::commands::{
     self, BackendError, BatchResponse, CorrectResponse, DeriveResponse, DetectResponse,
-    InspectResponse, LoadedReference, QuadPayload,
+    ExportOptions, InspectResponse, LoadedReference, QuadPayload,
 };
 use crate::AppState;
 
@@ -139,15 +139,6 @@ pub async fn derive_profile(
     .await
 }
 
-fn parse_output_space(
-    name: &str,
-) -> Result<colorbalance_core::output_space::OutputSpace, BackendError> {
-    name.parse()
-        .map_err(|error: colorbalance_core::output_space::OutputSpaceError| {
-            BackendError::Message(error.to_string())
-        })
-}
-
 #[tauri::command]
 pub async fn correct_image(
     window: Window,
@@ -155,17 +146,12 @@ pub async fn correct_image(
     profile_path: String,
     input_path: String,
     output_path: Option<String>,
-    overwrite: bool,
-    output_space: String,
+    export_options: ExportOptions,
 ) -> Result<CorrectResponse, BackendError> {
-    let export = match output_path {
-        Some(path) => Some(commands::TiffExport {
-            path,
-            overwrite,
-            space: parse_output_space(&output_space)?,
-        }),
-        None => None,
-    };
+    let export = output_path.map(|path| commands::ImageExport {
+        path,
+        options: export_options,
+    });
     let cache = state.reference.clone();
     let previews = state.previews.clone();
     background(move || {
@@ -200,10 +186,8 @@ pub async fn apply_batch(
     profile_path: String,
     input_path: String,
     output_path: String,
-    overwrite: bool,
-    output_space: String,
+    export_options: ExportOptions,
 ) -> Result<BatchResponse, BackendError> {
-    let output_space = parse_output_space(&output_space)?;
     let cancellation = state.cancellation.clone();
     background(move || {
         let on_progress =
@@ -221,8 +205,7 @@ pub async fn apply_batch(
             profile_path,
             input_path,
             output_path,
-            overwrite,
-            output_space,
+            export_options,
             cancellation,
             on_progress,
         )

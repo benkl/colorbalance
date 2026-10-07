@@ -28,6 +28,10 @@ thiserror = "2"
 # measured against these versions (see docs/ARCHITECTURE.md D24).
 ocio = "=0.1.0"
 moxcms = { version = "=0.9.1", default-features = false }
+# JPEG export (D25). jpeg-encoder is pure Rust and builds for wasm32, so it lives
+# in core. kamadak-exif only reads source metadata and stays in colorbalance-raw.
+jpeg-encoder = "=0.7.1"
+kamadak-exif = "=0.6.1"
 
 [profile.release]
 lto = "thin"

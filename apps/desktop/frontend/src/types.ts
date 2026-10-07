@@ -1,5 +1,42 @@
-/** Encoded color space of exported TIFFs; the app previews always render sRGB. */
+/** Encoded color space of exported images; the app previews always render sRGB. */
 export type OutputSpace = "srgb" | "display-p3" | "adobe-rgb";
+
+export type ExportFormat = "tiff" | "jpeg";
+export type JpegSampling = "444" | "422" | "420";
+
+export const JPEG_SAMPLINGS: ReadonlyArray<{ id: JpegSampling; label: string }> = [
+  { id: "444", label: "4:4:4 (sharpest color)" },
+  { id: "422", label: "4:2:2" },
+  { id: "420", label: "4:2:0 (smallest)" },
+];
+
+/** Settings shared by single-image and batch export. */
+export interface ExportOptions {
+  overwrite: boolean;
+  space: OutputSpace;
+  format: ExportFormat;
+  /** JPEG quality, 1-100. Ignored for TIFF. */
+  quality: number;
+  sampling: JpegSampling;
+  includeXmpIptc: boolean;
+  stripGps: boolean;
+}
+
+export const DEFAULT_EXPORT_OPTIONS: ExportOptions = {
+  overwrite: false,
+  space: "srgb",
+  format: "tiff",
+  quality: 95,
+  sampling: "444",
+  includeXmpIptc: false,
+  stripGps: false,
+};
+
+/** Source metadata that reached the output, and what was left out. */
+export interface MetadataSummary {
+  copied: string[];
+  skipped: string[];
+}
 
 export const OUTPUT_SPACES: ReadonlyArray<{ id: OutputSpace; label: string }> = [
   { id: "srgb", label: "sRGB" },
@@ -90,8 +127,10 @@ export interface DeriveResult {
 export interface CorrectResult {
   beforeUrl: string;
   afterUrl: string;
-  /** Path of the written TIFF, or null for a preview-only run. */
+  /** Path of the written image, or null for a preview-only run. */
   outputPath: string | null;
+  /** Metadata outcome of the written image, or null for a preview-only run. */
+  metadata: MetadataSummary | null;
   warnings: string[];
 }
 
@@ -106,5 +145,7 @@ export interface BatchSummary {
   skipped: string[];
   failed: Array<{ file: string; error: string }>;
   warnings: BatchWarning[];
+  /** Per-file metadata outcome for every written file. */
+  metadata: Array<MetadataSummary & { file: string }>;
   total: number;
 }

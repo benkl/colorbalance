@@ -74,13 +74,16 @@ test('UI end-to-end: native file drop loads image, enables derive, and completes
     };
   });
 
-  registeredHandlers.set('apply_batch', async () => {
+  const applyBatchCalls = [];
+  registeredHandlers.set('apply_batch', async (args) => {
+    applyBatchCalls.push(args);
     return {
       total: 3,
       succeeded: ['001.jpg', '002.jpg', '003.jpg'],
       skipped: [],
       failed: [],
       warnings: [{ file: '002.jpg', warning: 'decoder version drift: profile built with 1, current 2' }],
+      metadata: ['001.jpg', '002.jpg', '003.jpg'].map((file) => ({ file, copied: ['Exif Make'], skipped: [] })),
     };
   });
 
@@ -138,13 +141,30 @@ test('UI end-to-end: native file drop loads image, enables derive, and completes
   assert.equal(interaction.canProcessBatch(uiState, true), true);
 
   // 6. Execute batch apply
+  const batchOptions = {
+    overwrite: false,
+    space: 'display-p3',
+    format: 'jpeg',
+    quality: 95,
+    sampling: '444',
+    includeXmpIptc: false,
+    stripGps: true,
+  };
   const batchSummary = await tauri.backend.applyBatch(
     derived.profilePath,
     uiState.batchInputPath,
     uiState.batchOutputPath,
-    false,
-    'display-p3',
+    batchOptions,
   );
+  assert.equal(batchSummary.total, 3);
+  assert.equal(batchSummary.metadata.length, 3);
+  assert.deepEqual(batchSummary.metadata[0], { file: '001.jpg', copied: ['Exif Make'], skipped: [] });
+  assert.deepEqual(applyBatchCalls, [{
+    profilePath: derived.profilePath,
+    inputPath: uiState.batchInputPath,
+    outputPath: uiState.batchOutputPath,
+    exportOptions: batchOptions,
+  }]);
   assert.equal(batchSummary.total, 3);
   assert.equal(batchSummary.succeeded.length, 3);
   assert.deepEqual(batchSummary.warnings, [
@@ -190,16 +210,24 @@ test('correct image: IPC carries the output path and returns backend-rendered pr
     },
   };
   const tauri = await import('../src/tauri.ts');
-  const saved = await tauri.backend.correctImage('p.cbprofile.json', 'in.dng', 'out.tiff', false, 'adobe-rgb');
+  const jpegOptions = {
+    overwrite: false,
+    space: 'adobe-rgb',
+    format: 'jpeg',
+    quality: 82,
+    sampling: '420',
+    includeXmpIptc: true,
+    stripGps: true,
+  };
+  const saved = await tauri.backend.correctImage('p.cbprofile.json', 'in.dng', 'out.jpg', jpegOptions);
   assert.deepEqual(calls[0], ['correct_image', {
     profilePath: 'p.cbprofile.json',
     inputPath: 'in.dng',
-    outputPath: 'out.tiff',
-    overwrite: false,
-    outputSpace: 'adobe-rgb',
+    outputPath: 'out.jpg',
+    exportOptions: jpegOptions,
   }]);
-  assert.equal(saved.outputPath, 'out.tiff');
-  const preview = await tauri.backend.correctImage('p.cbprofile.json', 'in.dng');
+  assert.equal(saved.outputPath, 'out.jpg');
+  const preview = await tauri.backend.correctImage('p.cbprofile.json', 'in.dng', undefined, { ...jpegOptions, format: 'tiff' });
   assert.equal(preview.outputPath, null);
   assert.equal(preview.beforeUrl, 'asset:///session/before.png');
   assert.equal(preview.afterUrl, 'asset:///session/after.png');

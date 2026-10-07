@@ -242,6 +242,21 @@ pub fn encode_tiff_rgb_u16(width: u32, height: u32, pixels: &[u16], icc_profile:
 
 Baseline TIFF, little-endian, single strip, uncompressed, PhotometricInterpretation=2 (RGB), BitsPerSample=[16,16,16], SamplesPerPixel=3, plus tag 34675 (InterColorProfile, type UNDEFINED) holding `icc_profile` verbatim; an empty profile panics. Deterministic bytes. Test: decode with a minimal reader in the test (reuse the tag parser you write) and compare pixel data; plus property test that output length matches header strip byte count. A local Python/Pillow check happens in integration (lead).
 
+JPEG and source metadata (D25) extend this output contract. `colorbalance-raw::read_export_metadata(path, include_xmp_iptc, strip_gps)` returns `MetadataRead { metadata: ExportMetadata, report: MetadataReport }`, never aborting an export because metadata is absent. The `ExportMetadata` value holds reviewed EXIF entries and optional XMP/IPTC blocks; core does not parse source files or depend on rawler. The report lists copied and skipped fields for the batch summary. Unreviewed Orientation, thumbnails, ColorSpace, white-balance fields, and maker notes must not survive.
+
+```rust
+pub fn encode_tiff_rgb_u16_with_metadata(
+    width: u32, height: u32, pixels: &[u16], icc_profile: &[u8], metadata: &ExportMetadata,
+) -> Result<Vec<u8>, OutputError>;
+pub fn encode_jpeg_rgb_u16(
+    width: u32, height: u32, pixels: &[u16], icc_profile: &[u8],
+    quality: u8, sampling: JpegSampling, metadata: &ExportMetadata,
+) -> Result<Vec<u8>, OutputError>;
+pub enum JpegSampling { Yuv444, Yuv422, Yuv420 }
+```
+
+The TIFF encoder writes reviewed EXIF as IFD0/Exif/GPS sub-IFDs with offsets relative to the TIFF header. JPEG takes the same output-space `u16` pixels, rounds to 8 bits after target-space clipping, and embeds ICC in APP2 plus EXIF in APP1. The default JPEG quality is 95 and subsampling is 4:4:4; callers may select 4:2:2 or 4:2:0. JPEG bounds dimensions to `u16`. Both formats leave source files untouched.
+
 ## Module `colorbalance-core::output_space` (file `src/output_space.rs`)
 
 Decision D24. `OutputSpace` is `Srgb` (default), `DisplayP3` or `AdobeRgb`, parsed from and printed as `srgb`, `display-p3`, `adobe-rgb`. `OutputConverter::new(space)` builds an OCIO processor from `Linear Rec.709 (sRGB)` to the target in the built-in config `cg-config-v4.0.0_aces-v2.0_ocio-v2.5`. Construction fails with `OutputSpaceError::Ocio` rather than falling back.
