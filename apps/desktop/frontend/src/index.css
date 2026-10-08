@@ -55,27 +55,9 @@
   }
 }
 
-/* Precision Light-Table Grid Matrix */
-.light-table-grid {
-  background-color: var(--bb-vacuum);
-  background-image: 
-    linear-gradient(to right, rgba(77, 43, 23, 0.15) 1px, transparent 1px),
-    linear-gradient(to bottom, rgba(77, 43, 23, 0.15) 1px, transparent 1px),
-    linear-gradient(to right, rgba(235, 100, 21, 0.05) 1px, transparent 1px),
-    linear-gradient(to bottom, rgba(235, 100, 21, 0.05) 1px, transparent 1px);
-  background-size: 16px 16px, 16px 16px, 80px 80px, 80px 80px;
-}
-
 /* Optical Loupe / Crosshair Cursor */
 .cursor-crosshair-custom {
   cursor: crosshair;
-}
-
-/* Scanline Overlay Effect */
-.scanlines-overlay {
-  background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.22) 50%);
-  background-size: 100% 3px;
-  pointer-events: none;
 }
 
 /* Custom Scrollbars */

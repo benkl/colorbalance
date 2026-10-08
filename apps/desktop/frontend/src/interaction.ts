@@ -1,6 +1,6 @@
 import type { LibraryEntryView, LibraryGps } from './types';
 
-export type Tab = 'reference' | 'validate' | 'export' | 'library';
+export type Tab = 'reference' | 'validate' | 'compare' | 'export' | 'library';
 
 export interface InteractionState {
   referencePath: string;

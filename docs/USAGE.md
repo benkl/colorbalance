@@ -151,16 +151,17 @@ The CLI is unchanged. `derive` still refuses a failing chart unless you pass `--
 
 ### Correcting single images and comparing before and after
 
-The desktop app has four tabs: **REFERENCE**, **VALIDATE**, **EXPORT**, and **LIBRARY**. Switch tabs from the header; no panel button moves you to the next one. The viewport follows the active tab:
+The desktop app has five tabs: **REFERENCE**, **VALIDATE**, **COMPARE**, **EXPORT**, and **LIBRARY**. Switch tabs from the header; no panel button moves you to the next one. The viewport follows the active tab:
 
-- **REFERENCE** shows the light table with the chart corners.
-- **VALIDATE** shows a grid of the 24 chart patches in chart order (6 columns by 4 rows). Each cell shows the corrected color above the chart target, with the patch's ΔE00. The bar under the number is that ΔE relative to the worst patch of this fit. It ranks patches and is not a pass or fail band; the quality gates are reported in the sidebar. Click a cell to highlight its row in the sidebar table. The **IMAGE** toggle above the grid switches to the before and after comparison of the reference.
-- **EXPORT** shows what the next write acts on. With no active profile it says so. With a derived profile it shows the before and after of the reference. With a Library profile it shows that entry's card instead: reference thumbnail, label, notes, tags, quality badges, camera, lens, capture time, GPS, ΔE fit, chart revision, decoder, profile digest and path, plus the camera-mismatch notice when it applies. No preview is rendered for a Library profile, because its reference may come from another camera. After "Apply & save image" it shows that image, captioned with its source file and saved path. While a batch runs, and after it ends, it shows a progress bar and one row per file: written, skipped, or failed, with any warning or error.
+- **REFERENCE** shows the light table with the chart corners on a flat background, with no grid, scanlines, or animation.
+- **VALIDATE** shows a grid of the 24 chart patches in chart order (6 columns by 4 rows). Each cell shows the corrected color above the chart target, with the patch's ΔE00. The bar under the number is that ΔE relative to the worst patch of this fit. It ranks patches and is not a pass or fail band; the quality gates are reported in the sidebar. Click a cell to highlight its row in the sidebar table.
+- **COMPARE** shows the before and after of the last corrected image, captioned with its source file and, if it was written, the saved path. Opening it with a derived profile and no comparison renders the reference automatically. After "Apply & save image" it shows that image instead. With a Library profile active it stays empty until you apply the profile to an image, because the entry's reference may come from another camera. Controls are listed under "Comparison viewer controls".
+- **EXPORT** shows what the next write acts on. With no active profile it says so. With a derived profile it says the profile is ready to apply. With a Library profile it shows that entry's card: reference thumbnail, label, notes, tags, quality badges, camera, lens, capture time, GPS, ΔE fit, chart revision, decoder, profile digest and path, plus the camera-mismatch notice when it applies. After "Apply & save image" it names the saved file and points to COMPARE. While a batch runs, and after it ends, it shows a progress bar and one row per file: written, skipped, or failed, with any warning or error.
 - **LIBRARY** shows the gallery.
 
 Everything that writes a file lives on EXPORT, and it always acts on one **active profile**: the Library entry you chose with "Use this profile", otherwise the profile derived in this session. Clear the Library selection on EXPORT to go back to the derived profile.
 
-- **Apply & save image** picks any image, corrects it with the active profile, shows before and after, and writes a TIFF or JPEG to the path you choose.
+- **Apply & save image** picks any image, corrects it with the active profile, and writes a TIFF or JPEG to the path you choose. COMPARE then shows its before and after.
 - **Save reference** (derived profile only) corrects the reference image and writes it in the chosen format.
 - **Apply & write batch** corrects a folder into a destination folder, with an overwrite switch and a stop button. The result counts, failed files, and warnings appear below the controls.
 - **.CLF** and **.CUBE**, under "Interchange files", export the active profile's transform for other tools.

@@ -16,6 +16,7 @@ import { DiagnosticConsole } from './components/DiagnosticConsole';
 import { logger } from './logger';
 import {
   Layers,
+  Columns2,
   Sparkles,
   FolderOpen,
   Play,
@@ -47,6 +48,7 @@ const MetadataLines: React.FC<{ metadata: MetadataSummary }> = ({ metadata }) =>
 const TABS: { id: Tab; label: string; icon: typeof Layers }[] = [
   { id: 'reference', label: 'REFERENCE', icon: Layers },
   { id: 'validate', label: 'VALIDATE', icon: Sparkles },
+  { id: 'compare', label: 'COMPARE', icon: Columns2 },
   { id: 'export', label: 'EXPORT', icon: Save },
   { id: 'library', label: 'LIBRARY', icon: LibraryIcon },
 ];
@@ -62,7 +64,6 @@ export const App: React.FC = () => {
   const [chartRevision, setChartRevision] = useState<ChartRevision | ''>('');
   const [compare, setCompare] = useState<(CorrectResult & { source: string }) | null>(null);
   const [selectedPatch, setSelectedPatch] = useState<string | null>(null);
-  const [validateView, setValidateView] = useState<'patches' | 'image'>('patches');
   /** Which Export result the viewport shows: the last single image written or the last batch run. */
   const [lastExport, setLastExport] = useState<'single' | 'batch' | null>(null);
   const retainedPreviews = useRef(new Set<string>());
@@ -275,7 +276,6 @@ export const App: React.FC = () => {
     setLoadedPath(null);
     setCompare(null);
     setSelectedPatch(null);
-    setValidateView('patches');
     setDetectionStatus('idle');
     setDetectionError('');
     setDeriveResult(null);
@@ -490,7 +490,6 @@ export const App: React.FC = () => {
         setDeriveResult(result);
         setCompare(null);
         setSelectedPatch(null);
-        setValidateView('patches');
         previewAttempt.current = '';
         setTab('validate');
       } catch (error: unknown) {
@@ -556,7 +555,7 @@ export const App: React.FC = () => {
   // Preview the derived reference only. A Library profile may belong to a different camera.
   const previewAttempt = useRef('');
   useEffect(() => {
-    if (tab === 'reference' || tab === 'library' || activeLibrary || compare || isProcessing || !deriveResult?.profilePath || !referencePath) return;
+    if (tab !== 'compare' || activeLibrary || compare || isProcessing || !deriveResult?.profilePath || !referencePath) return;
     const key = `${deriveResult.profilePath}|${deriveResult.digest}|${referencePath}`;
     if (previewAttempt.current === key) return;
     previewAttempt.current = key;
@@ -573,7 +572,7 @@ export const App: React.FC = () => {
       </div>
     </div>
   );
-  const comparison = compare && (
+  const compareViewport = compare ? (
     <div className="flex-1 min-h-0 flex flex-col">
       <div className="shrink-0 px-3 py-1.5 border-b border-[var(--bb-border)] text-[10px] text-[var(--bb-smoke)] truncate" data-testid="compare-caption" title={compare.outputPath ?? compare.source}>
         <span className="text-[var(--bb-sand)]">{compare.source.split(/[\\/]/).pop()}</span>
@@ -584,49 +583,32 @@ export const App: React.FC = () => {
         <BeforeAfter key={compare.source} beforeSrc={compare.beforeUrl} afterSrc={compare.afterUrl} />
       </div>
     </div>
+  ) : !exportProfile ? (
+    viewportMessage('No active profile', 'Derive a profile in Reference, or choose one in Library.')
+  ) : activeLibrary ? (
+    viewportMessage('No comparison yet', 'Apply the Library profile to an image on EXPORT. The before and after appears here.')
+  ) : (
+    viewportMessage('No comparison yet', isProcessing ? 'Rendering the corrected reference…' : 'The corrected reference appears here once it is rendered.')
   );
   const validateViewport = deriveResult ? (
-    <div className="flex-1 min-h-0 flex flex-col">
-      <div className="shrink-0 flex gap-2 px-3 py-2 border-b border-[var(--bb-border)]">
-        {(['patches', 'image'] as const).map((view) => (
-          <button
-            key={view}
-            type="button"
-            onClick={() => setValidateView(view)}
-            aria-pressed={validateView === view}
-            data-testid={`validate-view-${view}`}
-            className={`px-2 py-0.5 border text-[10px] ${
-              validateView === view
-                ? 'border-[var(--bb-gold)] text-[var(--bb-gold)]'
-                : 'border-[var(--bb-border)] text-[var(--bb-smoke)] hover:text-[var(--bb-sand)]'
-            }`}
-          >
-            {view === 'patches' ? 'PATCHES' : 'IMAGE'}
-          </button>
-        ))}
-      </div>
-      {validateView === 'patches' ? (
-        <div className="flex-1 min-h-0">
-          <PatchGrid patches={deriveResult.patches} selected={selectedPatch} onSelect={setSelectedPatch} />
-        </div>
-      ) : (
-        comparison ??
-        viewportMessage('No preview yet', isProcessing ? 'Rendering the corrected reference…' : 'The corrected reference appears here once it is rendered.')
-      )}
+    <div className="flex-1 min-h-0">
+      <PatchGrid patches={deriveResult.patches} selected={selectedPatch} onSelect={setSelectedPatch} />
     </div>
   ) : (
     viewportMessage('No fit to show', 'Derive a profile in Reference to see how each chart patch matched.')
   );
   const showBatch = lastExport === 'batch' && (isProcessing || batchSummary !== null);
+  const savedImage = lastExport === 'single' ? compare?.outputPath : null;
   const exportViewport = showBatch ? (
     <BatchResults summary={batchSummary} progress={batchProgress} running={isProcessing} />
+  ) : savedImage ? (
+    viewportMessage(`Saved ${savedImage.split(/[\\/]/).pop()}`, `Written to ${savedImage}. The before and after is on the COMPARE tab.`)
+  ) : !exportProfile ? (
+    viewportMessage('No active profile', 'Derive a profile in Reference, or choose one in Library.')
+  ) : activeLibrary ? (
+    <ActiveProfile entry={activeLibrary} loadedCamera={loadedCamera} />
   ) : (
-    comparison ??
-    (!exportProfile
-      ? viewportMessage('No active profile', 'Derive a profile in Reference, or choose one in Library.')
-      : activeLibrary
-        ? <ActiveProfile entry={activeLibrary} loadedCamera={loadedCamera} />
-        : viewportMessage('No preview yet', isProcessing ? 'Rendering the corrected reference…' : 'The corrected reference appears here once it is rendered.'))
+    viewportMessage('Ready to apply', 'Apply the derived profile to an image or a folder with the controls on the right.')
   );
 
   const handleRunBatch = () => {
@@ -868,6 +850,8 @@ export const App: React.FC = () => {
             />
           ) : tab === 'validate' ? (
             validateViewport
+          ) : tab === 'compare' ? (
+            compareViewport
           ) : tab === 'export' ? (
             exportViewport
           ) : (
@@ -1097,6 +1081,30 @@ export const App: React.FC = () => {
                   </div>
                 )}
               </div>
+            </div>
+          )}
+
+          {tab === 'compare' && (
+            <div className="space-y-3.5">
+              <div className="border-b border-[var(--bb-border)] pb-2 space-y-1">
+                <h2 className="text-xs font-bold text-[var(--bb-sand)]">Compare</h2>
+                <p className="text-[10px] text-[var(--bb-smoke)]">
+                  Before and after of the last corrected image, in sRGB. A derived profile previews its own reference here. Images applied on EXPORT replace it.
+                </p>
+              </div>
+              {compare ? (
+                <div className="text-[10px] space-y-1" data-testid="compare-details">
+                  <div className="text-[var(--bb-sand)] break-all">{compare.source}</div>
+                  <div className="text-[var(--bb-smoke)] break-all">
+                    {compare.outputPath ? `Saved to ${compare.outputPath}` : 'Preview only, nothing written.'}
+                  </div>
+                  {compare.warnings.map((w, i) => (
+                    <div key={i} className="text-[var(--bb-orange)]">⚠ {w}</div>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-[10px] text-[var(--bb-smoke)]">Nothing to compare yet.</p>
+              )}
             </div>
           )}
 

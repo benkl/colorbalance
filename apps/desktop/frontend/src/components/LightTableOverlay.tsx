@@ -175,8 +175,7 @@ export const LightTableOverlay: React.FC<Props> = ({
       {/* Light-Table Top Metadata Status HUD */}
       <div className="h-8 shrink-0 px-3 bg-[var(--bb-vacuum)] border-b border-[var(--bb-border)] flex items-center justify-between text-[11px] font-mono text-[var(--bb-smoke)]">
         <div className="flex items-center gap-3">
-          <span className="text-[var(--bb-gold)] font-bold flex items-center gap-1.5">
-            <span className="w-1.5 h-1.5 rounded-full bg-[var(--bb-gold)] animate-ping" />
+          <span className="text-[var(--bb-gold)] font-bold">
             OPTICAL LIGHT-TABLE
           </span>
           <span className="text-[var(--bb-ash)]">|</span>
@@ -199,7 +198,7 @@ export const LightTableOverlay: React.FC<Props> = ({
       {/* Fully Contained Image Viewport */}
       <div
         ref={containerRef}
-        className="relative flex-1 min-h-0 w-full light-table-grid overflow-hidden cursor-crosshair-custom"
+        className="relative flex-1 min-h-0 w-full bg-[var(--bb-vacuum)] overflow-hidden cursor-crosshair-custom"
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
       >
@@ -215,7 +214,7 @@ export const LightTableOverlay: React.FC<Props> = ({
               width: `${box.w}px`,
               height: `${box.h}px`,
             }}
-            className="pointer-events-none object-fill shadow-[0_0_40px_rgba(0,0,0,0.8)]"
+            className="pointer-events-none object-fill"
             draggable={false}
           />
         ) : !imageSrc ? (
@@ -224,7 +223,7 @@ export const LightTableOverlay: React.FC<Props> = ({
             onClick={onBrowse}
             className="absolute inset-0 w-full h-full flex items-center justify-center bg-transparent border-none cursor-pointer group"
           >
-            <div className="p-8 bg-[var(--bb-surface)]/95 border border-[var(--bb-border-bright)] group-hover:border-[var(--bb-gold)] text-center space-y-2 transition-all shadow-[0_0_30px_rgba(0,0,0,0.8)]">
+            <div className="p-8 bg-[var(--bb-surface)] border border-[var(--bb-border-bright)] group-hover:border-[var(--bb-gold)] text-center space-y-2 transition-colors">
               <div className="text-xs font-bold tracking-widest text-[var(--bb-amber)] group-hover:text-[var(--bb-gold)]">
                 + CLICK TO OPEN OR DROP REFERENCE FRAME HERE
               </div>
@@ -289,7 +288,9 @@ export const LightTableOverlay: React.FC<Props> = ({
                   fontSize="10"
                   fontFamily="JetBrains Mono, monospace"
                   fontWeight="700"
-                  filter="drop-shadow(0 0 2px #040201)"
+                  stroke="#040201"
+                  strokeWidth="3"
+                  paintOrder="stroke"
                 >
                   {cornerLabels[idx]}
                 </text>
@@ -297,9 +298,6 @@ export const LightTableOverlay: React.FC<Props> = ({
             ))}
           </svg>
         )}
-
-        {/* Scanline Overlay */}
-        <div className="absolute inset-0 scanlines-overlay pointer-events-none opacity-40" />
       </div>
     </div>
   );
