@@ -66,5 +66,5 @@ sha256sum apps/desktop/src-tauri/target/release/colorbalance-desktop.exe > color
 
 ## 6. Code Signing & Packaging (CI Pipeline)
 
-- Windows installers (`.msi`) can be generated via `npm run tauri build -- --bundles msi` with WiX toolset installed.
+- No installer is produced. The release artifact is the bare executable from `cargo build --release`. Installer bundling (`.msi`, `.dmg`, AppImage) would need the Tauri CLI, which is not a project dependency, and the bundler configuration was removed with it.
 - Code signing utilizes Windows Authenticode with EV Certificate or Azure Trusted Signing during GitHub Actions release workflows.

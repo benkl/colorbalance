@@ -459,7 +459,6 @@ version = "0.1.0"
 dependencies = [
  "colorbalance-core",
  "colorbalance-raw",
- "serde_json",
 ]
 
 [[package]]
@@ -473,7 +472,6 @@ dependencies = [
  "kamadak-exif",
  "rawler",
  "rayon",
- "thiserror 2.0.21",
 ]
 
 [[package]]

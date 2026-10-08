@@ -73,7 +73,7 @@ Target 64-bit Windows, macOS, and Linux. Windows is the first packaged target. B
 | Hosted mode, if built | Axum, PostgreSQL, S3-compatible storage | Native workers behind an API; image bytes never pass through the API server |
 | Research verification | Python with `colour-science` and `colour-checker-detection` | Independent fixtures and formula cross-checks; non-runtime |
 | Tests and quality | `cargo test`, `cargo clippy`, `cargo fmt`, GitHub Actions | Conventional Rust toolchain with a three-operating-system matrix |
-| Packaging | Cargo releases and Tauri bundlers | Standalone desktop binaries with native dependencies |
+| Packaging | Cargo release builds | Standalone desktop binaries with native dependencies. Installer bundling is not set up |
 
 Do not ship the first release as a browser-only application. Browser RAW decoding, memory limits, and output writing are measured in milestone 5 before the browser mode is selected. Do not add a hosted server before local modes work end to end, because uploads of RAW batches and image privacy change the product. The React UI is shared by Tauri and the browser so the web path does not require a rewrite.
 

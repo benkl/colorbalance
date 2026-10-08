@@ -27,13 +27,6 @@
     }
   },
   "bundle": {
-    "active": true,
-    "icon": ["icons/icon.png", "icons/icon.ico"],
-    "targets": "all",
-    "windows": {
-      "wix": {
-        "language": "en-US"
-      }
-    }
+    "icon": ["icons/icon.png", "icons/icon.ico"]
   }
 }
