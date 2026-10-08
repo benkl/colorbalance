@@ -15,7 +15,7 @@ What exists:
 - `colorbalance-core`: decode contract, chart datasets, patch sampling, quality gates, matrix fit, profiles, 16-bit TIFF encoding, bounded batch scheduler, CLF and `.cube` export, and `detection.rs`, the chart locator.
 - `colorbalance-raw`: RAW decoding through the `rawler` crate (`rawler_decode.rs`), JPEG/PNG loading for the quick-and-dirty approximation, and `dng_writer.rs`, a DNG writer used only by test fixtures. rawler returns undemosaiced photosites. The AHD demosaic is in `colorbalance-core/src/ahd.rs`. Decoder identity is `rawler-ahd` plus the pinned rawler version. Verified only on synthetic DNGs; there are no real camera RAW fixtures yet.
 - `colorbalance-cli`: `decode-contract`, `inspect`, `derive`, `apply`, `export`. The CLI does not call the detector. Without `--quad` it samples an 8% inset rectangle.
-- `apps/desktop`: Tauri 2 shell (`src-tauri`) and React UI (`frontend`). Commands: `load_reference`, `detect_chart`, `inspect_reference`, `derive_profile`, `correct_image`, `apply_batch`, `cancel_batch`, `export_profile`, and three native pickers. One decoded reference is cached by path, length, and mtime.
+- `apps/desktop`: Tauri 2 shell (`src-tauri`) and React UI (`frontend`). Commands: `load_reference`, `detect_chart`, `check_chart`, `inspect_reference`, `derive_profile`, `correct_image`, `apply_batch`, `preflight_batch`, `cancel_batch`, `export_profile`, Library list and save, and three native pickers. One decoded reference is cached by path, length, and mtime.
 
 Not done: CLI auto-detection, DCP export, signed installers, any browser or hosted mode, real camera RAW fixtures. Do not describe these as working.
 

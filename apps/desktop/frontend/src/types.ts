@@ -127,6 +127,53 @@ export interface DeriveResult {
   warnings: string[];
 }
 
+/** Measured check frame through the stored profile; no fitting or profile write. */
+export interface ChartCheckResult {
+  profilePath: string;
+  imagePath: string;
+  chartRevision: string;
+  imageWidth: number;
+  imageHeight: number;
+  quad: [number, number][];
+  validation: ValidationSummary;
+  patches: PatchValidation[];
+  qualityPassed: boolean;
+  gateFailures: InspectGateFailure[];
+  warnings: string[];
+  profileFitBaseline: Omit<ValidationSummary, 'medianDeltaE'>;
+}
+
+export interface PreflightResult {
+  totalFiles: number;
+  files: Array<{
+    path: string;
+    cameraMake: string | null;
+    cameraModel: string | null;
+    lens: string | null;
+    iso: number | null;
+    capturedAt: string | null;
+    hasCaptureMetadata: boolean;
+    cameraMismatch: boolean | null;
+    lensMismatch: boolean | null;
+    isoMismatch: boolean | null;
+    captureTimeDifferent: boolean | null;
+  }>;
+  omittedFiles: number;
+  missing: { cameraMake: number; cameraModel: number; lens: number; iso: number; capturedAt: number; captureMetadata: number };
+  cameraMismatchCount: number;
+  lensMismatchCount: number;
+  isoMismatchCount: number;
+  captureTimeDifferentCount: number;
+  lenses: string[];
+  lensCount: number;
+  isoValues: number[];
+  isoCount: number;
+  isoRange: { min: number; max: number } | null;
+  captureTimeRange: { earliest: string; latest: string } | null;
+  activeLibraryEntry: { id: string; label: string; lens: string | null; iso: number | null; capturedAt: string | null } | null;
+  suggestions: Array<{ entryId: string; label: string; cameraMake: string; cameraModel: string; matchingFiles: number }>;
+}
+
 /** Result of correcting one image: downscaled PNG previews rendered by the backend. */
 export interface CorrectResult {
   beforeUrl: string;
@@ -172,6 +219,7 @@ export interface LibraryEntry {
   cameraMake: string;
   cameraModel: string;
   lens: string | null;
+  iso: number | null;
   capturedAt: string | null;
   gps: LibraryGps | null;
   chartRevision: string;

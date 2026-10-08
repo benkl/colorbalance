@@ -58,6 +58,8 @@ pub struct LibraryEntry {
     pub camera_make: String,
     pub camera_model: String,
     pub lens: Option<String>,
+    /// Reference ISO, when present in EXIF. Older entries do not have this field.
+    pub iso: Option<u32>,
     /// `YYYY-MM-DD HH:MM:SS`, as read from the reference's EXIF.
     pub captured_at: Option<String>,
     pub gps: Option<LibraryGps>,
@@ -107,6 +109,7 @@ struct CaptureFile {
     make: Option<String>,
     model: Option<String>,
     lens: Option<String>,
+    iso: Option<u32>,
     date_time: Option<String>,
     gps: Option<LibraryGps>,
 }
@@ -199,6 +202,7 @@ fn load_entry(library: &Path, dir: &Path, id: String) -> Result<LibraryEntry, St
         camera_make: profile.camera.make.clone(),
         camera_model: profile.camera.model.clone(),
         lens: file.capture.lens,
+        iso: file.capture.iso,
         captured_at: file.capture.date_time,
         gps: file.capture.gps,
         chart_revision: chart_revision(&profile),
@@ -265,6 +269,7 @@ pub fn save_to_library(
             make: capture.make,
             model: capture.model,
             lens: capture.lens,
+            iso: capture.iso,
             date_time: capture.date_time,
             gps: capture.gps.filter(|_| include_gps).map(|gps| LibraryGps {
                 latitude: gps.latitude,

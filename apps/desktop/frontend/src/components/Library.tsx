@@ -93,8 +93,9 @@ export const LibraryGallery: React.FC<GalleryProps> = ({ listing, libraryPath, l
                     <span className="shrink-0 px-1.5 py-0.5 border border-[var(--bb-amber)] text-[9px] font-bold text-[var(--bb-amber)]">ACTIVE</span>
                   )}
                 </div>
-                <div className="text-[var(--bb-sand)] break-words">{card.camera}</div>
-                {card.lens && <div className="text-[var(--bb-smoke)] break-words">{card.lens}</div>}
+                <div className="text-[var(--bb-sand)] break-words"><span className="text-[var(--bb-smoke)]">CAMERA </span>{card.camera}</div>
+                <div className="text-[var(--bb-smoke)] break-words">LENS {card.lens ?? 'UNKNOWN'}</div>
+                {entry.iso != null && <div className="text-[var(--bb-smoke)]">ISO {entry.iso}</div>}
                 {card.capturedAt && <div className="text-[var(--bb-smoke)]">{card.capturedAt}</div>}
                 {card.gps && <div className="text-[var(--bb-smoke)]">GPS {card.gps}</div>}
                 <Badges badges={card.badges} />
@@ -141,7 +142,8 @@ export const ActiveProfile: React.FC<{
           <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-[10px]">
             <dt className="text-[var(--bb-smoke)]">CAMERA</dt>
             <dd className="text-[var(--bb-sand)] break-words">{card.camera}</dd>
-            {card.lens && (<><dt className="text-[var(--bb-smoke)]">LENS</dt><dd className="text-[var(--bb-sand)] break-words">{card.lens}</dd></>)}
+            <dt className="text-[var(--bb-smoke)]">LENS</dt><dd className="text-[var(--bb-sand)] break-words">{card.lens ?? 'Unknown (not in reference EXIF)'}</dd>
+            {entry.iso != null && (<><dt className="text-[var(--bb-smoke)]">ISO</dt><dd className="text-[var(--bb-sand)]">{entry.iso}</dd></>)}
             {card.capturedAt && (<><dt className="text-[var(--bb-smoke)]">CAPTURED</dt><dd className="text-[var(--bb-sand)]">{card.capturedAt}</dd></>)}
             {card.gps && (<><dt className="text-[var(--bb-smoke)]">GPS</dt><dd className="text-[var(--bb-sand)]">{card.gps}</dd></>)}
             <dt className="text-[var(--bb-smoke)]">FIT</dt>

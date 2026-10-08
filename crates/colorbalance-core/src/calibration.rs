@@ -571,17 +571,44 @@ pub fn fit(
         }
     }
 
-    let inverse = inverse_3x3(matrix)?;
+    let fitted = FittedStages {
+        exposure_scale,
+        channel_scale,
+        matrix,
+    };
+    let report = validate_stages(samples, dataset, &fitted)?;
+    Ok((fitted, report))
+}
+
+/// Evaluates chart samples against an existing transform, without fitting it.
+/// Corrected RGB is kept unclamped for Lab and Delta E calculations.
+pub fn validate_stages(
+    samples: &[PatchSample],
+    dataset: &ChartDataset,
+    stages: &FittedStages,
+) -> Result<ValidationReport, CalibrationError> {
+    if samples.is_empty() || dataset.patches.len() != 24 {
+        return Err(CalibrationError::InsufficientPatches);
+    }
+    if samples
+        .iter()
+        .any(|sample| dataset_reference(dataset, sample.patch).is_none())
+    {
+        return Err(CalibrationError::InsufficientPatches);
+    }
+
+    let inverse = inverse_3x3(stages.matrix)?;
+    let model = ChartModel::new(dataset.revision);
     let mut per_patch = Vec::with_capacity(samples.len());
     for sample in samples {
         let target_reference = dataset_reference(dataset, sample.patch)
             .expect("sample patches were checked against the dataset");
         let normalized = [
-            sample.mean_rgb[0] / (exposure_scale * channel_scale[0]),
-            sample.mean_rgb[1] / (exposure_scale * channel_scale[1]),
-            sample.mean_rgb[2] / (exposure_scale * channel_scale[2]),
+            sample.mean_rgb[0] / (stages.exposure_scale * stages.channel_scale[0]),
+            sample.mean_rgb[1] / (stages.exposure_scale * stages.channel_scale[1]),
+            sample.mean_rgb[2] / (stages.exposure_scale * stages.channel_scale[2]),
         ];
-        let corrected_rgb = matrix_product(normalized, matrix);
+        let corrected_rgb = matrix_product(normalized, stages.matrix);
         let corrected_lab = xyz_d65_to_lab(linear_srgb_to_xyz(corrected_rgb));
         per_patch.push(PatchValidation {
             patch: sample.patch,
@@ -603,8 +630,12 @@ pub fn fit(
     let median_delta_e = median(delta_e.clone());
     let p95_position = 0.95 * (count - 1) as f64;
     let p95_lower = p95_position.floor() as usize;
-    let p95_delta_e = delta_e[p95_lower]
-        + (delta_e[p95_lower + 1] - delta_e[p95_lower]) * (p95_position - p95_lower as f64);
+    let p95_delta_e = if count == 1 {
+        delta_e[0]
+    } else {
+        delta_e[p95_lower]
+            + (delta_e[p95_lower + 1] - delta_e[p95_lower]) * (p95_position - p95_lower as f64)
+    };
     let neutral_max_delta_e = per_patch
         .iter()
         .filter(|validation| model.neutral_patches.contains(&validation.patch))
@@ -618,12 +649,7 @@ pub fn fit(
         .map(|validation| validation.delta_e)
         .fold(0.0, f64::max);
 
-    let fitted = FittedStages {
-        exposure_scale,
-        channel_scale,
-        matrix,
-    };
-    let report = ValidationReport {
+    Ok(ValidationReport {
         per_patch,
         mean_delta_e: delta_e.iter().sum::<f64>() / count as f64,
         median_delta_e,
@@ -631,9 +657,8 @@ pub fn fit(
         max_delta_e: delta_e[count - 1],
         neutral_max_delta_e,
         skin_max_delta_e,
-        condition_number: infinity_norm(matrix) * infinity_norm(inverse),
-    };
-    Ok((fitted, report))
+        condition_number: infinity_norm(stages.matrix) * infinity_norm(inverse),
+    })
 }
 
 #[cfg(test)]
@@ -689,6 +714,55 @@ mod tests {
         assert!(failures
             .iter()
             .any(|failure| failure.measured == "cv=0.200000"));
+    }
+
+    #[test]
+    fn stored_identity_stages_measure_chart_without_fitting() {
+        let dataset = crate::dataset::load(ChartRevision::ClassicFromNovember2014)
+            .expect("pinned dataset loads");
+        let samples: Vec<_> = dataset
+            .patches
+            .iter()
+            .map(|reference| PatchSample {
+                patch: reference.patch,
+                mean_rgb: reference.linear_srgb_d65,
+                variance: [0.0; 3],
+                clipped_mask: 0,
+                sample_pixels: 100,
+            })
+            .collect();
+        let identity = FittedStages {
+            exposure_scale: 1.0,
+            channel_scale: [1.0; 3],
+            matrix: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        };
+
+        let report = validate_stages(&samples, &dataset, &identity).expect("identity is valid");
+        assert_eq!(report.per_patch.len(), 24);
+        assert_eq!(report.condition_number, 1.0);
+        for (actual, expected) in report.per_patch.iter().zip(&dataset.patches) {
+            assert_eq!(actual.corrected_rgb, expected.linear_srgb_d65);
+            assert_eq!(actual.target_rgb, expected.linear_srgb_d65);
+            assert!(
+                actual.delta_e < 0.5,
+                "{:?}: {}",
+                actual.patch,
+                actual.delta_e
+            );
+        }
+        assert!(report.max_delta_e < 0.5);
+
+        let wrong = FittedStages {
+            exposure_scale: 2.0,
+            ..identity
+        };
+        let failed = validate_stages(&samples, &dataset, &wrong).expect("still measurable");
+        assert!(failed.mean_delta_e > 5.0, "{}", failed.mean_delta_e);
+        assert!(failed.max_delta_e > 5.0, "{}", failed.max_delta_e);
+        assert_eq!(
+            failed.per_patch[0].corrected_rgb,
+            samples[0].mean_rgb.map(|v| v / 2.0)
+        );
     }
 
     #[test]

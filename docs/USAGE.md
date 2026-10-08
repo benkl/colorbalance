@@ -197,10 +197,24 @@ For display only, the preview and the "before" image divide each channel by the 
 
 The Library tab lists calibrations saved in one folder. Pick the folder once. The app rescans it every time you open the tab.
 
-Each card shows the preview (a card shows "No preview" when the reference could not be decoded at save time), the label, camera make, model and lens, capture time, GPS, calibration quality (passed, overridden or quick and dirty, with mean and max delta E), chart revision, decode contract, tags and notes. Entries whose profile fails its digest check appear under "Problems" and cannot be used.
+Each card shows the preview (a card shows "No preview" when the reference could not be decoded at save time), the label, camera make and model, lens ("Lens unknown" when the EXIF has none), reference ISO and capture time when present, GPS, calibration quality (passed, overridden or quick and dirty, with mean and max delta E), chart revision, decode contract, tags and notes. Entries saved before ISO was recorded show no ISO. Entries whose profile fails its digest check appear under "Problems" and cannot be used.
 
 To save an entry, derive a profile, then use "Save to library" on the Validate tab. Enter a label, optional notes and tags. GPS from the reference photo is stored unless you untick "Include GPS". Take care before sharing a library folder, because the location is in `entry.json`.
 
 To share a calibration, copy its folder into another person's library folder. To use a `.cube` or `.clf` file, run `colorbalance export` on the entry's `profile.cbprofile.json`.
 
 "Use this profile" makes an entry the active profile for EXPORT and stays on the Library tab; switch to EXPORT to apply it. The active profile is used for single images, batches, and interchange export. For a batch, if the entry's camera or decode contract differs from the image, the file is still processed and the batch report carries a warning for it. The result will be wrong in color unless the two cameras behave alike. Exposure mismatches still stop processing. Single-image export with a Library entry does not have this exception: a mismatch fails and writes nothing.
+
+### Check a new chart frame
+
+On the Validate tab, "Check new chart frame" measures a chart photographed later against the active profile. It applies the stored exposure scalar, channel scaling and matrix and reports patch delta E and the chart quality gates for that frame. It does not refit, and it never writes the profile. The profile's own fit is shown beside it for comparison.
+
+The frame must match the profile's camera and decode contract or the check stops. Without manual corners the app runs the chart detector. If it finds nothing or finds more than one candidate, the check fails and asks for manual corners. It does not sample a default rectangle. A clean chart tells you the transform still describes that frame. It says nothing about whether the batch was lit the same way.
+
+### Preflight a batch
+
+On Export, "Preflight source folder" reads EXIF from every supported file in the source folder and writes nothing. It reports file counts, missing metadata, the distinct lenses, the ISO range and the span of capture times, which are local clock readings without a timezone.
+
+The preflight sniffs each file's source kind without decoding pixels. A RAW profile with a rendered JPEG/PNG input, or a rendered profile with a RAW input, counts as a camera mismatch. For a RAW profile and RAW input, it compares EXIF camera make and model with the profile's camera identity. Rendered JPEG/PNG profiles carry a synthetic camera identity, so their camera comparison is unknown even when the rendered file has camera EXIF. A lens, ISO or capture-time comparison needs a reference. A Library entry supplies its saved lens, ISO and capture time, so those comparisons run only when that entry is active. A standalone profile has no such data, so only the batch spread is shown. A missing value counts as unknown, never as a match. Differences are advisory: they do not block apply, and the camera and decode checks at apply time are unchanged.
+
+The preflight also lists Library entries whose camera make and model match files in the batch. It never switches the active profile. A camera match does not establish matching lighting or exposure.

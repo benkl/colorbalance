@@ -33,7 +33,7 @@ pub fn no_progress(_label: &str, _step: usize, _steps: usize) {}
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QuadPayload {
-    corners: [[f64; 2]; 4],
+    pub(crate) corners: [[f64; 2]; 4],
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -172,7 +172,11 @@ fn decode_auto(path: &Path) -> Result<DecodedImage, BackendError> {
     colorbalance_raw::decode_any(path).map_err(|error| BackendError::Message(error.to_string()))
 }
 
-fn quad_from_payload(payload: Option<QuadPayload>, width: u32, height: u32) -> ChartQuad {
+pub(crate) fn quad_from_payload(
+    payload: Option<QuadPayload>,
+    width: u32,
+    height: u32,
+) -> ChartQuad {
     payload
         .map(|value| ChartQuad {
             corners: value.corners,
@@ -360,7 +364,7 @@ fn is_rendered_source(image: &DecodedImage) -> bool {
 }
 
 /// Rendered sources get the relaxed gate set; RAW never does.
-fn gate_config_for(image: &DecodedImage) -> GateConfig {
+pub(crate) fn gate_config_for(image: &DecodedImage) -> GateConfig {
     if is_rendered_source(image) {
         GateConfig::quick_and_dirty()
     } else {
@@ -853,7 +857,7 @@ impl MismatchPolicy {
 /// Check camera, decoder and decode-contract agreement between `profile` and
 /// `image`. Returns the warnings to report: a version-only change, and under
 /// [`MismatchPolicy::Warn`] each allowed mismatch.
-fn check_camera(
+pub(crate) fn check_camera(
     profile: &Profile,
     image: &DecodedImage,
     policy: MismatchPolicy,

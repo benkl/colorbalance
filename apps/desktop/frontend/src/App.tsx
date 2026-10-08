@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { DEFAULT_EXPORT_OPTIONS, JPEG_SAMPLINGS, OUTPUT_SPACES } from './types';
-import type { ChartQuad, ChartRevision, CorrectResult, DeriveResult, BatchSummary, ExportFormat, ExportOptions, InspectResult, JpegSampling, LibraryEntryView, LibraryListingView, MetadataSummary, OutputSpace } from './types';
+import type { ChartCheckResult, ChartQuad, ChartRevision, CorrectResult, DeriveResult, BatchSummary, ExportFormat, ExportOptions, InspectResult, JpegSampling, LibraryEntryView, LibraryListingView, MetadataSummary, OutputSpace, PreflightResult } from './types';
 import { backend, releasePreviewUrls, chooseDirectory, chooseImage, chooseSavePath, listenForBatchProgress, listenForFileDrop, listenForFileDropHover, listenForOperationProgress } from './tauri';
 import type { BatchProgress, OperationProgress } from './tauri';
 import { chooseBatchProfile, parseTags, readStoredLibraryPath, referenceFromDrop, storeLibraryPath } from './interaction';
@@ -98,6 +98,8 @@ export const App: React.FC = () => {
   // Derived Calibration Profile State
   const [deriveResult, setDeriveResult] = useState<DeriveResult | null>(null);
   const [inspectResult, setInspectResult] = useState<InspectResult | null>(null);
+  const [chartCheck, setChartCheck] = useState<ChartCheckResult | null>(null);
+  const [chartCheckPath, setChartCheckPath] = useState('');
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
   const [isDropActive, setIsDropActive] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string>('');
@@ -126,6 +128,8 @@ export const App: React.FC = () => {
     setExportSettings((current) => ({ ...current, ...patch }));
   const [batchSummary, setBatchSummary] = useState<BatchSummary | null>(null);
   const [batchProgress, setBatchProgress] = useState<BatchProgress | null>(null);
+  const [preflight, setPreflight] = useState<PreflightResult | null>(null);
+  const [preflightKey, setPreflightKey] = useState('');
   const [operationProgress, setOperationProgress] = useState<OperationProgress | null>(null);
 
   // Library State
@@ -279,6 +283,7 @@ export const App: React.FC = () => {
     setDetectionStatus('idle');
     setDetectionError('');
     setDeriveResult(null);
+    setChartCheck(null);
     setActiveLibrary(null);
     return ++referenceGeneration.current;
   };
@@ -488,6 +493,7 @@ export const App: React.FC = () => {
           quad,
         );
         setDeriveResult(result);
+        setChartCheck(null);
         setCompare(null);
         setSelectedPatch(null);
         previewAttempt.current = '';
@@ -590,12 +596,14 @@ export const App: React.FC = () => {
   ) : (
     viewportMessage('No comparison yet', isProcessing ? 'Rendering the corrected reference…' : 'The corrected reference appears here once it is rendered.')
   );
-  const validateViewport = deriveResult ? (
+  const currentChartCheck = chartCheck?.profilePath === exportProfile?.profilePath ? chartCheck : null;
+  const validationShown = currentChartCheck ?? (activeLibrary ? null : deriveResult);
+  const validateViewport = validationShown ? (
     <div className="flex-1 min-h-0">
-      <PatchGrid patches={deriveResult.patches} selected={selectedPatch} onSelect={setSelectedPatch} />
+      <PatchGrid patches={validationShown.patches} selected={selectedPatch} onSelect={setSelectedPatch} />
     </div>
   ) : (
-    viewportMessage('No fit to show', 'Derive a profile in Reference to see how each chart patch matched.')
+    viewportMessage('No chart results', 'Derive a profile or check a new chart frame against the active profile.')
   );
   const showBatch = lastExport === 'batch' && (isProcessing || batchSummary !== null);
   const savedImage = lastExport === 'single' ? compare?.outputPath : null;
@@ -610,6 +618,40 @@ export const App: React.FC = () => {
   ) : (
     viewportMessage('Ready to apply', 'Apply the derived profile to an image or a folder with the controls on the right.')
   );
+
+  const runChartCheck = async () => {
+    if (!exportProfile) return;
+    try {
+      const picked = await chooseImage();
+      if (!picked) return;
+      setErrorMessage('');
+      beginWork();
+      const result = await backend.checkChart(exportProfile.profilePath, picked, picked === referencePath ? quad : undefined);
+      setChartCheck(result);
+      setChartCheckPath(picked);
+      setSelectedPatch(null);
+    } catch (error: unknown) {
+      setErrorMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      endWork();
+    }
+  };
+
+  const runPreflight = async () => {
+    if (!exportProfile || !batchInputPath) return;
+    setErrorMessage('');
+    beginWork();
+    try {
+      const result = await backend.preflightBatch(exportProfile.profilePath, batchInputPath, libraryPath);
+      setPreflight(result);
+      setPreflightKey(`${exportProfile.profilePath}|${batchInputPath}|${libraryPath}`);
+    } catch (error: unknown) {
+      setPreflight(null);
+      setErrorMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      endWork();
+    }
+  };
 
   const handleRunBatch = () => {
     if (!batchInputPath || !batchOutputPath || !exportProfile) {
@@ -997,12 +1039,22 @@ export const App: React.FC = () => {
                 <p className="text-[10px] text-[var(--bb-smoke)]">Check patch errors and capture warnings before using the profile.</p>
               </div>
 
+              <div className="space-y-1.5 border-b border-[var(--bb-border)] pb-3">
+                <button type="button" className="ui-btn ui-btn-secondary w-full" disabled={isProcessing || !exportProfile} onClick={() => void runChartCheck()} data-testid="check-chart">
+                  CHECK NEW CHART FRAME…
+                </button>
+                <p className="text-[9px] text-[var(--bb-smoke)]">Measures a chart using the active profile's stored stages and chart dataset; never refits or saves a profile. Automatic chart detection must find the new frame.</p>
+                {currentChartCheck && <div className="text-[10px] text-[var(--bb-sand)] break-words" data-testid="chart-check-result">
+                  Checked {chartCheckPath}. Mean ΔE {currentChartCheck.validation.meanDeltaE.toFixed(2)} (profile fit {currentChartCheck.profileFitBaseline.meanDeltaE.toFixed(2)}); max ΔE {currentChartCheck.validation.maxDeltaE.toFixed(2)}. {currentChartCheck.qualityPassed ? 'Chart capture gates passed.' : 'Chart capture gates failed.'} A clean chart does not prove the batch lighting matches.
+                </div>}
+              </div>
+
               <ValidationPanel
-                validation={deriveResult?.validation}
-                patches={deriveResult?.patches}
-                warnings={deriveResult?.warnings}
-                qualityPassed={deriveResult?.qualityPassed}
-                gateFailures={deriveResult?.gateFailures}
+                validation={validationShown?.validation}
+                patches={validationShown?.patches}
+                warnings={validationShown?.warnings}
+                qualityPassed={validationShown?.qualityPassed}
+                gateFailures={validationShown?.gateFailures}
                 selectedPatch={selectedPatch}
                 onSelectPatch={setSelectedPatch}
               />
@@ -1332,6 +1384,22 @@ export const App: React.FC = () => {
                     Default: Skips existing files to prevent unintended data loss.
                   </p>
                 </div>
+
+                <button type="button" className="ui-btn ui-btn-secondary w-full" disabled={isProcessing || !batchInputPath || !exportProfile} onClick={() => void runPreflight()} data-testid="preflight-batch">PREFLIGHT SOURCE FOLDER</button>
+                {preflight && exportProfile && preflightKey === `${exportProfile.profilePath}|${batchInputPath}|${libraryPath}` && (
+                  <div className="space-y-1.5 p-2 border border-[var(--bb-border)] text-[10px] text-[var(--bb-sand)]" data-testid="preflight-result">
+                    <div>{preflight.totalFiles} files scanned. Camera mismatch {preflight.cameraMismatchCount}; lens mismatch {preflight.lensMismatchCount}; ISO mismatch {preflight.isoMismatchCount}; different capture date/time {preflight.captureTimeDifferentCount}. A zero count does not mean all files matched.</div>
+                    <div>Missing EXIF: {preflight.missing.captureMetadata} files; lens unknown {preflight.missing.lens}, ISO unknown {preflight.missing.iso}, capture time unknown {preflight.missing.capturedAt}. Missing EXIF or a rendered profile can leave camera comparison unknown.</div>
+                    <div>Distinct lenses: {preflight.lensCount}{preflight.lenses.length ? ` (${preflight.lenses.join(', ')})` : ''}. ISO: {preflight.isoRange ? `${preflight.isoRange.min}–${preflight.isoRange.max} (${preflight.isoCount} distinct)` : 'unknown'}.</div>
+                    <div>Capture timestamps (local clock, no timezone): {preflight.captureTimeRange ? `${preflight.captureTimeRange.earliest} – ${preflight.captureTimeRange.latest}` : 'unknown'}.</div>
+                    {!preflight.activeLibraryEntry && <div>Reference lens, ISO and time are unavailable for standalone profiles; no reference comparison was made.</div>}
+                    {preflight.activeLibraryEntry && <div>Compared against Library reference “{preflight.activeLibraryEntry.label}”; unavailable reference fields are not compared.</div>}
+                    {preflight.suggestions.length > 0 && <div>Camera-matching Library profiles: {preflight.suggestions.map((item) => `${item.label} (${item.matchingFiles}/${preflight.totalFiles})`).join(', ')}. Select a profile in Library to use it; this scan never switches profiles.</div>}
+                    {preflight.omittedFiles > 0 && <div>Per-file list truncated: {preflight.omittedFiles} not shown.</div>}
+                    <details><summary>Per-file metadata and mismatches</summary><div className="space-y-1 mt-1 max-h-40 overflow-y-auto">{preflight.files.map((file) => <div key={file.path} className="break-words">{file.path}: {file.cameraMake ?? '?'} {file.cameraModel ?? '?'} · {file.lens ?? 'lens unknown'} · ISO {file.iso ?? '?'} · {file.capturedAt ?? 'time unknown'} · camera {file.cameraMismatch === null ? 'unknown' : file.cameraMismatch ? 'MISMATCH' : 'match'} · lens {file.lensMismatch === null ? 'unknown' : file.lensMismatch ? 'MISMATCH' : 'match'} · ISO {file.isoMismatch === null ? 'unknown' : file.isoMismatch ? 'MISMATCH' : 'match'} · time {file.captureTimeDifferent === null ? 'unknown' : file.captureTimeDifferent ? 'DIFFERS' : 'same'}{!file.hasCaptureMetadata ? ' · NO CAPTURE EXIF' : ''}</div>)}</div></details>
+                    <div className="text-[var(--bb-orange)]">Advisory only: EXIF cannot establish matching lighting or exposure. Apply still enforces its own policy.</div>
+                  </div>
+                )}
 
                 <div className="grid grid-cols-4 gap-1.5">
                   <button

@@ -67,11 +67,13 @@ pub fn run_app() {
         .invoke_handler(tauri::generate_handler![
             crate::ipc::load_reference,
             crate::ipc::detect_chart,
+            crate::ipc::check_chart,
             crate::ipc::inspect_reference,
             crate::ipc::derive_profile,
             crate::ipc::correct_image,
             crate::ipc::release_previews,
             crate::ipc::apply_batch,
+            crate::ipc::preflight_batch,
             crate::ipc::list_library,
             crate::ipc::save_to_library,
             crate::ipc::cancel_batch,
@@ -146,9 +148,11 @@ async fn choose_save_path(
         .and_then(file_path_to_string)
 }
 
+pub mod chart_check;
 pub mod commands;
 pub mod ipc;
 pub mod library;
+pub mod preflight;
 pub mod preview_files;
 pub mod reference_cache;
 

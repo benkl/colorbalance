@@ -16,11 +16,13 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State, Window};
 
+use crate::chart_check::{self, ChartCheckResponse};
 use crate::commands::{
     self, BackendError, BatchResponse, CorrectResponse, DeriveResponse, DetectResponse,
     ExportOptions, InspectResponse, LoadedReference, MismatchPolicy, QuadPayload,
 };
 use crate::library::{self, LibraryEntry, LibraryListing};
+use crate::preflight::{self, PreflightResponse};
 use crate::AppState;
 
 #[derive(Debug, Clone, Serialize)]
@@ -88,6 +90,17 @@ pub async fn detect_chart(
 ) -> Result<DetectResponse, BackendError> {
     let cache = state.reference.clone();
     background(move || commands::detect_chart_cached(&cache, path)).await
+}
+
+#[tauri::command]
+pub async fn check_chart(
+    state: State<'_, AppState>,
+    profile_path: String,
+    image_path: String,
+    quad: Option<QuadPayload>,
+) -> Result<ChartCheckResponse, BackendError> {
+    let cache = state.reference.clone();
+    background(move || chart_check::check_chart(&cache, profile_path, image_path, quad)).await
 }
 
 #[tauri::command]
@@ -216,6 +229,15 @@ pub async fn apply_batch(
         )
     })
     .await
+}
+
+#[tauri::command]
+pub async fn preflight_batch(
+    profile_path: String,
+    input_path: String,
+    library_path: Option<String>,
+) -> Result<PreflightResponse, BackendError> {
+    background(move || preflight::scan_batch(input_path, library_path, profile_path)).await
 }
 
 /// Ask the running batch to stop scheduling files. Files already in flight

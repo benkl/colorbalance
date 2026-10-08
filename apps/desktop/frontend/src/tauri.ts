@@ -2,7 +2,7 @@ import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 import { logger } from './logger.ts';
-import type { BatchSummary, ChartQuad, ChartRevision, CorrectResult, DeriveResult, DetectResult, ExportOptions, InspectResult, LibraryEntry, LibraryEntryView, LibraryListing, LibraryListingView, LoadedReference, SaveToLibraryRequest } from './types';
+import type { BatchSummary, ChartCheckResult, ChartQuad, ChartRevision, CorrectResult, DeriveResult, DetectResult, ExportOptions, InspectResult, LibraryEntry, LibraryEntryView, LibraryListing, LibraryListingView, LoadedReference, PreflightResult, SaveToLibraryRequest } from './types';
 type NativeLoadedReference = Omit<LoadedReference, 'previewUrl'> & { previewPath: string };
 type NativeInspectResult = Omit<InspectResult, 'previewUrl'> & { previewPath?: string };
 type NativeCorrectResult = Omit<CorrectResult, 'beforeUrl' | 'afterUrl'> & { beforePath: string; afterPath: string };
@@ -49,6 +49,8 @@ export interface DroppedFiles {
 export interface BackendBridge {
   loadReference(path: string): Promise<LoadedReference>;
   detectChart(path: string): Promise<DetectResult>;
+  checkChart(profilePath: string, imagePath: string, quad?: ChartQuad): Promise<ChartCheckResult>;
+  preflightBatch(profilePath: string, inputPath: string, libraryPath?: string): Promise<PreflightResult>;
   inspectReference(path: string, revision: ChartRevision, quad?: ChartQuad): Promise<InspectResult>;
   deriveProfile(path: string, revision: ChartRevision, profilePath: string, reportPath?: string, quad?: ChartQuad): Promise<DeriveResult>;
   correctImage(profilePath: string, inputPath: string, outputPath: string | undefined, options: ExportOptions, allowMismatch: boolean): Promise<CorrectResult>;
@@ -72,6 +74,8 @@ export const backend: BackendBridge = {
     }
   },
   detectChart: (path) => invoke<DetectResult>('detect_chart', { path }),
+  checkChart: (profilePath, imagePath, quad) => invoke<ChartCheckResult>('check_chart', { profilePath, imagePath, quad: quad ? { corners: quad.map(({ x, y }) => [x, y]) } : undefined }),
+  preflightBatch: (profilePath, inputPath, libraryPath) => invoke<PreflightResult>('preflight_batch', { profilePath, inputPath, libraryPath: libraryPath || null }),
   inspectReference: async (path, revision, quad) => {
     logger.ipc('IPC', `Invoking inspect_reference on "${path}" [${revision}]`);
     try {
