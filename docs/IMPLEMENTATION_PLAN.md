@@ -36,7 +36,7 @@ The milestone text below is the original plan and its acceptance criteria. This 
 | 1. Measured calibration core | 1 to 7 | Closed. Decoding uses the `rawler` crate plus an in-repo AHD demosaic, not LibRaw (D18, which supersedes D10). Chart detection is pure Rust (D16) |
 | 2. Safe batch workflow | 8 to 12 | Closed |
 | 3. Interchange and independent validation | 13 to 16 | Closed. See `docs/model-selection-and-tolerances.md` |
-| 4. Desktop release | 17 to 20 | Closed. Tauri 2 app builds and runs; release gate report in `docs/release-gate-1.0.md`. Unsigned Windows x64 executables are published for v0.1.0; there is no installer or clean-machine verification |
+| 4. Desktop release | 17 to 20 | Closed. Tauri 2 app builds and runs; release gate report in `docs/release-gate-1.0.md`. An unsigned Windows x64 NSIS installer and executables are published as the v0.1.1 pre-release; there is no code signing or clean-machine verification |
 | 5. Web-capable platform | 21 to 26 | Issue 26 (delivery decision, D11) closed. Issues 21 to 25 open. The core builds for `wasm32` in CI; nothing else in this milestone is built |
 
 Differences from the plan text that readers keep tripping over:

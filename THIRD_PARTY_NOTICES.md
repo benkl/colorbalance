@@ -1,6 +1,6 @@
 # Third-party notices
 
-ColorBalance's own code is licensed `MIT OR Apache-2.0` (see `LICENSE-MIT` and `LICENSE-APACHE`). The binaries link third-party crates under their own licenses. The full list is `cargo metadata` over `Cargo.lock` and `apps/desktop/src-tauri/Cargo.lock`. This file records the ones that are not plain MIT/Apache-2.0/BSD/Zlib.
+ColorBalance's own code is licensed under the MIT License (see `LICENSE`). The binaries link third-party crates under their own licenses. The full list is `cargo metadata` over `Cargo.lock` and `apps/desktop/src-tauri/Cargo.lock`. This file records the ones that are not plain MIT/Apache-2.0/BSD/Zlib.
 
 License texts shipped with the source: [`rawler` LGPL-2.1](third_party/licenses/rawler-LGPL-2.1.txt), [MPL-2.0](third_party/licenses/cssparser-MPL-2.0.txt), [Independent JPEG Group](third_party/licenses/jpeg-encoder-IJG.txt).
 

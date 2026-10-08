@@ -17,7 +17,7 @@ What exists:
 - `colorbalance-cli`: `decode-contract`, `inspect`, `derive`, `apply`, `export` (`clf`, `cube`, `dcp`; `dcp` needs `--camera-name`). The CLI does not call the detector. Without `--quad` it samples an 8% inset rectangle.
 - `apps/desktop`: Tauri 2 shell (`src-tauri`) and React UI (`frontend`). Commands: `load_reference`, `detect_chart`, `check_chart`, `inspect_reference`, `derive_profile`, `correct_image`, `apply_batch`, `preflight_batch`, `cancel_batch`, `export_profile`, Library list and save, and three native pickers. One decoded reference is cached by path, length, and mtime.
 
-Not done: CLI auto-detection, DCP look tables or dual-illuminant profiles, a Lightroom round trip of the DCP export (see `docs/LIGHTROOM_EXPORT_PLAN.md`), signed installers, any browser or hosted mode, real camera RAW fixtures. Do not describe these as working.
+Not done: CLI auto-detection, DCP look tables or dual-illuminant profiles, a Lightroom round trip of the DCP export (see `docs/LIGHTROOM_EXPORT_PLAN.md`), code signing, clean-machine verification of the Windows installer, any browser or hosted mode, real camera RAW fixtures. Do not describe these as working.
 
 ## Required reading before working
 

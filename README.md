@@ -2,9 +2,9 @@
 
 **Make a measured color transform from one ColorChecker frame, then use it on the rest of the shoot.** A local desktop app and a CLI share the same Rust color engine. No account, upload, or subscription.
 
-[![CI](https://github.com/benkl/colorbalance/actions/workflows/ci.yml/badge.svg)](https://github.com/benkl/colorbalance/actions/workflows/ci.yml) [![Release](https://img.shields.io/github/v/release/benkl/colorbalance?include_prereleases&label=pre-release)](https://github.com/benkl/colorbalance/releases) [![License: MIT or Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+[![CI](https://github.com/benkl/colorbalance/actions/workflows/ci.yml/badge.svg)](https://github.com/benkl/colorbalance/actions/workflows/ci.yml) [![Release](https://img.shields.io/github/v/release/benkl/colorbalance?include_prereleases&label=pre-release)](https://github.com/benkl/colorbalance/releases) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-> **0.1.0 pre-release.** Windows x64 binaries are unsigned and have not been checked on a clean machine. Other cameras' RAW formats are not yet verified. Keep the original files.
+> **0.1.1 pre-release.** The Windows x64 installer and executables are unsigned and have not been checked on a clean machine. Other cameras' RAW formats are not yet verified. Keep the original files.
 
 ## See it work
 
@@ -36,9 +36,11 @@ flowchart LR
 
 ## Get it
 
-**Windows x64:** download `colorbalance-desktop-windows-x64.exe` from [Releases](https://github.com/benkl/colorbalance/releases), verify it against `SHA256SUMS.txt`, then run it. Windows may warn because the file is not signed. WebView2 is required (usually already installed on Windows 10/11). The release also contains `colorbalance-cli-windows-x64.exe`.
+**Windows x64 installer (recommended):** download `ColorBalance-Light-Table_0.1.1_x64-setup.exe` from [Releases](https://github.com/benkl/colorbalance/releases), verify it against `SHA256SUMS.txt`, and run it. It installs per user, needs no administrator rights, and adds an uninstaller. The installer is unsigned, so Windows SmartScreen may warn. WebView2 is required (usually already installed on Windows 10/11).
 
-No installers or macOS/Linux binaries are published. Build from source on those systems; compilation is exercised by CI, but packaged desktop builds are not. [Build and packaging notes](docs/packaging.md).
+**Portable files:** `colorbalance-desktop-windows-x64.exe` runs without installing, and `colorbalance-cli-windows-x64.exe` is the command-line tool.
+
+No macOS or Linux binaries are published. Build from source on those systems; CI compiles the CLI there, but packaged desktop builds are not exercised. [Build and packaging notes](docs/packaging.md).
 
 ### First calibration
 
@@ -65,7 +67,7 @@ On Windows, use `target\release\colorbalance.exe`. For a JPEG/PNG reference add 
 | --- | --- | --- |
 | RAW decoding | Synthetic DNGs and one Samsung Galaxy S25 LinearRaw DNG (D23); rawler + this project's AHD | Other real-camera formats; a larger fixture collection |
 | Rendered JPEG/PNG | Quick-and-dirty derivation and batch application, clearly flagged | A physically accurate calibration from camera-processed pixels |
-| Desktop | Reference → inspect → derive → compare and export exercised on Windows; backend and frontend tests | Signed installers or clean-machine verification |
+| Desktop | Reference → inspect → derive → compare and export exercised on Windows; backend and frontend tests; installer install, launch with one backend call, and uninstall on the build machine | Code signing; any clean-machine verification |
 | DCP | Independent reader parses real exports and checks the matrices | Lightroom / Camera Raw acceptance or visual parity; [round-trip plan](docs/LIGHTROOM_EXPORT_PLAN.md) |
 | Web | Core builds for `wasm32-unknown-unknown` in CI | Browser app, bindings, decode parity, hosted mode (issues #21–25) |
 
@@ -89,6 +91,6 @@ The desktop backend is a separate Cargo workspace. See [development](docs/develo
 
 ## License
 
-ColorBalance's own code is [MIT](LICENSE-MIT) **OR** [Apache-2.0](LICENSE-APACHE), at your choice. Its binaries include independently licensed dependencies, notably [`rawler` under LGPL-2.1](THIRD_PARTY_NOTICES.md). See [third-party notices](THIRD_PARTY_NOTICES.md) before redistributing binaries.
+ColorBalance's own code is licensed under the [MIT License](LICENSE). Its binaries include independently licensed dependencies, notably [`rawler` under LGPL-2.1](THIRD_PARTY_NOTICES.md). See [third-party notices](THIRD_PARTY_NOTICES.md) before redistributing binaries.
 
 ColorChecker is a trademark of X-Rite / Calibrite; Lightroom and Camera Raw are Adobe trademarks. This project is not affiliated with them.

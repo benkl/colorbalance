@@ -798,7 +798,7 @@ export const App: React.FC = () => {
       <header className="h-10 shrink-0 border-b border-[var(--bb-border)] bg-[var(--bb-vacuum)] px-3 flex items-center justify-between text-xs">
         <div className="flex items-center gap-2">
           <span className="font-bold text-[var(--bb-sand)] text-xs">ColorBalance</span>
-          <span className="text-[9px] text-[var(--bb-smoke)]">v0.1.0</span>
+          <span className="text-[9px] text-[var(--bb-smoke)]">v0.1.1</span>
         </div>
 
         {/* Workspace tabs */}

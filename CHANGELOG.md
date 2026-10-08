@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.1.1 — pre-release (2026-10-08)
+
+- Windows x64 per-user installer (NSIS) with uninstaller. It also installs the MIT license text and third-party notices under `licenses/`. The installer is unsigned and was exercised only by a silent install, one app launch with a backend `load_reference` call, and a silent uninstall on the build machine; there was no clean-machine run.
+- Licensing is MIT only. v0.1.0 had described the code as `MIT OR Apache-2.0`; that was withdrawn to remove the ambiguity. `LICENSE-APACHE` is gone and `LICENSE-MIT` is now `LICENSE`.
+- No color-pipeline or file-format changes.
+
 ## v0.1.0 — pre-release (2026-10-08)
 
 First public Windows x64 CLI and desktop binaries. Unsigned, no installer, no clean-machine verification.
@@ -13,4 +19,4 @@ First public Windows x64 CLI and desktop binaries. Unsigned, no installer, no cl
 
 **Known limits:** real RAW verification is one Samsung Galaxy S25 LinearRaw DNG plus synthetic fixtures; other camera formats are untested here. CLI chart detection is not wired. DCP is single-illuminant and matrix-only; it has not been round-tripped in Lightroom. The desktop release is Windows x64 only, unsigned, and requires WebView2. See [README](README.md#reality-check) and [Lightroom export plan](docs/LIGHTROOM_EXPORT_PLAN.md).
 
-The release includes `LICENSE-MIT`, `LICENSE-APACHE` and `THIRD_PARTY_NOTICES.md` in the source repository. The binaries include `rawler` under LGPL-2.1; see those notices before redistribution.
+The source repository includes `LICENSE` (MIT) and `THIRD_PARTY_NOTICES.md`. The binaries include `rawler` under LGPL-2.1; see those notices before redistribution.
