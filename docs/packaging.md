@@ -1,70 +1,40 @@
-# Desktop Application Release and Packaging Guide
+# Building and distributing the desktop app
 
-This document defines the build, verification, and distribution process for standalone `colorbalance-desktop` releases on Windows, macOS, and Linux.
+## What is shipped
 
-## 1. Supported Platform Tiers
+The `v0.1.0` pre-release contains **Windows x64** CLI and desktop executables, plus `SHA256SUMS.txt`. They are unsigned bare executables, not installers. WebView2 is needed for the desktop app. The binaries are built on Windows 11; a clean-machine run has not been done. The workspace CI builds the CLI on Windows, macOS and Linux, but it does **not** build the desktop app. No macOS or Linux release binaries are published.
 
-| Platform | Arch | Target | Status |
-| --- | --- | --- | --- |
-| Windows 10/11 | x64 | `x86_64-pc-windows-msvc` | Supported (Primary) |
-| macOS 12+ | x64 / ARM64 | `x86_64-apple-darwin` / `aarch64-apple-darwin` | Supported |
-| Linux | x64 | `x86_64-unknown-linux-gnu` | Supported |
+## Build from source
 
-## 2. Prerequisites
-
-- **Rust toolchain**: 1.89+ stable with MSVC toolchain on Windows.
-- **Node.js**: 20+ with npm.
-- **WebView Runtime**: Evergreen Microsoft Edge WebView2 on Windows (pre-installed on Windows 10/11).
-- **System Python is NOT required**: the binary is standalone native Rust and statically bundles all dependencies.
-
-## 3. Building the Release Binary
-
-### Step 1: Build the production frontend bundle
+Rust 1.89+ (`apps/desktop/src-tauri` currently declares 1.90), Node.js 20+ with npm, and platform Tauri prerequisites are needed. On Windows use the MSVC Rust toolchain and WebView2. Python is not needed to run the app.
 
 ```bash
 cd apps/desktop/frontend
 npm ci
 npm run build
+cd ../src-tauri
+cargo build --release
 ```
 
-This compiles TypeScript and packages the React SPA assets to `apps/desktop/frontend/dist`.
+The desktop binary lands at `apps/desktop/src-tauri/target/release/colorbalance-desktop.exe` on Windows, or `colorbalance-desktop` on macOS/Linux. The `build.rs` script also calls `npm run build`; prebuilding with `npm ci` locks the frontend dependencies. No Tauri installer is configured.
 
-### Step 2: Build the standalone release binary
-
-From the repository root or `apps/desktop/src-tauri`:
+The CLI is a workspace member and builds separately:
 
 ```bash
-cargo build --release --manifest-path apps/desktop/src-tauri/Cargo.toml
+cargo build --release -p colorbalance-cli
 ```
 
-The output executable is generated at:
+## Verify a downloaded binary
 
-```text
-apps/desktop/src-tauri/target/release/colorbalance-desktop.exe (Windows)
-apps/desktop/src-tauri/target/release/colorbalance-desktop (macOS / Linux)
+Download both the binary and `SHA256SUMS.txt` from the same release. On Windows:
+
+```powershell
+Get-FileHash .\colorbalance-desktop-windows-x64.exe -Algorithm SHA256
+Get-FileHash .\colorbalance-cli-windows-x64.exe -Algorithm SHA256
 ```
 
-## 4. Generating Artifact Checksums
+Compare the printed hashes with `SHA256SUMS.txt`. Checksums detect accidental corruption; they do not authenticate an unsigned binary. Prefer downloading from the release page over mirrors.
 
-```bash
-# Windows PowerShell
-Get-FileHash apps/desktop/src-tauri/target/release/colorbalance-desktop.exe -Algorithm SHA256
+Before wider distribution, a separate Windows machine should run the complete flow: load a RAW DNG and a JPEG, detect/check corners, inspect, derive, apply to a separate folder, verify TIFF and JPEG in an independent viewer, test cancellation and existing output, and confirm the Library can save/reopen a profile. That check has **not** been reported for this release. Signed installers and macOS/Linux packaging are not available.
 
-# Bash
-sha256sum apps/desktop/src-tauri/target/release/colorbalance-desktop.exe > colorbalance-desktop.sha256
-```
-
-## 5. Verification on Clean Machines
-
-1. Transfer `colorbalance-desktop.exe` to a clean Windows environment without developer tools installed.
-2. Verify checksum matches published hash.
-3. Launch `colorbalance-desktop.exe`.
-4. Drag and drop a ColorChecker frame (e.g. `20261003_183314.jpg` or a RAW `.dng`).
-5. Select physical chart revision and run **DERIVE COLOR PROFILE**.
-6. Select input directory and destination, and execute batch calibration.
-7. Verify generated 16-bit TIFF files open in standard image viewers (Windows Photos, IrfanView, Adobe Photoshop).
-
-## 6. Code Signing & Packaging (CI Pipeline)
-
-- No installer is produced. The release artifact is the bare executable from `cargo build --release`. Installer bundling (`.msi`, `.dmg`, AppImage) would need the Tauri CLI, which is not a project dependency, and the bundler configuration was removed with it.
-- Code signing utilizes Windows Authenticode with EV Certificate or Azure Trusted Signing during GitHub Actions release workflows.
+See [third-party notices](../THIRD_PARTY_NOTICES.md) for rawler's LGPL-2.1 license and rebuild instructions.

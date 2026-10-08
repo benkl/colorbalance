@@ -1,6 +1,6 @@
 # Development guide
 
-How to build, test, and verify ColorBalance locally. See `AGENTS.md` for working rules and `docs/ARCHITECTURE.md` for the platform decisions behind this setup.
+How to build, test, and verify ColorBalance locally. See `AGENTS.md` for working rules, `docs/ARCHITECTURE.md` for platform decisions and [packaging](packaging.md) for the unsigned Windows release process.
 
 ## Toolchain
 
@@ -45,7 +45,7 @@ rawler 0.8.0 ignores JPEG restart markers, so `restart_ljpeg.rs` decodes a singl
 
 | Crate | Role | wasm32 |
 | --- | --- | --- |
-| `colorbalance-core` | Decode contract, chart datasets, sampling, chart detection, color math, profiles, batch scheduler, TIFF encoding, CLF and `.cube` export. No rawler, Tauri, CLI, or UI dependencies. `unsafe` forbidden. | yes |
+| `colorbalance-core` | Decode contract, chart datasets, sampling, chart detection, color math, profiles, batch scheduler, TIFF/JPEG encoding, CLF, `.cube` and DCP export. No rawler, Tauri, CLI, or UI dependencies. `unsafe` forbidden. | yes |
 | `colorbalance-raw` | rawler adapter (`rawler_decode.rs`), JPEG/PNG loading, decoder identity, test-only DNG writer. `unsafe` denied. | no |
 | `colorbalance-cli` | `clap` command-line interface over the core operations. `unsafe` forbidden. | no |
 | `colorbalance-fixtures` | Shared test fixtures. | no |

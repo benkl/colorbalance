@@ -22,7 +22,7 @@ Not done: CLI auto-detection, DCP look tables or dual-illuminant profiles, a Lig
 ## Required reading before working
 
 1. `docs/IMPLEMENTATION_PLAN.md` - the product contract. The color pipeline, quality gates, interchange rules, milestones, and per-issue acceptance criteria live here.
-2. `docs/ARCHITECTURE.md` - platform and performance decisions, repository layout, engine API, detection cost and limits, and the decision log (D1 to D16).
+2. `docs/ARCHITECTURE.md` - platform and performance decisions, repository layout, engine API, detection cost and limits, and the decision log.
 3. The GitHub issue you are implementing, including its acceptance criteria.
 4. `docs/USAGE.md` and `docs/development.md` when you touch user-visible behavior or build steps.
 

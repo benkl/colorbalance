@@ -1,6 +1,6 @@
 # Capture, Interoperability, and Limitations Guide
 
-This document describes how to capture reference and batch frames, select the physical chart revision, use the Common LUT Format (CLF) and `.cube` exports, and understand the workflow limitations.
+This guide covers reference capture, physical chart revision selection, applying a profile, CLF and `.cube` interchange, RAW-only DCP export, and workflow limits. Apply writes TIFF or JPEG output.
 
 ## 1. Capture Guide
 
@@ -56,9 +56,9 @@ What it is and is not:
 
 Install it with File > Import Profiles & Presets in Lightroom, or place it in Camera Raw's `CameraProfiles` folder.
 
-## 5. Verified CLI Command Examples
+## 5. CLI command examples
 
-All commands run against the released `colorbalance` binary:
+These examples use the `colorbalance` CLI (`colorbalance.exe` on Windows). Replace paths, chart revision, and corners with your capture's values; inspect the result before applying it.
 
 ```bash
 # Print the canonical RAW decode contract as JSON

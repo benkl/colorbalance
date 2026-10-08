@@ -1,7 +1,7 @@
-# Milestone 4: 1.0 Release Gate Evaluation Report
+# Milestone 4: historical desktop gate assessment (2026-10-04)
 
 Date: 2026-10-04  
-Release: `colorbalance` 0.1.0-alpha / Milestone 4 Desktop Release
+Scope: `colorbalance` 0.1.0-alpha / Milestone 4. This is a historical assessment, not proof that the 2026-10-08 Windows pre-release ran on a clean machine. See [packaging](packaging.md) and [changelog](../CHANGELOG.md) for the shipped status.
 
 ## 1. Executive Summary
 
@@ -32,9 +32,9 @@ All non-negotiable invariants defined in `AGENTS.md` and `docs/IMPLEMENTATION_PL
 - **Non-destructive Invariant**: Source files are opened read-only and remain byte-identical after processing.
 - **Failure Isolation**: A corrupted file in a batch logs an individual failure and continues processing remaining images without aborting or discarding successful outputs.
 
-## 4. Release Decision: GO
+## 4. Gate assessment at the time
 
-Milestone 4 acceptance criteria are satisfied:
-- Desktop application builds, packages, and runs on a clean machine without Python runtime.
-- CLI and Desktop apps successfully derive and apply profiles on both RAW DNG and rendered JPEG captures.
-- Full regression test suite passing across all 11 crates/suites.
+The author marked Milestone 4 GO on 2026-10-04 based on local builds and tests. The following are the recorded checks; no clean-machine run is documented, and packaging an installer has not been done:
+- Desktop and CLI ran locally without a Python runtime in the application path.
+- CLI and desktop derived and applied profiles using synthetic RAW DNGs and a rendered JPEG.
+- The then-current regression suite passed locally. The suite has changed since this assessment; use current CI for current results.

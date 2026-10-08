@@ -14,7 +14,7 @@ The first release should solve one narrow workflow well:
 6. Apply the fixed transform to RAW files from the same capture setup. Do not infer exposure or white balance from arbitrary scene content.
 7. Write 16-bit TIFF output and a documented transform for hosts that can reproduce the same decoded camera-RGB input.
 
-Rendered TIFF, JPEG, and PNG input can be processed using the `--quick-and-dirty` approximation mode. When calibrating against camera-processed JPEG sources, sRGB gamma non-linearities are inverted back to approximate linear color values, and quality gates are relaxed (min 16 pixels per patch, max CV 0.25, unconstrained neutral row) while recording prominent warning badges in the HTML report and profile metadata.
+Rendered JPEG and PNG input can be processed using the `--quick-and-dirty` approximation mode. For camera-processed sources, sRGB gamma is inverted to approximate linear values, and quality gates are relaxed (min 16 pixels per patch, max CV 0.25, unconstrained neutral row) while the HTML report and profile record the approximation. Rendered TIFF input is not supported.
 
 ## Product constraints
 
@@ -27,7 +27,7 @@ A profile is valid only when these stay fixed:
 Exposure must also stay fixed in the first release. A profile stores the scalar derived from its reference and applies that same scalar to every batch image. A later workflow may accept an explicit per-image exposure offset from the user or matched capture metadata. It must never infer a neutral or brightness adjustment from arbitrary scene pixels.
 The first release rejects capture-exposure mismatch unless the user supplies an explicit stop offset. The tool cannot correct mixed or spatially varying light, undetectable smooth glare, clipped channels, a chart that occupies too few pixels, or a different camera response. It should report detectable cases rather than produce a confident-looking bad profile.
 
-## Current status (2026-10-07)
+## Current status (2026-10-08)
 
 The milestone text below is the original plan and its acceptance criteria. This section records what the repository does today.
 
@@ -36,7 +36,7 @@ The milestone text below is the original plan and its acceptance criteria. This 
 | 1. Measured calibration core | 1 to 7 | Closed. Decoding uses the `rawler` crate plus an in-repo AHD demosaic, not LibRaw (D18, which supersedes D10). Chart detection is pure Rust (D16) |
 | 2. Safe batch workflow | 8 to 12 | Closed |
 | 3. Interchange and independent validation | 13 to 16 | Closed. See `docs/model-selection-and-tolerances.md` |
-| 4. Desktop release | 17 to 20 | Closed. Tauri 2 app builds and runs; release gate report in `docs/release-gate-1.0.md`. No installer has been published |
+| 4. Desktop release | 17 to 20 | Closed. Tauri 2 app builds and runs; release gate report in `docs/release-gate-1.0.md`. Unsigned Windows x64 executables are published for v0.1.0; there is no installer or clean-machine verification |
 | 5. Web-capable platform | 21 to 26 | Issue 26 (delivery decision, D11) closed. Issues 21 to 25 open. The core builds for `wasm32` in CI; nothing else in this milestone is built |
 
 Differences from the plan text that readers keep tripping over:
@@ -139,7 +139,7 @@ A custom project file is needed because LUT formats do not carry enough provenan
 
 Export Academy Common LUT Format, `.clf`, as the primary transform interchange file. CLF is human-readable, self-contained for its listed pixel operations, supports matrices and 1D or 3D LUTs, and OpenColorIO can validate and apply it. For the matrix model, write the stored scalar, channel scaling, and color matrix as explicit CLF nodes. If a later nonlinear model cannot be represented exactly by those nodes, bake it to a documented 3D LUT and record approximation error.
 
-CLF does not reproduce RAW decoding. This export accepts only normalized linear camera RGB produced with the profile's exact camera and decoder contract. `InputDescriptor` documents that contract but does not enforce it. Interoperability tests must feed the same normalized arrays into each host. General RAW-editor interoperability is deferred to DCP.
+CLF does not reproduce RAW decoding. This export accepts only normalized linear camera RGB produced with the profile's exact camera and decoder contract. `InputDescriptor` documents that contract but does not enforce it. Interoperability tests must feed the same normalized arrays into each host. A RAW-only, matrix-only DCP export now exists (D28), but its Lightroom/Camera Raw round trip is untested.
 
 ### Compatibility exports
 
@@ -169,11 +169,12 @@ docs/                     # implementation plan, architecture, decision log
 ## Command-line contract
 
 ```text
-colorbalance inspect reference.CR3
-colorbalance derive reference.CR3 --chart classic-24 --profile studio.cbprofile.json --report studio-report.html
+colorbalance inspect reference.dng --chart classic-from-nov-2014 --quad x1,y1,x2,y2,x3,y3,x4,y4
+colorbalance derive reference.dng --chart classic-from-nov-2014 --quad x1,y1,x2,y2,x3,y3,x4,y4 --profile studio.cbprofile.json --report studio-report.html
 colorbalance apply studio.cbprofile.json ./shoot --output ./balanced --format tiff
 colorbalance export studio.cbprofile.json --format clf --output studio.clf
 colorbalance export studio.cbprofile.json --format cube --size 33 --output studio.cube
+colorbalance export studio.cbprofile.json --format dcp --camera-name "Camera model" --output studio.dcp
 ```
 
 `derive` exits nonzero when quality gates fail unless the user explicitly records an override. `apply` produces a machine-readable batch summary containing succeeded, skipped, and failed files. One corrupt input must not discard completed outputs.
@@ -260,7 +261,7 @@ Exit criterion: third-party OpenColorIO tools apply the exported transform with 
     - Acceptance: an independent LUT reader loads the file; the published corpus stays under the fixed maximum error; export refuses a LUT size that misses the threshold unless forced.
 
 16. **Publish capture, interoperability, and limitation documentation**
-    - Explain fixed exposure, chart revision selection, even lighting and detectable-reflection limits, profile validity, the normalized camera-RGB CLF and `.cube` input contract, and why general RAW-editor support requires the deferred DCP work.
+    - Explain fixed exposure, chart revision selection, even lighting and detectable-reflection limits, profile validity, the normalized camera-RGB CLF and `.cube` input contract, and the limited, untested-in-Lightroom DCP export.
     - Acceptance: a new user can capture, derive, apply, and verify a profile using only released binaries and the documentation; examples never imply that CLF or `.cube` files decode ordinary RAW or accept rendered sRGB input.
 
 ### Milestone 4: Desktop release
