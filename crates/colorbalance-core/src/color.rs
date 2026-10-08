@@ -28,7 +28,7 @@ fn column_mat_vec(m: [[f64; 3]; 3], v: [f64; 3]) -> [f64; 3] {
     ]
 }
 
-fn inverse(m: [[f64; 3]; 3]) -> [[f64; 3]; 3] {
+pub(crate) fn inverse(m: [[f64; 3]; 3]) -> [[f64; 3]; 3] {
     let determinant = m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
         - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
         + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
@@ -75,6 +75,17 @@ pub fn bradford_d50_to_d65() -> [[f64; 3]; 3] {
         [-0.0283697093, 1.0099953981, 0.0210414412],
         [0.0123140149, -0.0205076493, 1.3303659262],
     ]
+}
+
+/// Returns the Bradford D65-to-D50 adaptation matrix, the inverse of
+/// [`bradford_d50_to_d65`].
+pub fn bradford_d65_to_d50() -> [[f64; 3]; 3] {
+    inverse(bradford_d50_to_d65())
+}
+
+/// Returns the column-vector matrix taking linear sRGB to D65 XYZ.
+pub fn linear_srgb_to_xyz_matrix() -> [[f64; 3]; 3] {
+    inverse(XYZ_TO_RGB)
 }
 
 /// Adapts XYZ from D50 to D65 using Bradford.

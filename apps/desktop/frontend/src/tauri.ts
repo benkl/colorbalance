@@ -58,7 +58,7 @@ export interface BackendBridge {
   listLibrary(libraryPath: string): Promise<LibraryListingView>;
   saveToLibrary(request: SaveToLibraryRequest): Promise<LibraryEntryView>;
   cancelBatch(): Promise<void>;
-  exportProfile(profilePath: string, format: 'clf' | 'cube', outputPath: string, size?: number): Promise<string>;
+  exportProfile(profilePath: string, format: 'clf' | 'cube' | 'dcp', outputPath: string, size?: number, cameraName?: string): Promise<string>;
 }
 
 export const backend: BackendBridge = {
@@ -171,7 +171,7 @@ export const backend: BackendBridge = {
     logger.warn('IPC', 'Invoking cancel_batch');
     return invoke('cancel_batch');
   },
-  exportProfile: async (profilePath, format, outputPath, size) => {
+  exportProfile: async (profilePath, format, outputPath, size, cameraName) => {
     logger.ipc('IPC', `Invoking export_profile: .${format} -> "${outputPath}"`);
     try {
       const result = await invoke<string>('export_profile', {
@@ -179,6 +179,7 @@ export const backend: BackendBridge = {
         format,
         outputPath,
         size,
+        cameraName,
       });
       logger.success('IPC', `Exported .${format} to "${outputPath}"`);
       return result;

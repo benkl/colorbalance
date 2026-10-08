@@ -6,7 +6,7 @@ use colorbalance_core::chart::ChartRevision;
 use colorbalance_core::contract::DecodeContract;
 use colorbalance_core::decode::DecodedImage;
 use colorbalance_core::detection::{detect_chart, Detection};
-use colorbalance_core::interchange::{profile_to_clf, profile_to_cube};
+use colorbalance_core::interchange::{profile_to_clf, profile_to_cube, profile_to_dcp};
 use colorbalance_core::output::{
     encode_jpeg_rgb_u16, encode_tiff_rgb_u16_with_metadata, JpegSampling, JPEG_MAX_DIMENSION,
 };
@@ -782,7 +782,8 @@ pub fn apply_batch(
                     &export,
                 )
                 .map_err(|e| e.to_string())?;
-                write_atomically(&output, &data, export.format).map_err(|e| e.to_string())?;
+                write_atomically(&output, &data, export.format.extension())
+                    .map_err(|e| e.to_string())?;
                 let _ = metadata_tx.send(FileMetadataReport {
                     file: input.display().to_string(),
                     copied: metadata.copied,
@@ -964,7 +965,7 @@ pub(crate) fn corrected_preview_png(
 /// Write `data` next to `output` through an exclusively created temporary
 /// file, flush it to disk, then rename it into place. The temporary file is
 /// removed on failure, and only this call's own file is ever removed.
-fn write_atomically(output: &Path, data: &[u8], format: ExportFormat) -> std::io::Result<()> {
+fn write_atomically(output: &Path, data: &[u8], extension: &str) -> std::io::Result<()> {
     use std::io::Write;
 
     let directory = output
@@ -973,7 +974,7 @@ fn write_atomically(output: &Path, data: &[u8], format: ExportFormat) -> std::io
         .unwrap_or_else(|| Path::new("."));
     let mut file = tempfile::Builder::new()
         .prefix(".tmp-")
-        .suffix(&format!(".{}", format.extension()))
+        .suffix(&format!(".{extension}"))
         .tempfile_in(directory)?;
     file.write_all(data)?;
     file.as_file().sync_all()?;
@@ -1108,7 +1109,11 @@ pub fn correct_image_cached(
                 Path::new(&input_path),
                 &export.options,
             )?;
-            write_atomically(Path::new(&export.path), &data, export.options.format)?;
+            write_atomically(
+                Path::new(&export.path),
+                &data,
+                export.options.format.extension(),
+            )?;
             metadata = Some(MetadataSummary {
                 copied: read.copied,
                 skipped: read.skipped,
@@ -1148,26 +1153,45 @@ pub fn correct_image_cached(
     rendered
 }
 
-/// Write the profile as CLF or `.cube`.
+/// Write the profile as CLF, `.cube`, or a DNG Camera Profile (`dcp`).
+///
+/// `camera_name` is required for `dcp` and refused for the other formats.
 pub fn export_profile(
     profile_path: String,
     format: String,
     output_path: String,
     size: Option<usize>,
+    camera_name: Option<String>,
 ) -> Result<String, BackendError> {
     let text = fs::read_to_string(&profile_path)?;
     let profile =
         profile::from_json(&text).map_err(|error| BackendError::Message(error.to_string()))?;
-    let content = match format.as_str() {
-        "clf" => profile_to_clf(&profile),
-        "cube" => profile_to_cube(&profile, size.unwrap_or(33)),
+    if camera_name.is_some() && format != "dcp" {
+        return Err(BackendError::Message(
+            "camera name only applies to dcp export".into(),
+        ));
+    }
+    let (content, extension): (Vec<u8>, &str) = match format.as_str() {
+        "clf" => (profile_to_clf(&profile).into_bytes(), "clf"),
+        "cube" => (
+            profile_to_cube(&profile, size.unwrap_or(33)).into_bytes(),
+            "cube",
+        ),
+        "dcp" => {
+            let name = camera_name.as_deref().ok_or_else(|| {
+                BackendError::Message("a camera name is required for dcp export".into())
+            })?;
+            let bytes = profile_to_dcp(&profile, name)
+                .map_err(|error| BackendError::Message(error.to_string()))?;
+            (bytes, "dcp")
+        }
         other => {
             return Err(BackendError::Message(format!(
                 "unsupported export format: {other}"
             )))
         }
     };
-    fs::write(&output_path, content)?;
+    write_atomically(Path::new(&output_path), &content, extension)?;
     Ok(output_path)
 }
 

@@ -168,6 +168,52 @@ fn end_to_end_fixture_derive_apply_and_interchange() {
     let cube_text = fs::read_to_string(&cube_path).unwrap();
     assert!(cube_text.contains("LUT_3D_SIZE 17"));
 
+    // 6. export dcp: needs a camera name, writes the DCP magic header
+    let dcp_path = work.join("profile.dcp");
+    let missing_name = std::process::Command::new(bin)
+        .arg("export")
+        .arg(&profile_path)
+        .arg("--format")
+        .arg("dcp")
+        .arg("--output")
+        .arg(&dcp_path)
+        .output()
+        .unwrap();
+    assert!(!missing_name.status.success());
+    assert!(!dcp_path.exists());
+    assert!(String::from_utf8_lossy(&missing_name.stderr).contains("--camera-name"));
+    let dcp_out = std::process::Command::new(bin)
+        .arg("export")
+        .arg(&profile_path)
+        .arg("--format")
+        .arg("dcp")
+        .arg("--camera-name")
+        .arg("Test Camera")
+        .arg("--output")
+        .arg(&dcp_path)
+        .output()
+        .unwrap();
+    assert!(
+        dcp_out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&dcp_out.stderr)
+    );
+    let dcp = fs::read(&dcp_path).unwrap();
+    assert_eq!(&dcp[..4], b"II\x52\x43");
+    assert!(dcp.windows(12).any(|w| w == b"Test Camera\0"));
+    let wrong_flag = std::process::Command::new(bin)
+        .arg("export")
+        .arg(&profile_path)
+        .arg("--format")
+        .arg("clf")
+        .arg("--camera-name")
+        .arg("x")
+        .arg("--output")
+        .arg(work.join("x.clf"))
+        .output()
+        .unwrap();
+    assert!(!wrong_flag.status.success());
+
     let _ = fs::remove_dir_all(work);
 }
 

@@ -255,8 +255,12 @@ pub async fn export_profile(
     format: String,
     output_path: String,
     size: Option<usize>,
+    camera_name: Option<String>,
 ) -> Result<String, BackendError> {
-    background(move || commands::export_profile(profile_path, format, output_path, size)).await
+    background(move || {
+        commands::export_profile(profile_path, format, output_path, size, camera_name)
+    })
+    .await
 }
 
 /// List the calibration library, and let the webview load its preview images.

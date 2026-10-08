@@ -139,6 +139,7 @@ export const App: React.FC = () => {
   const [libraryError, setLibraryError] = useState('');
   const [librarySelectedId, setLibrarySelectedId] = useState<string | null>(null);
   const [activeLibrary, setActiveLibrary] = useState<LibraryEntryView | null>(null);
+  const [dcpNameEdit, setDcpNameEdit] = useState<{ profilePath: string; text: string } | null>(null);
   const libraryScan = useRef(0);
   const [saveOpen, setSaveOpen] = useState(false);
   const [saveLabel, setSaveLabel] = useState('');
@@ -569,6 +570,16 @@ export const App: React.FC = () => {
   });
 
   const loadedCamera = inspectResult ? { make: inspectResult.camera.make, model: inspectResult.camera.model } : null;
+  const dcpDefaultName = activeLibrary
+    ? `${activeLibrary.cameraMake} ${activeLibrary.cameraModel}`.trim()
+    : loadedCamera
+      ? `${loadedCamera.make} ${loadedCamera.model}`.trim()
+      : '';
+  const dcpCameraName = dcpNameEdit && dcpNameEdit.profilePath === exportProfile?.profilePath ? dcpNameEdit.text : dcpDefaultName;
+  // The backend refuses rendered-source profiles and is the authority. This only disables the button early.
+  const dcpBlocked = activeLibrary
+    ? activeLibrary.quickAndDirty === true
+    : inspectResult?.camera.decoder === 'colorbalance-rendered-jpeg';
 
   const viewportMessage = (title: string, body: string) => (
     <div className="flex-1 flex items-center justify-center p-8 text-center" data-testid="viewport-message">
@@ -1283,7 +1294,7 @@ export const App: React.FC = () => {
               </div>
 
               <details className="border-b border-[var(--bb-border)] pb-3 text-[10px]">
-                <summary className="cursor-pointer text-[var(--bb-smoke)]">Interchange files (.CLF / .cube)</summary>
+                <summary className="cursor-pointer text-[var(--bb-smoke)]">Interchange files (.CLF / .cube / .dcp)</summary>
                 <div className="grid grid-cols-2 gap-1.5 pt-2">
                   {(['clf', 'cube'] as const).map((format) => (
                     <button
@@ -1304,6 +1315,37 @@ export const App: React.FC = () => {
                       <Save className="w-3 h-3" /> .{format.toUpperCase()}
                     </button>
                   ))}
+                </div>
+                <div className="space-y-1.5 pt-2" data-testid="dcp-export">
+                  <label className="block text-[var(--bb-smoke)]" htmlFor="dcp-camera-name">Camera name for the DCP</label>
+                  <input
+                    id="dcp-camera-name"
+                    type="text"
+                    className="w-full bg-[var(--bb-vacuum)] border border-[var(--bb-border)] px-2.5 py-1 text-[11px] text-[var(--bb-sand)] focus:border-[var(--bb-gold)] outline-none min-w-0"
+                    value={dcpCameraName}
+                    onChange={(event) => exportProfile && setDcpNameEdit({ profilePath: exportProfile.profilePath, text: event.target.value })}
+                  />
+                  <button
+                    type="button"
+                    disabled={!exportProfile || dcpBlocked || dcpCameraName.trim().length === 0}
+                    className="ui-btn ui-btn-secondary w-full"
+                    onClick={async () => {
+                      if (!exportProfile) return;
+                      try {
+                        const output = await chooseSavePath('colorbalance.dcp', 'dcp');
+                        if (output) await backend.exportProfile(exportProfile.profilePath, 'dcp', output, undefined, dcpCameraName.trim());
+                      } catch (error: unknown) {
+                        setErrorMessage(error instanceof Error ? error.message : String(error));
+                      }
+                    }}
+                  >
+                    <Save className="w-3 h-3" /> .DCP (Lightroom / Camera Raw)
+                  </button>
+                  <p className="text-[9px] text-[var(--bb-smoke)]">
+                    {dcpBlocked
+                      ? 'This profile was measured from a rendered JPEG/PNG. A DCP needs a RAW-derived profile.'
+                      : 'RAW files only; it does nothing for JPEG or PNG. Matrix-only: no tone curve or look. The name must match the camera name Lightroom shows for your RAW files. Not yet tested in Lightroom.'}
+                  </p>
                 </div>
               </details>
 

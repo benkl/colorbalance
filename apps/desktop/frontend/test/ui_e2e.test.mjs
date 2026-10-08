@@ -380,3 +380,24 @@ test('library: save sends camelCase args and returns the entry with a preview UR
   assert.equal(typeof interaction.readStoredLibraryPath(), 'string');
   assert.doesNotThrow(() => interaction.storeLibraryPath(''));
 });
+
+test('export profile: the DCP camera name crosses IPC as cameraName', async () => {
+  const calls = [];
+  globalThis.window = {
+    __TAURI_INTERNALS__: {
+      invoke: async (cmd, args) => {
+        calls.push([cmd, args]);
+        assert.equal(cmd, 'export_profile');
+        return args.outputPath;
+      },
+      transformCallback: (fn) => fn,
+      unregisterCallback: () => undefined,
+      convertFileSrc: (path) => `asset://${path}`,
+    },
+  };
+  const tauri = await import('../src/tauri.ts');
+  const out = await tauri.backend.exportProfile('p.cbprofile.json', 'dcp', 'C:/out/x.dcp', undefined, 'Samsung Galaxy S25');
+  assert.equal(out, 'C:/out/x.dcp');
+  assert.equal(calls[0][1].format, 'dcp');
+  assert.equal(calls[0][1].cameraName, 'Samsung Galaxy S25');
+});

@@ -136,6 +136,23 @@ fn quick_and_dirty_jpeg_derive_and_apply_workflow() {
     assert_eq!(sum_json["failed"].as_array().unwrap().len(), 0);
     assert!(sum_json["warnings"].as_array().unwrap().is_empty());
 
+    // 5. A DCP is RAW-only: a rendered-image profile must be refused, no file written
+    let dcp_path = work.join("quick_dirty.dcp");
+    let dcp_out = std::process::Command::new(bin)
+        .arg("export")
+        .arg(&profile_path)
+        .arg("--format")
+        .arg("dcp")
+        .arg("--camera-name")
+        .arg("Any Camera")
+        .arg("--output")
+        .arg(&dcp_path)
+        .output()
+        .unwrap();
+    assert!(!dcp_out.status.success());
+    assert!(!dcp_path.exists());
+    assert!(String::from_utf8_lossy(&dcp_out.stderr).contains("quick-and-dirty"));
+
     let original = fs::read_to_string(&profile_path).unwrap();
     let mut profile = colorbalance_core::profile::from_json(&original).unwrap();
     profile.decode_contract.decoder_version = "older-rendered-decoder".to_owned();

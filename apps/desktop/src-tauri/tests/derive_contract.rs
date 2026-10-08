@@ -593,3 +593,84 @@ fn jpeg_export_writes_a_jpeg_and_reports_metadata() {
     assert!(error.to_string().contains("input"), "{error}");
     let _ = std::fs::remove_dir_all(work);
 }
+
+#[test]
+fn export_profile_writes_dcp_atomically_and_refuses_unsafe_requests() {
+    use colorbalance_desktop::commands::export_profile;
+
+    let work = temp_dir("dcp-export");
+    let scene = ChartScene::default();
+    let reference = work.join("reference.dng");
+    render_chart_dng(&reference, &scene).unwrap();
+    let profile_path = work.join("p.cbprofile.json");
+    derive_profile(
+        reference.to_string_lossy().into_owned(),
+        "classic-before-nov-2014".to_owned(),
+        profile_path.to_string_lossy().into_owned(),
+        None,
+        Some(serde_json::from_value(quad_payload(&scene)).unwrap()),
+        &no_progress,
+    )
+    .expect("derive succeeds on a clean fixture");
+    let profile = profile_path.to_string_lossy().into_owned();
+    let out = work.join("camera.dcp");
+
+    let written = export_profile(
+        profile.clone(),
+        "dcp".into(),
+        out.to_string_lossy().into_owned(),
+        None,
+        Some("Test Camera".into()),
+    )
+    .expect("dcp export succeeds");
+    assert_eq!(written, out.to_string_lossy());
+    let bytes = std::fs::read(&out).unwrap();
+    assert_eq!(&bytes[..4], b"II\x52\x43", "DCP magic");
+    assert_eq!(leftover_temp_files(&work), 0);
+
+    // A missing camera name, or a name on a non-DCP format, is refused.
+    let other = work.join("never.dcp");
+    let error = export_profile(
+        profile.clone(),
+        "dcp".into(),
+        other.to_string_lossy().into_owned(),
+        None,
+        None,
+    )
+    .expect_err("camera name required");
+    assert!(error.to_string().contains("camera name"), "{error}");
+    let error = export_profile(
+        profile.clone(),
+        "clf".into(),
+        work.join("never.clf").to_string_lossy().into_owned(),
+        None,
+        Some("x".into()),
+    )
+    .expect_err("camera name only for dcp");
+    assert!(error.to_string().contains("camera name"), "{error}");
+
+    // A quick-and-dirty profile cannot become a RAW camera profile.
+    let mut quick =
+        colorbalance_core::profile::from_json(&std::fs::read_to_string(&profile_path).unwrap())
+            .unwrap();
+    quick
+        .quality
+        .as_mut()
+        .expect("derive records quality")
+        .quick_and_dirty = true;
+    quick.digest = colorbalance_core::profile::digest(&quick);
+    let rendered = work.join("rendered.cbprofile.json");
+    std::fs::write(&rendered, colorbalance_core::profile::to_json(&quick)).unwrap();
+    let error = export_profile(
+        rendered.to_string_lossy().into_owned(),
+        "dcp".into(),
+        other.to_string_lossy().into_owned(),
+        None,
+        Some("Test Camera".into()),
+    )
+    .expect_err("quick-and-dirty refused");
+    assert!(error.to_string().contains("quick-and-dirty"), "{error}");
+    assert!(!other.exists());
+    assert_eq!(leftover_temp_files(&work), 0);
+    let _ = std::fs::remove_dir_all(work);
+}

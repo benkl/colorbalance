@@ -144,7 +144,7 @@ CLF does not reproduce RAW decoding. This export accepts only normalized linear 
 ### Compatibility exports
 
 - Export a 33-point `.cube` 3D LUT only for hosts that can supply the same normalized linear camera RGB. The format does not carry enough metadata to make it safe for ordinary rendered images or a raw editor. Measure the baked LUT against the exact transform and warn if its maximum error exceeds the published threshold.
-- Treat DNG Camera Profile, `.dcp`, as a later feature. DCP is the right format for Adobe Camera Raw and Lightroom RAW workflows, but it requires camera-native color matrices, illuminant handling, and DNG-specific semantics. Relabeling the initial working-space transform as DCP would be wrong.
+- DNG Camera Profile, `.dcp`, is implemented as a RAW-only, matrix-only, single-illuminant export (D28). Relabeling the working-space transform as a full Adobe profile would be wrong, so tone curves, look tables and dual-illuminant data stay out. The mapping and phases are in `LIGHTROOM_EXPORT_PLAN.md`; Lightroom compatibility is untested.
 - Do not use ICC as the project format. Embed a standard output ICC profile in rendered files. Input ICC profiles are possible, but application support and camera-RAW semantics do not match this workflow as cleanly as DCP.
 - An OCIO configuration is optional packaging around one or more CLF transforms. It is useful for VFX pipelines but too large as the profile itself.
 
@@ -313,8 +313,8 @@ Exit criterion: the browser and hosted execution modes are measured against the 
 
 ## Deferred work
 
-- DCP generation for Lightroom and Adobe Camera Raw;
-- dual-illuminant camera profiles;
+- DCP look tables, tone curves and dual-illuminant profiles;
+- DCP round trip in Lightroom (plan phase 4);
 - ColorChecker Digital SG, Passport Video, and third-party chart definitions;
 - rendered JPEG and TIFF reference fitting;
 - lens shading and spatial illumination correction;

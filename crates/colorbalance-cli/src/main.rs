@@ -10,7 +10,7 @@ use colorbalance_core::chart::ChartRevision;
 use colorbalance_core::contract::DecodeContract;
 use colorbalance_core::dataset;
 use colorbalance_core::decode::{CameraIdentity, DecodedImage};
-use colorbalance_core::interchange::{profile_to_clf, profile_to_cube};
+use colorbalance_core::interchange::{profile_to_clf, profile_to_cube, profile_to_dcp};
 use colorbalance_core::output::{
     encode_jpeg_rgb_u16, encode_tiff_rgb_u16_with_metadata, JpegSampling,
 };
@@ -182,7 +182,8 @@ impl JpegSubsampling {
 struct ExportArgs {
     /// Profile JSON file path
     profile: PathBuf,
-    /// Export interchange format
+    /// Export interchange format: clf, cube, or dcp (DNG Camera Profile for
+    /// Lightroom and other DCP readers; RAW files only)
     #[arg(long, value_enum)]
     format: ExportFormatArg,
     /// Output destination path
@@ -191,6 +192,11 @@ struct ExportArgs {
     /// 3D LUT size (only used for .cube export, default: 33)
     #[arg(long, default_value_t = 33)]
     size: usize,
+    /// Camera name written to the DCP (required for dcp). It must match the
+    /// camera name Lightroom shows for your RAW files, or the profile will not
+    /// be listed.
+    #[arg(long)]
+    camera_name: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -216,6 +222,8 @@ enum ExportFormatArg {
     Clf,
     #[value(name = "cube")]
     Cube,
+    #[value(name = "dcp")]
+    Dcp,
 }
 
 fn parse_quad(s: &str) -> Result<ChartQuad, String> {
@@ -894,10 +902,19 @@ fn execute_export(args: ExportArgs) -> Result<(), String> {
     let prof =
         profile::from_json(&prof_text).map_err(|e| format!("profile validation failed: {e}"))?;
 
-    let content = match args.format {
-        ExportFormatArg::Clf => profile_to_clf(&prof),
-        ExportFormatArg::Cube => profile_to_cube(&prof, args.size),
+    let content: Vec<u8> = match args.format {
+        ExportFormatArg::Clf => profile_to_clf(&prof).into_bytes(),
+        ExportFormatArg::Cube => profile_to_cube(&prof, args.size).into_bytes(),
+        ExportFormatArg::Dcp => {
+            let name = args.camera_name.as_deref().ok_or(
+                "--camera-name is required for dcp; use the camera name Lightroom shows for your RAW files",
+            )?;
+            profile_to_dcp(&prof, name).map_err(|e| e.to_string())?
+        }
     };
+    if args.camera_name.is_some() && !matches!(args.format, ExportFormatArg::Dcp) {
+        return Err("--camera-name only applies to --format dcp".into());
+    }
 
     if let Some(parent) = args.output.parent() {
         if !parent.as_os_str().is_empty() {

@@ -38,16 +38,23 @@ $$\text{input} \in [0.0, 1.0]^3, \quad \text{linear light, camera raw colorimetr
 ### Important Contract Rules
 
 1. **Not for camera-developed images**: The transform must **not** be applied directly to finished, tone-curved, or sRGB-encoded JPEG/TIFF files. Applying the transform to already-gamma-encoded values produces severe over-saturation and crushed shadows.
-2. **Not for RAW editors without contract reproduction**: Exported CLF and `.cube` files do **not** reproduce RAW decoding. They require the host to provide the exact linear camera-RGB arrays defined by the profile's decode contract.
+2. **Not for RAW editors without contract reproduction**: Exported CLF and `.cube` files do **not** reproduce RAW decoding. They require the host to provide the exact linear camera-RGB arrays defined by the profile's decode contract. The `.dcp` export is the RAW-editor route; see section 4.
 3. **Rendered-source exception**: When the reference is a camera-processed JPEG or PNG, sRGB non-linearities are inverted to approximate linear scene values. The CLI selects this with `--quick-and-dirty`. The desktop app detects it from the file. The profile and report flag the result as approximate.
 
-## 4. Why DNG Camera Profile (DCP) is Deferred
+## 4. DNG Camera Profile (DCP) export
 
-Adobe Camera Raw and Lightroom require camera profiles in the `.dcp` format:
+`colorbalance export profile.cbprofile.json --format dcp --camera-name "<name>" -o camera.dcp` writes a `.dcp` for Lightroom and Camera Raw. The desktop app has the same option under Interchange files on EXPORT.
 
-- DCP requires camera-native forward matrices calibrated to two standard illuminants (typically Standard Illuminant A and D65), interpolating between them based on shot white balance.
-- DCP handles illuminant-specific hue/saturation maps (`ProfileHueSatMap`) and tone curves in Adobe's proprietary color engine.
-- ColorBalance's current model derives an exact single-illuminant matrix for a specific setup. Re-encoding this as a dual-illuminant DCP would misrepresent the single-illuminant derivation. DCP generation is tracked as a future feature once dual-illuminant capture calibration is supported.
+What it is and is not:
+
+- **RAW files only.** A DCP maps camera-native RAW values. It does nothing for JPEG or PNG, and profiles derived from a rendered image (quick-and-dirty) are refused.
+- **Matrix only.** One illuminant (D50), no tone curve, no look table. It carries the fitted exposure scalar, channel scale and 3x3 matrix, and nothing else.
+- **Camera name.** `--camera-name` is required and sets `UniqueCameraModel`. It should equal the camera name Lightroom shows for your RAW files. ColorBalance cannot know that string, so there is no default. If it differs, Lightroom may not offer the profile [INFERENCE].
+- **White balance.** The DCP matches the fit exactly at one white balance. Elsewhere it drifts. On the Samsung RAW test profile, CIEDE2000 over 24 patches was mean 0.50, max 1.33 with a white balance set by eyedropper on a gray patch, and mean 0.95, max 2.75 with the profile's own channel scale. Use the eyedropper on a gray patch.
+- **Decode.** The fit was measured on this tool's decode (rawler plus AHD, unity white balance). Lightroom decodes the RAW itself, so results are approximate until compared.
+- **Not tested in Lightroom.** The file parses with an independent reader (`research/read_dcp.py`). Nobody has loaded it in Lightroom yet. See `LIGHTROOM_EXPORT_PLAN.md` for the open questions.
+
+Install it with File > Import Profiles & Presets in Lightroom, or place it in Camera Raw's `CameraProfiles` folder.
 
 ## 5. Verified CLI Command Examples
 
@@ -98,6 +105,9 @@ colorbalance export studio.cbprofile.json --format clf -o studio.clf
 
 # Export to 3D LUT (.cube) with custom grid size
 colorbalance export studio.cbprofile.json --format cube --size 33 -o studio.cube
+
+# Export a DNG Camera Profile for Lightroom (RAW only, matrix only)
+colorbalance export studio.cbprofile.json --format dcp --camera-name "Samsung Galaxy S25" -o studio.dcp
 ```
 
 ### Output color spaces
